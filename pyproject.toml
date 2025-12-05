@@ -1,0 +1,20 @@
+[project]
+name = "pdfalive"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "click>=8.3.1",
+    "pymupdf>=1.26.6",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.0",
+    "pytest>=9.0.1",
+    "ruff>=0.14.8",
+]
+
+
+[project.scripts]
+generate-toc = "pdfalive.cli:generate_toc"
+
