@@ -35,14 +35,14 @@ jobs:
       uses: astral-sh/ruff-action@v3
       with:
         version: "latest"
-        src: "./src"
+        src: "./pdfalive"
     - name: Run formatting checks (lint runs as part of ruff-action above)
       run: |
-        uv run ruff check src
-        uv run ruff format src
+        uv run ruff check pdfalive
+        uv run ruff format pdfalive
     - name: Run mypy
       run: |
         uv pip install types-pyyaml
-        uv run mypy src
+        uv run mypy pdfalive
     - name: Run tests
       run: uv run pytest
