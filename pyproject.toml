@@ -80,3 +80,10 @@ no-lines-before = ["standard-library"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # Ignore SWIG-related deprecation warnings from PyMuPDF (Python 3.13 compatibility issue)
+    "ignore:builtin type Swig.*:DeprecationWarning",
+    "ignore:builtin type swigvarlink.*:DeprecationWarning",
+]

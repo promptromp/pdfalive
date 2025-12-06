@@ -7,8 +7,8 @@ from langchain.chat_models.base import BaseChatModel
 from langchain.messages import HumanMessage, SystemMessage
 from tqdm import tqdm
 
-from pdfalive.models.prompts import TOC_GENERATOR_SYSTEM_PROMPT
-from pdfalive.models.toc_entry import TOC
+from pdfalive.models.toc import TOC, TOCFeature
+from pdfalive.prompts import TOC_GENERATOR_SYSTEM_PROMPT
 
 
 class TOCGenerator:
@@ -72,12 +72,12 @@ class TOCGenerator:
 
                         for span in line["spans"]:
                             features[-1][-1].append(
-                                (
-                                    page_number,
-                                    span["font"],
-                                    span["size"],
-                                    len(span["text"]),
-                                    span["text"][:text_snippet_length],
+                                TOCFeature(
+                                    page_number=page_number,
+                                    font_name=span["font"],
+                                    font_size=span["size"],
+                                    text_length=len(span["text"]),
+                                    text_snippet=span["text"][:text_snippet_length],
                                 )
                             )
 
@@ -88,6 +88,7 @@ class TOCGenerator:
 
     def _extract_toc(self, features: list, max_depth=2) -> TOC:
         """Infer TOC entries from extracted features using the LLM."""
+
         messages = [
             SystemMessage(content=TOC_GENERATOR_SYSTEM_PROMPT),
             HumanMessage(
@@ -96,7 +97,7 @@ class TOCGenerator:
                 Limit the TOC to a maximum depth of {max_depth} levels.
                 \n\n
                 ------------------------
-                {features}
+                {str(features)}
 
              """
             ),
