@@ -13,7 +13,7 @@ pdfalive is a Python library and CLI tool that uses LLMs to enhance PDF files. C
 uv sync
 
 # Run the CLI
-generate-toc examples/example.pdf output.pdf --force
+uv run pdfalive generate-toc examples/example.pdf output.pdf --force
 
 # Linting
 uv run ruff check .

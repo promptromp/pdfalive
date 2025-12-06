@@ -7,7 +7,13 @@ from langchain.chat_models import init_chat_model
 from pdfalive.processors.toc_generator import TOCGenerator
 
 
-@click.command()
+@click.group()
+def cli() -> None:
+    """pdfalive - Bring PDF files alive with the magic of LLMs."""
+    pass
+
+
+@cli.command("generate-toc")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.argument("output_file", type=click.Path())
 @click.option("--model-identifier", type=str, default="claude-sonnet-4-5-20250929", help="LLM model to use.")
