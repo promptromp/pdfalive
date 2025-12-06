@@ -40,7 +40,8 @@ DEFAULT_OVERLAP_BLOCKS = 5
 PROMPT_OVERHEAD_TOKENS = 3000
 
 # Delay between LLM calls (in seconds) to avoid rate limiting
-DEFAULT_REQUEST_DELAY_SECONDS = 2.0
+# Default is 10s to stay under typical rate limits (e.g., 30k tokens/minute)
+DEFAULT_REQUEST_DELAY_SECONDS = 10.0
 
 # Maximum retry attempts for rate-limited requests
 MAX_RETRY_ATTEMPTS = 5
@@ -53,12 +54,18 @@ class TOCGenerator:
         self.doc = doc
         self.llm = llm
 
-    def run(self, output_file: str, force: bool = False) -> TokenUsage:
+    def run(
+        self,
+        output_file: str,
+        force: bool = False,
+        request_delay: float = DEFAULT_REQUEST_DELAY_SECONDS,
+    ) -> TokenUsage:
         """Generate the table of contents.
 
         Args:
             output_file: Path to save the modified PDF with TOC.
             force: If True, overwrite existing TOC. Otherwise raise if TOC exists.
+            request_delay: Delay in seconds between LLM calls to avoid rate limiting.
 
         Returns:
             TokenUsage statistics from the LLM calls.
@@ -71,7 +78,7 @@ class TOCGenerator:
             raise ValueError("The document already has a Table of Contents. Use `--force` to overwrite.")
 
         features = self._extract_features(self.doc)
-        toc, usage = self._extract_toc(features)
+        toc, usage = self._extract_toc(features, request_delay=request_delay)
 
         self.doc.set_toc(toc.to_list())
         self.doc.save(output_file)
@@ -138,6 +145,7 @@ class TOCGenerator:
         features: list,
         max_depth: int = 2,
         max_tokens_per_batch: int = DEFAULT_MAX_TOKENS_PER_BATCH,
+        request_delay: float = DEFAULT_REQUEST_DELAY_SECONDS,
     ) -> tuple[TOC, TokenUsage]:
         """Infer TOC entries from extracted features using the LLM.
 
@@ -148,6 +156,7 @@ class TOCGenerator:
             features: Nested list of TOCFeature objects extracted from the document.
             max_depth: Maximum depth level for TOC entries.
             max_tokens_per_batch: Maximum tokens per LLM call (for pagination).
+            request_delay: Delay in seconds between LLM calls to avoid rate limiting.
 
         Returns:
             A tuple of (TOC, TokenUsage) with the generated TOC and usage statistics.
@@ -156,6 +165,7 @@ class TOCGenerator:
             features,
             max_depth=max_depth,
             max_tokens_per_batch=max_tokens_per_batch,
+            request_delay=request_delay,
         )
 
     def _batch_features(

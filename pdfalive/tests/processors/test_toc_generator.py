@@ -294,7 +294,7 @@ class TestTOCGeneratorPagination:
         )
         mock_llm.with_structured_output.return_value = mock_structured_llm
 
-        toc, usage = generator._extract_toc_paginated(features, max_depth=2)
+        toc, usage = generator._extract_toc_paginated(features, max_depth=2, request_delay=0)
 
         assert isinstance(usage, TokenUsage)
         assert usage.llm_calls == 1
