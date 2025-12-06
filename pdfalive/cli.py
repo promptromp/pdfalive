@@ -11,7 +11,7 @@ from pdfalive.processors.toc_generator import TOCGenerator
 console = Console()
 
 
-@click.group()
+@click.group(context_settings=dict(show_default=True))
 def cli() -> None:
     """pdfalive - Bring PDF files alive with the magic of LLMs."""
     pass
