@@ -11,15 +11,28 @@
 A Python library and set of CLI tools to bring PDF files alive with the magic of LLMs.
 
 
-## CLI
+## Usage
+
+To use the CLIs described below, you can install the python package (`pip install pdfalive`), or run the cli directly using [uvx](https://docs.astral.sh/uv/guides/tools/):
+
+	uvx pdfalive generate-toc input.pdf output.pdf
+
+More detailed examples of the CLI sub-commands are provided below.
+You can also use `--help` on the main command-line and any of the sub-commands to get an idea of the different options supported.
 
 ### generate-toc
 
-Automatically generate clickable Table of Contents (e.g. using PDF bookmarks) for a PDF file.
+Automatically generate clickable Table of Contents (e.g. using PDF bookmarks) for a PDF file by extracting features from the PDF and then calling an LLM to infer the pages and section names from these.
 
 Example usage:
 
-	uv run pdfalive generate-toc examples/example.pdf output.pdf --force
+	pdfalive generate-toc input.pdf output.pdf
+
+By default we use the latest Anthropic Claude Sonnet available, but you can change this by setting the model as part of invocation:
+
+	pdfalive generate-toc --model-identifier 'claude-haiku-4-5' input.pdf output.pdf
+
+Note that for using Anthropic models you'd want to set your api key via the environment variable `ANTHROPIC_API_KEY`. Similar mechanisms apply to OpenAI (`OPENAI_API_KEY`) and other vendors.
 
 
 ## Development
@@ -27,7 +40,6 @@ Example usage:
 We use `uv` to manage the library. To install locally can run e.g. with:
 
 	uv sync
+	uv pip install -e .
 
-and can then execute the CLI commands in the created local env, e.g.:
-
-	uv run pdfalive generate-toc examples/example.pdf output.pdf --force
+We use `ruff` for formatting and linting, `mypy` for static type checking, and `pytest` for running unit-tests. We also use [pre-commit](https://pre-commit.com/) for ensuring high-quality commits.
