@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pdfalive.models.toc_entry import TOC, TOCEntry
+from pdfalive.models.toc import TOC, TOCEntry
 from pdfalive.processors.toc_generator import TOCGenerator
 
 
@@ -96,11 +96,11 @@ class TestTOCGenerator:
         features = generator._extract_features(mock_doc)
 
         assert len(features) > 0
-        # Check that features contain expected structure (page_number, font, size, length, snippet)
+        # Check that features contain expected TOCFeature structure
         first_span = features[0][0][0]
-        assert first_span[0] == 1  # page number
-        assert first_span[1] == "Times-Bold"  # font
-        assert first_span[2] == 16  # size
+        assert first_span.page_number == 1
+        assert first_span.font_name == "Times-Bold"
+        assert first_span.font_size == 16
 
     def test_run_success(self, mock_doc, mock_llm, sample_toc_response, tmp_path):
         """Test successful TOC generation run."""

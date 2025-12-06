@@ -2,7 +2,7 @@
 
 import pytest
 
-from pdfalive.models.toc_entry import TOC, TOCEntry
+from pdfalive.models.toc import TOC, TOCEntry
 
 
 class TestTOCEntry:

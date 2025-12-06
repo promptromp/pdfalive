@@ -34,3 +34,24 @@ class TOC(BaseModel):
     def to_list(self) -> list:
         """Convert TOC to list format compatible with PyMuPDF `set_toc()`."""
         return [entry.to_list() for entry in self.entries]
+
+
+class TOCFeature(BaseModel):
+    """Feature used for TOC generation.
+
+    These features are extracted from the PDF document and used to identify potential TOC entries.
+
+    """
+
+    page_number: int = Field(description="Page number of the feature (1-indexed)")
+    font_name: str = Field(description="Font name of the text span")
+    font_size: float = Field(description="Font size of the text span")
+    text_length: int = Field(description="Length of the text span")
+    text_snippet: str = Field(description="Snippet of the text span (truncated)")
+
+    def __str__(self) -> str:
+        # Nb. This format is used in the LLM prompt and so is kept compact. Prompt instructions include details.
+        return f"({self.page_number}, '{self.font_name}', {self.font_size}, {self.text_length}, '{self.text_snippet}')"
+
+    def __repr__(self) -> str:
+        return self.__str__()
