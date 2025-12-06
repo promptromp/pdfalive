@@ -1,0 +1,36 @@
+"""Table of Contents entry data model."""
+
+from pydantic import BaseModel, Field
+
+
+class TOCEntry(BaseModel):
+    """A single entry in a Table of Contents."""
+
+    title: str = Field(description="Title of the TOC entry")
+    page_number: int = Field(description="Page number of the TOC entry (1-indexed)")
+    level: int = Field(description="Hierarchical level of the TOC entry")
+    confidence: float = Field(description="Confidence score for the TOC entry (0.0 to 1.0)")
+
+    def __str__(self) -> str:
+        return f"TOCEntry(level={self.level}, title='{self.title}', page_number={self.page_number}, confidence={self.confidence})"  # noqa: E501
+
+    def to_list(self) -> list:
+        """Convert TOCEntry to list format compatible with PyMuPDF `set_toc()`."""
+        return [self.level, self.title, self.page_number]
+
+    @classmethod
+    def from_list(cls, toc_list: list) -> "TOCEntry":
+        """Create TOCEntry from list format returned by PyMuPDF `get_toc()`."""
+        level, title, page_number = toc_list
+
+        return cls(title=title, page_number=page_number, level=level, confidence=1.0)
+
+
+class TOC(BaseModel):
+    """Table of Contents model."""
+
+    entries: list[TOCEntry]
+
+    def to_list(self) -> list:
+        """Convert TOC to list format compatible with PyMuPDF `set_toc()`."""
+        return [entry.to_list() for entry in self.entries]
