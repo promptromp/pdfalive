@@ -1,5 +1,7 @@
 """Table of Contents generator."""
 
+from typing import cast
+
 import pymupdf
 from langchain.chat_models.base import BaseChatModel
 from langchain.messages import HumanMessage, SystemMessage
@@ -102,6 +104,7 @@ class TOCGenerator:
             ),
         ]
         model = self.llm.with_structured_output(TOC)
+
         response = model.invoke(messages)
 
-        return response
+        return cast(TOC, response)

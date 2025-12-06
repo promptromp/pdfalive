@@ -25,6 +25,9 @@ dev = [
 [project.scripts]
 generate-toc = "pdfalive.cli:generate_toc"
 
+[tool.mypy]
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 120
 target-version = "py313"
