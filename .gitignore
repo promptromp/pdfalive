@@ -220,7 +220,3 @@ __marimo__/
 
 # VSCode
 .vscode/
-
-# TensorBoard / datasets
-examples/logs
-examples/MNIST
