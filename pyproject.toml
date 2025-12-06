@@ -66,7 +66,6 @@ select = [
     "I",
     # Pylint (Convention)
     "PLC",
-    # "PLC0415",  # pylint: import-outside-top-level (import should be at the top-level of a file)
 ]
 
 [tool.ruff.lint.mccabe]
@@ -74,7 +73,7 @@ max-complexity = 15
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
-known-first-party = ["deepaudio"]
+known-first-party = ["pdfalive"]
 lines-after-imports = 2
 no-lines-before = ["standard-library"]
 
