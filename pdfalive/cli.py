@@ -3,8 +3,12 @@
 import click
 import pymupdf
 from langchain.chat_models import init_chat_model
+from rich.console import Console
 
 from pdfalive.processors.toc_generator import TOCGenerator
+
+
+console = Console()
 
 
 @click.group()
@@ -20,7 +24,10 @@ def cli() -> None:
 @click.option("--force", is_flag=True, default=False, help="Force overwrite existing TOC if present.")
 def generate_toc(input_file: str, output_file: str, model_identifier: str, force: bool) -> None:
     """Generate a table of contents for a PDF file."""
-    click.echo(f"Generating TOC for {input_file} using model {model_identifier}...")
+    console.print(
+        f"Generating TOC for [bold cyan]{input_file}[/bold cyan] "
+        f"using model [bold magenta]{model_identifier}[/bold magenta]..."
+    )
 
     doc = pymupdf.open(input_file)
     llm = init_chat_model(model=model_identifier)
@@ -28,4 +35,4 @@ def generate_toc(input_file: str, output_file: str, model_identifier: str, force
 
     processor.run(output_file=output_file, force=force)
 
-    click.echo(f"All done. Saved modified PDF to {output_file}.")
+    console.print(f"[bold green]All done.[/bold green] Saved modified PDF to [bold cyan]{output_file}[/bold cyan].")

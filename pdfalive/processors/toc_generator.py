@@ -53,9 +53,7 @@ class TOCGenerator:
         # hierarchical structure of features detected in the page for (blocks, lines, spans)
         features: list[list] = []
 
-        for ix, page in enumerate(
-            tqdm(self.doc, desc="Processing pages for TOC generation", total=self.doc.page_count)
-        ):
+        for ix, page in enumerate(tqdm(self.doc, desc="Processing pages...", total=self.doc.page_count)):
             page_number = ix + 1  # 1-indexed
             page_dict = page.get_text("dict")
 

@@ -48,9 +48,10 @@ Example output:
 ]
 
 Imporant instructions:
-- Documents (such as books) often include a table of contents in the beginning. While this technically counts as a TOC, DO NOT include entries from an existing TOC in your output.
-  We're only interested in finding the pages corresponding to the actual chapters / sections themselves, not their entries in the document's printed Table of Contents.
+- Documents (such as books) often include a table of contents in the first few pages. While this technically counts as a TOC, DO NOT parse individual line items from a TOC directly in your output.
+  We're only interested in finding the *pages corresponding to the actual chapters / sections themselves*, not their entries in the document's printed Table of Contents!
   A sanity check for this would be that you shouldn't normally mark multiple table of contents items at level 1 coming from the same page!
-- Do include an entry for the Table of Contents itself if it exists in the document, as well as for preamble such as Preface, Introduction, Acknowledgements, etc.
+- *Do* include an entry for the Table of Contents itself if it exists in the document, as well as for preamble such as Preface, Introduction, Acknowledgements, etc.
+- *Do* use any existing table of contents in the document to help guide your decisions about what constitutes a chapter / section heading.
 
 """
