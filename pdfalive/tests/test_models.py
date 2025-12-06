@@ -75,3 +75,112 @@ class TestTOC:
         toc = TOC(entries=[])
 
         assert toc.to_list() == []
+
+    def test_merge_non_overlapping(self):
+        """Test merging two TOCs with no overlapping entries."""
+        toc1 = TOC(
+            entries=[
+                TOCEntry(title="Chapter 1", page_number=1, level=1, confidence=0.9),
+                TOCEntry(title="Chapter 2", page_number=10, level=1, confidence=0.85),
+            ]
+        )
+        toc2 = TOC(
+            entries=[
+                TOCEntry(title="Chapter 3", page_number=20, level=1, confidence=0.9),
+                TOCEntry(title="Chapter 4", page_number=30, level=1, confidence=0.95),
+            ]
+        )
+
+        merged = toc1.merge(toc2)
+
+        assert len(merged.entries) == 4
+        assert merged.entries[0].title == "Chapter 1"
+        assert merged.entries[1].title == "Chapter 2"
+        assert merged.entries[2].title == "Chapter 3"
+        assert merged.entries[3].title == "Chapter 4"
+
+    def test_merge_with_duplicates_prefers_earlier(self):
+        """Test that merging prefers entries from the first TOC when duplicates exist."""
+        toc1 = TOC(
+            entries=[
+                TOCEntry(title="Chapter 1", page_number=1, level=1, confidence=0.9),
+                TOCEntry(title="Overlapping Chapter", page_number=10, level=1, confidence=0.85),
+            ]
+        )
+        toc2 = TOC(
+            entries=[
+                TOCEntry(title="Overlapping Chapter", page_number=10, level=1, confidence=0.95),
+                TOCEntry(title="Chapter 3", page_number=20, level=1, confidence=0.9),
+            ]
+        )
+
+        merged = toc1.merge(toc2)
+
+        assert len(merged.entries) == 3
+        # The overlapping entry should have confidence from toc1 (0.85)
+        overlapping = next(e for e in merged.entries if e.title == "Overlapping Chapter")
+        assert overlapping.confidence == 0.85
+
+    def test_merge_sorts_by_page_number(self):
+        """Test that merged entries are sorted by page number."""
+        toc1 = TOC(
+            entries=[
+                TOCEntry(title="Chapter 2", page_number=10, level=1, confidence=0.9),
+            ]
+        )
+        toc2 = TOC(
+            entries=[
+                TOCEntry(title="Chapter 1", page_number=1, level=1, confidence=0.9),
+                TOCEntry(title="Chapter 3", page_number=20, level=1, confidence=0.9),
+            ]
+        )
+
+        merged = toc1.merge(toc2)
+
+        assert merged.entries[0].page_number == 1
+        assert merged.entries[1].page_number == 10
+        assert merged.entries[2].page_number == 20
+
+    def test_merge_empty_tocs(self):
+        """Test merging empty TOCs."""
+        toc1 = TOC(entries=[])
+        toc2 = TOC(entries=[])
+
+        merged = toc1.merge(toc2)
+
+        assert len(merged.entries) == 0
+
+    def test_merge_into_empty_toc(self):
+        """Test merging into an empty TOC."""
+        toc1 = TOC(entries=[])
+        toc2 = TOC(
+            entries=[
+                TOCEntry(title="Chapter 1", page_number=1, level=1, confidence=0.9),
+            ]
+        )
+
+        merged = toc1.merge(toc2)
+
+        assert len(merged.entries) == 1
+        assert merged.entries[0].title == "Chapter 1"
+
+    def test_merge_with_different_levels_same_page(self):
+        """Test merging entries with different levels on the same page."""
+        toc1 = TOC(
+            entries=[
+                TOCEntry(title="Chapter 1", page_number=1, level=1, confidence=0.9),
+            ]
+        )
+        toc2 = TOC(
+            entries=[
+                TOCEntry(title="Section 1.1", page_number=1, level=2, confidence=0.85),
+            ]
+        )
+
+        merged = toc1.merge(toc2)
+
+        # Both should be kept since they have different titles
+        assert len(merged.entries) == 2
+        # Sorted by page_number, then level
+        assert merged.entries[0].level == 1
+        assert merged.entries[1].level == 2

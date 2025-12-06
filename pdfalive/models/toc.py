@@ -35,6 +35,38 @@ class TOC(BaseModel):
         """Convert TOC to list format compatible with PyMuPDF `set_toc()`."""
         return [entry.to_list() for entry in self.entries]
 
+    def merge(self, other: "TOC") -> "TOC":
+        """Merge another TOC into this one, handling duplicates.
+
+        When entries have the same page_number and title, the entry from `self`
+        (the earlier batch) is preferred. Entries are sorted by page_number
+        after merging.
+
+        Args:
+            other: Another TOC to merge with this one.
+
+        Returns:
+            A new TOC containing entries from both, with duplicates removed.
+        """
+        # Use (page_number, title) as key for deduplication
+        # Prefer entries from self (earlier batch)
+        seen: dict[tuple[int, str], TOCEntry] = {}
+
+        for entry in self.entries:
+            key = (entry.page_number, entry.title)
+            if key not in seen:
+                seen[key] = entry
+
+        for entry in other.entries:
+            key = (entry.page_number, entry.title)
+            if key not in seen:
+                seen[key] = entry
+
+        # Sort by page_number, then by level (for stable ordering)
+        merged_entries = sorted(seen.values(), key=lambda e: (e.page_number, e.level))
+
+        return TOC(entries=merged_entries)
+
 
 class TOCFeature(BaseModel):
     """Feature used for TOC generation.
