@@ -21,7 +21,6 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
     "click>=8.3.1",
     "langchain>=1.1.2",
-    "langchain-anthropic>=1.2.0",
     "pydantic>=2.12.5",
     "pymupdf>=1.26.6",
     "tenacity>=9.1.0",
@@ -29,6 +28,11 @@ dependencies = [
     "rich>=14.0.0",
 ]
 dynamic = ["version"]
+
+[project.optional-dependencies]
+anthropic = ["langchain-anthropic>=1.2.0"]
+openai = ["langchain-openai>=0.3.0"]
+ollama = ["ollama", "langchain-ollama>=0.3.0"]
 
 [dependency-groups]
 dev = [
@@ -39,6 +43,7 @@ dev = [
     "pytest-cov>=7.0.0",
     "ruff>=0.14.8",
 ]
+
 
 
 [project.scripts]

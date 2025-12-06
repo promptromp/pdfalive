@@ -40,11 +40,14 @@ DEFAULT_OVERLAP_BLOCKS = 5
 PROMPT_OVERHEAD_TOKENS = 3000
 
 # Delay between LLM calls (in seconds) to avoid rate limiting
-# Default is 10s to stay under typical rate limits (e.g., 30k tokens/minute)
+# Default is 10s to stay under typical rate limits (e.g., 30k input tokens/minute)
 DEFAULT_REQUEST_DELAY_SECONDS = 10.0
 
-# Maximum retry attempts for rate-limited requests
+# Retry configuration for rate-limited requests
 MAX_RETRY_ATTEMPTS = 5
+RETRY_MULTIPLIER = 2  # Exponential backoff multiplier
+RETRY_MIN_WAIT_SECONDS = 10  # Minimum wait time between retries
+RETRY_MAX_WAIT_SECONDS = 120  # Maximum wait time between retries
 
 
 class TOCGenerator:
@@ -238,7 +241,11 @@ class TOCGenerator:
         @retry(
             retry=retry_if_exception_type(Exception),
             stop=stop_after_attempt(MAX_RETRY_ATTEMPTS),
-            wait=wait_exponential(multiplier=2, min=4, max=120),
+            wait=wait_exponential(
+                multiplier=RETRY_MULTIPLIER,
+                min=RETRY_MIN_WAIT_SECONDS,
+                max=RETRY_MAX_WAIT_SECONDS,
+            ),
             before_sleep=_log_retry,
             reraise=True,
         )
