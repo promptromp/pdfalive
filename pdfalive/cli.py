@@ -7,7 +7,11 @@ from rich.console import Console
 
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
-from pdfalive.processors.toc_generator import DEFAULT_REQUEST_DELAY_SECONDS, TOCGenerator
+from pdfalive.processors.toc_generator import (
+    DEFAULT_REQUEST_DELAY_SECONDS,
+    TOCGenerator,
+    apply_toc_to_document,
+)
 
 
 console = Console()
@@ -48,6 +52,12 @@ def cli() -> None:
     default=300,
     help="DPI resolution for OCR processing.",
 )
+@click.option(
+    "--no-ocr-output",
+    is_flag=True,
+    default=False,
+    help="Discard OCR text layer from output. Keeps original file size but still uses OCR for TOC generation.",
+)
 def generate_toc(
     input_file: str,
     output_file: str,
@@ -58,6 +68,7 @@ def generate_toc(
     ocr: bool,
     ocr_language: str,
     ocr_dpi: int,
+    no_ocr_output: bool,
 ) -> None:
     """Generate a table of contents for a PDF file."""
     console.print(
@@ -66,6 +77,8 @@ def generate_toc(
     )
 
     doc = pymupdf.open(input_file)
+    original_doc = None  # Keep reference to original if we need to discard OCR
+    performed_ocr = False
 
     # Check if OCR is needed and perform it if enabled
     if ocr:
@@ -78,16 +91,36 @@ def generate_toc(
         needs_ocr = ocr_processor.needs_ocr(doc)
         if needs_ocr:
             console.print("[yellow]Insufficient text detected in PDF. Performing OCR to extract text...[/yellow]")
+
+            # If --no-ocr-output is set, keep the original document for final output
+            if no_ocr_output:
+                console.print("[dim]  --no-ocr-output: OCR text used for TOC generation only[/dim]")
+                original_doc = doc
+                doc = pymupdf.open(input_file)  # Reopen for OCR processing
+
             # process_in_memory returns a NEW document with OCR text layer
             ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True)
-            doc.close()
+            if not no_ocr_output:
+                doc.close()
             doc = ocr_doc
+            performed_ocr = True
             console.print("[green]OCR completed.[/green]")
 
     llm = init_chat_model(model=model_identifier)
     processor = TOCGenerator(doc=doc, llm=llm)
 
     usage = processor.run(output_file=output_file, force=force, request_delay=request_delay)
+
+    # If --no-ocr-output and we performed OCR, apply TOC to original and save that instead
+    if no_ocr_output and performed_ocr and original_doc is not None:
+        console.print("[cyan]Applying TOC to original document (discarding OCR text layer)...[/cyan]")
+        toc = doc.get_toc()
+        apply_toc_to_document(original_doc, toc, output_file)
+        original_doc.close()
+        doc.close()
+    else:
+        if original_doc is not None:
+            original_doc.close()
 
     console.print(f"[bold green]All done.[/bold green] Saved modified PDF to [bold cyan]{output_file}[/bold cyan].")
 

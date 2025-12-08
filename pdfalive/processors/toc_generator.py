@@ -22,6 +22,22 @@ from pdfalive.prompts import TOC_GENERATOR_CONTINUATION_SYSTEM_PROMPT, TOC_GENER
 from pdfalive.tokens import TokenUsage, estimate_tokens
 
 
+def apply_toc_to_document(doc: pymupdf.Document, toc: list, output_file: str) -> None:
+    """Apply a TOC (bookmarks) to a document and save it.
+
+    This helper function is useful when you want to apply a TOC generated
+    from one document (e.g., an OCR'd version) to another document
+    (e.g., the original without OCR text layer).
+
+    Args:
+        doc: PyMuPDF Document to apply the TOC to.
+        toc: TOC list in PyMuPDF format (list of [level, title, page] entries).
+        output_file: Path to save the modified document.
+    """
+    doc.set_toc(toc)
+    doc.save(output_file)
+
+
 # Console for rich output
 console = Console()
 
