@@ -86,7 +86,7 @@ class OCRProcessor:
                                Defaults to NoTextDetectionStrategy.
             language: Tesseract language code(s). Default is "eng".
             dpi: Resolution for OCR processing. Default is 300.
-            num_processes: Number of parallel processes. Defaults to CPU count.
+            num_processes: Number of parallel processes. Defaults to CPU count - 1.
         """
         self.detection_strategy = detection_strategy or NoTextDetectionStrategy()
         self.language = language
@@ -105,9 +105,9 @@ class OCRProcessor:
         return self.detection_strategy.needs_ocr(doc)
 
     def process(self, input_path: str, show_progress: bool = True) -> pymupdf.Document:
-        """Perform OCR on a PDF document.
+        """Perform OCR on a PDF document from a file path.
 
-        Uses multiprocessing to parallelize OCR across pages.
+        Uses multiprocessing to parallelize OCR across pages when beneficial.
 
         Args:
             input_path: Path to the input PDF file.
@@ -124,10 +124,35 @@ class OCRProcessor:
         num_processes = min(self.num_processes, page_count)
 
         if num_processes <= 1:
-            # Single process mode - no multiprocessing overhead
-            return self._process_sequential(input_path, show_progress)
+            return self._process_sequential_from_path(input_path, show_progress)
 
         return self._process_parallel(input_path, num_processes, show_progress)
+
+    def process_in_memory(self, doc: pymupdf.Document, show_progress: bool = True) -> pymupdf.Document:
+        """Perform OCR on a document and return a new document with OCR text layer.
+
+        Uses multiprocessing when the document has a file path and enough pages.
+        Falls back to sequential processing for in-memory documents.
+
+        Note: This method returns a NEW document with the OCR text layer.
+        The original document is not modified. The caller should use the
+        returned document for subsequent operations.
+
+        Args:
+            doc: PyMuPDF Document object to process.
+            show_progress: Whether to show progress indicator.
+
+        Returns:
+            A new PyMuPDF Document with OCR text layer embedded.
+        """
+        page_count = doc.page_count
+
+        # Use parallel processing if document has a file path and enough pages
+        num_processes = min(self.num_processes, page_count)
+        if doc.name and num_processes > 1:
+            return self._process_parallel(doc.name, num_processes, show_progress)
+
+        return self._process_sequential_from_doc(doc, show_progress)
 
     def _ocr_single_page(self, page: pymupdf.Page) -> bytes:
         """Perform OCR on a single page and return PDF bytes with text layer.
@@ -146,24 +171,18 @@ class OCRProcessor:
         # Convert pixmap to PDF with OCR text layer
         return pix.pdfocr_tobytes(language=self.language)
 
-    def _process_sequential(self, input_path: str, show_progress: bool = True) -> pymupdf.Document:
-        """Process document sequentially (single process).
+    def _process_pages_sequential(
+        self, doc: pymupdf.Document, output_doc: pymupdf.Document, show_progress: bool
+    ) -> None:
+        """Process all pages sequentially, appending to output_doc.
 
         Args:
-            input_path: Path to the input PDF file.
+            doc: Source document to process.
+            output_doc: Output document to append OCR'd pages to.
             show_progress: Whether to show progress indicator.
-
-        Returns:
-            New document with OCR text layer applied.
         """
-        doc = pymupdf.open(input_path)
-        output_doc = pymupdf.open()
-
         if show_progress:
-            console.print(
-                f"[cyan]Performing OCR on {doc.page_count} page(s) "
-                f"(using {cpu_count()} available CPU cores, DPI={self.dpi})...[/cyan]"
-            )
+            console.print(f"[cyan]Performing OCR on {doc.page_count} page(s) (DPI={self.dpi})...[/cyan]")
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
@@ -186,7 +205,38 @@ class OCRProcessor:
                 output_doc.insert_pdf(ocr_page_doc)
                 ocr_page_doc.close()
 
+    def _process_sequential_from_path(self, input_path: str, show_progress: bool = True) -> pymupdf.Document:
+        """Process document sequentially from a file path.
+
+        Args:
+            input_path: Path to the input PDF file.
+            show_progress: Whether to show progress indicator.
+
+        Returns:
+            New document with OCR text layer applied.
+        """
+        doc = pymupdf.open(input_path)
+        output_doc = pymupdf.open()
+
+        self._process_pages_sequential(doc, output_doc, show_progress)
+
         doc.close()
+        return output_doc
+
+    def _process_sequential_from_doc(self, doc: pymupdf.Document, show_progress: bool = True) -> pymupdf.Document:
+        """Process document sequentially from an in-memory document.
+
+        Args:
+            doc: PyMuPDF Document object to process.
+            show_progress: Whether to show progress indicator.
+
+        Returns:
+            New document with OCR text layer applied.
+        """
+        output_doc = pymupdf.open()
+
+        self._process_pages_sequential(doc, output_doc, show_progress)
+
         return output_doc
 
     def _process_parallel(self, input_path: str, num_processes: int, show_progress: bool = True) -> pymupdf.Document:
@@ -248,48 +298,3 @@ class OCRProcessor:
                 part_doc.close()
 
             return merged_doc
-
-    def process_in_memory(self, doc: pymupdf.Document, show_progress: bool = True) -> pymupdf.Document:
-        """Perform OCR on a document and return a new document with OCR text layer.
-
-        Note: This method returns a NEW document with the OCR text layer.
-        The original document is not modified. The caller should use the
-        returned document for subsequent operations.
-
-        Args:
-            doc: PyMuPDF Document object to process.
-            show_progress: Whether to show progress indicator.
-
-        Returns:
-            A new PyMuPDF Document with OCR text layer embedded.
-        """
-        output_doc = pymupdf.open()
-
-        if show_progress:
-            console.print(
-                f"[cyan]Performing OCR on {doc.page_count} page(s) "
-                f"(using {cpu_count()} available CPU cores, DPI={self.dpi})...[/cyan]"
-            )
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                console=console,
-            ) as progress:
-                task = progress.add_task("Performing OCR...", total=doc.page_count)
-
-                for page in doc:
-                    ocr_pdf_bytes = self._ocr_single_page(page)
-                    ocr_page_doc = pymupdf.open("pdf", ocr_pdf_bytes)
-                    output_doc.insert_pdf(ocr_page_doc)
-                    ocr_page_doc.close()
-                    progress.advance(task)
-        else:
-            for page in doc:
-                ocr_pdf_bytes = self._ocr_single_page(page)
-                ocr_page_doc = pymupdf.open("pdf", ocr_pdf_bytes)
-                output_doc.insert_pdf(ocr_page_doc)
-                ocr_page_doc.close()
-
-        return output_doc

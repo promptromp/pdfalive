@@ -8,7 +8,7 @@
 [![PyPI - Version](https://img.shields.io/pypi/v/pdfalive)](https://pypi.org/project/pdfalive/)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pdfalive)](https://pypi.org/project/pdfalive/)
 
-A Python library and set of CLI tools to bring PDF files alive with the magic of LLMs.
+*pdfalive*: A Python library and set of CLI tools to bring PDF files alive with the magic of LLMs.
 
 Features:
 
@@ -38,19 +38,40 @@ You can also use `--help` on the main command-line and any of the sub-commands t
 
 ### generate-toc
 
-Automatically generate clickable Table of Contents (e.g. using PDF bookmarks) for a PDF file by extracting features from the PDF and then calling an LLM to infer the pages and section names from these.
+Automatically generate clickable Table of Contents (using PDF bookmarks) for a PDF file. The tool extracts font and text features from the PDF and uses an LLM to intelligently identify chapter and section headings.
 
-Example usage:
+Basic usage:
 
 	pdfalive generate-toc input.pdf output.pdf
 
-By default we use the latest OpenAI ChatGPT available (run with --help to check what is the latest model we use as default), but you can change this by setting the model as part of invocation:
+**Choosing an LLM:** By default we use the latest OpenAI model, but you can use any LLM supported by LangChain:
 
 	pdfalive generate-toc --model-identifier 'claude-sonnet-4-5' input.pdf output.pdf
 
-Model names should match the identifiers used by [LangChain](https://www.langchain.com/), which generally line up with the names used by the various provider APIs themselves.
+Set the appropriate API key for your provider (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`).
 
-Note that for using Anthropic models you'd want to set your api key via the environment variable `ANTHROPIC_API_KEY`. Similar mechanisms apply to OpenAI (`OPENAI_API_KEY`) and other vendors.
+**Scanned PDFs:** OCR is enabled by default. If your PDF is a scanned document without extractable text, OCR will be performed automatically to extract text before TOC generation.
+
+By default, the OCR text layer is included in the output (making it searchable). To generate TOC without keeping the OCR text (preserving original file size):
+
+	pdfalive generate-toc --no-ocr-output scanned.pdf output.pdf
+
+To disable automatic OCR detection entirely:
+
+	pdfalive generate-toc --no-ocr input.pdf output.pdf
+
+**Other useful options:**
+
+- `--force` - Overwrite existing TOC if the PDF already has bookmarks
+- `--ocr-language` - Set OCR language (default: `eng`). Use Tesseract language codes like `deu`, `fra`, etc.
+
+### extract-text
+
+Extract text from scanned PDFs using OCR and save to a new PDF with an embedded text layer:
+
+	pdfalive extract-text input.pdf output.pdf
+
+This is useful when you want a searchable/selectable text layer without generating a TOC.
 
 
 ## Development

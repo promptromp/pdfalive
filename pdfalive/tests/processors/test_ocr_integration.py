@@ -9,6 +9,7 @@ import pytest
 
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
+from pdfalive.processors.toc_generator import apply_toc_to_document
 from pdfalive.tests import fixtures
 
 
@@ -113,3 +114,89 @@ class TestOCRIntegration:
         assert len(final_text) > len(initial_text), (
             f"Expected text after OCR ({len(final_text)} chars) to be greater than before ({len(initial_text)} chars)"
         )
+
+
+class TestNoOcrOutputFlag:
+    """Tests for --no-ocr-output flag functionality."""
+
+    def test_apply_toc_to_original_preserves_bookmarks(self, example_pdf_path: Path, tmp_path: Path):
+        """Test that TOC can be applied to original document after extracting from OCR'd version."""
+        output_path = tmp_path / "output_with_toc.pdf"
+
+        # Open original document
+        original_doc = pymupdf.open(str(example_pdf_path))
+        original_size = len(original_doc.tobytes())
+
+        # Create a sample TOC
+        sample_toc = [[1, "Chapter 1", 1], [1, "Chapter 2", 1]]
+
+        # Apply TOC to original and save
+        apply_toc_to_document(original_doc, sample_toc, str(output_path))
+        original_doc.close()
+
+        # Reopen and verify TOC is present
+        reopened = pymupdf.open(str(output_path))
+        saved_toc = reopened.get_toc()
+        saved_size = len(reopened.tobytes())
+        reopened.close()
+
+        assert saved_toc == sample_toc, "TOC should be preserved in saved document"
+        # File size should be similar to original (not inflated by OCR data)
+        # Allow 20% variance for metadata changes
+        assert saved_size < original_size * 1.2, (
+            f"Saved file ({saved_size} bytes) should be similar to original ({original_size} bytes)"
+        )
+
+    def test_no_ocr_output_preserves_original_structure(self, example_pdf_path: Path, tmp_path: Path):
+        """Test that --no-ocr-output preserves original file structure (bookmarks only)."""
+        output_without_ocr = tmp_path / "without_ocr.pdf"
+
+        # Get original file size
+        original_doc = pymupdf.open(str(example_pdf_path))
+        original_size = len(original_doc.tobytes())
+
+        # Create TOC and apply to original (simulating --no-ocr-output behavior)
+        sample_toc = [[1, "Test Chapter", 1]]
+        apply_toc_to_document(original_doc, sample_toc, str(output_without_ocr))
+        original_doc.close()
+
+        # Verify the output
+        output_doc = pymupdf.open(str(output_without_ocr))
+        output_size = len(output_doc.tobytes())
+        output_toc = output_doc.get_toc()
+
+        # Verify original still doesn't have extractable text (OCR was not persisted)
+        strategy = NoTextDetectionStrategy()
+        still_needs_ocr = strategy.needs_ocr(output_doc)
+        output_doc.close()
+
+        # Assertions
+        assert output_toc == sample_toc, "TOC should be present in output"
+        assert still_needs_ocr is True, "Output should still need OCR (OCR text not persisted)"
+        # Output size should be similar to original (just added bookmarks, no OCR data)
+        assert abs(output_size - original_size) < original_size * 0.1, (
+            f"Output size ({output_size} bytes) should be close to original ({original_size} bytes)"
+        )
+
+    def test_original_doc_with_existing_text_preserved(self, tmp_path: Path):
+        """Test that documents with existing text are not affected by --no-ocr-output."""
+        # Create a simple PDF with text
+        test_pdf = tmp_path / "with_text.pdf"
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((50, 50), "This is existing text")
+        doc.save(str(test_pdf))
+        doc.close()
+
+        # Open and check it has text
+        doc = pymupdf.open(str(test_pdf))
+        strategy = NoTextDetectionStrategy()
+        needs_ocr = strategy.needs_ocr(doc)
+
+        assert needs_ocr is False, "Document with text should not need OCR"
+
+        # Verify text is extractable
+        text = doc[0].get_text()
+        doc.close()
+
+        assert "existing text" in text.lower()

@@ -22,6 +22,22 @@ from pdfalive.prompts import TOC_GENERATOR_CONTINUATION_SYSTEM_PROMPT, TOC_GENER
 from pdfalive.tokens import TokenUsage, estimate_tokens
 
 
+def apply_toc_to_document(doc: pymupdf.Document, toc: list, output_file: str) -> None:
+    """Apply a TOC (bookmarks) to a document and save it.
+
+    This helper function is useful when you want to apply a TOC generated
+    from one document (e.g., an OCR'd version) to another document
+    (e.g., the original without OCR text layer).
+
+    Args:
+        doc: PyMuPDF Document to apply the TOC to.
+        toc: TOC list in PyMuPDF format (list of [level, title, page] entries).
+        output_file: Path to save the modified document.
+    """
+    doc.set_toc(toc)
+    doc.save(output_file)
+
+
 # Console for rich output
 console = Console()
 
@@ -158,7 +174,9 @@ class TOCGenerator:
         """
         if self._check_for_existing_toc() and not force:
             # TODO: can also use any existing toc to guide LLM generation.
-            raise ValueError("The document already has a Table of Contents. Use `--force` to overwrite.")
+            raise ValueError(
+                "The input document already has a Table of Contents. Use `--force` to force TOC generation."
+            )
 
         features = self._extract_features(self.doc)
         toc, usage = self._extract_toc(features, request_delay=request_delay)
@@ -249,10 +267,7 @@ class TOCGenerator:
         page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
 
         if show_progress:
-            console.print(
-                f"[cyan]Extracting features from {page_count} page(s) "
-                f"(using {cpu_count()} available CPU cores)...[/cyan]"
-            )
+            console.print(f"[cyan]Extracting features from {page_count} page(s)...[/cyan]")
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),

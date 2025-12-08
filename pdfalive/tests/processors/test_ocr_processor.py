@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+import pymupdf
 import pytest
 
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
@@ -76,21 +77,22 @@ class TestOCRProcessor:
 
         processor = OCRProcessor(num_processes=4)
         mock_result_doc = MagicMock()
-        processor._process_sequential = MagicMock(return_value=mock_result_doc)
+        processor._process_sequential_from_path = MagicMock(return_value=mock_result_doc)
 
         result = processor.process("/path/to/file.pdf", show_progress=False)
 
-        processor._process_sequential.assert_called_once()
+        processor._process_sequential_from_path.assert_called_once()
         assert result == mock_result_doc
 
     @patch("pdfalive.processors.ocr_processor.pymupdf")
     def test_process_in_memory_returns_new_document(self, mock_pymupdf):
         """Test that process_in_memory returns a new document."""
-        # Setup mock input document
+        # Setup mock input document (in-memory, no file path)
         mock_doc = MagicMock()
         mock_page = MagicMock()
         mock_doc.__iter__ = MagicMock(return_value=iter([mock_page]))
         mock_doc.page_count = 1
+        mock_doc.name = ""  # In-memory document has no name
 
         # Setup mock pixmap and OCR
         mock_pixmap = MagicMock()
@@ -119,6 +121,7 @@ class TestOCRProcessor:
         mock_page = MagicMock()
         mock_doc.__iter__ = MagicMock(return_value=iter([mock_page]))
         mock_doc.page_count = 1
+        mock_doc.name = ""  # In-memory document
 
         mock_pixmap = MagicMock()
         mock_pixmap.pdfocr_tobytes.return_value = b"fake_pdf_bytes"
@@ -146,6 +149,7 @@ class TestOCRProcessor:
         mock_page = MagicMock()
         mock_doc.__iter__ = MagicMock(return_value=iter([mock_page]))
         mock_doc.page_count = 1
+        mock_doc.name = ""  # In-memory document
 
         mock_pixmap = MagicMock()
         mock_pixmap.pdfocr_tobytes.return_value = b"fake_pdf_bytes"
@@ -161,6 +165,64 @@ class TestOCRProcessor:
 
         # Verify pdfocr_tobytes was called with correct language
         mock_pixmap.pdfocr_tobytes.assert_called_with(language="fra")
+
+    def test_process_in_memory_uses_parallel_for_file_backed_doc(self):
+        """Test that process_in_memory uses parallel processing for file-backed documents."""
+        mock_doc = MagicMock()
+        mock_doc.page_count = 10
+        mock_doc.name = "/path/to/file.pdf"  # File-backed document
+
+        processor = OCRProcessor(num_processes=4)
+
+        with patch.object(processor, "_process_parallel", return_value=MagicMock()) as mock_parallel:
+            processor.process_in_memory(mock_doc, show_progress=False)
+
+            mock_parallel.assert_called_once_with("/path/to/file.pdf", 4, False)
+
+    def test_process_in_memory_uses_sequential_for_in_memory_doc(self):
+        """Test that process_in_memory uses sequential processing for in-memory documents."""
+        mock_doc = MagicMock()
+        mock_doc.page_count = 10
+        mock_doc.name = ""  # In-memory document (no file path)
+
+        processor = OCRProcessor(num_processes=4)
+
+        with patch.object(processor, "_process_sequential_from_doc", return_value=MagicMock()) as mock_sequential:
+            processor.process_in_memory(mock_doc, show_progress=False)
+
+            mock_sequential.assert_called_once_with(mock_doc, False)
+
+    def test_process_in_memory_uses_sequential_for_single_page(self):
+        """Test that process_in_memory uses sequential for single-page file-backed documents."""
+        mock_doc = MagicMock()
+        mock_doc.page_count = 1
+        mock_doc.name = "/path/to/file.pdf"  # File-backed but only 1 page
+
+        processor = OCRProcessor(num_processes=4)
+
+        with (
+            patch.object(processor, "_process_sequential_from_doc", return_value=MagicMock()) as mock_sequential,
+            patch.object(processor, "_process_parallel", return_value=MagicMock()) as mock_parallel,
+        ):
+            processor.process_in_memory(mock_doc, show_progress=False)
+
+            # Should use sequential since num_processes would be min(4, 1) = 1
+            mock_sequential.assert_called_once()
+            mock_parallel.assert_not_called()
+
+    def test_process_in_memory_limits_processes_to_page_count(self):
+        """Test that process_in_memory limits parallel processes to page count."""
+        mock_doc = MagicMock()
+        mock_doc.page_count = 3
+        mock_doc.name = "/path/to/file.pdf"
+
+        processor = OCRProcessor(num_processes=10)
+
+        with patch.object(processor, "_process_parallel", return_value=MagicMock()) as mock_parallel:
+            processor.process_in_memory(mock_doc, show_progress=False)
+
+            # num_processes should be min(10, 3) = 3
+            mock_parallel.assert_called_once_with("/path/to/file.pdf", 3, False)
 
 
 class TestOCRPageRangeWorker:
@@ -285,3 +347,62 @@ class TestOCRPageRangeWorker:
         # Path should be in the output directory
         assert "/tmp/output" in path
         assert "ocr_part_0.pdf" in path
+
+
+class TestOCRProcessorParallelIntegration:
+    """Integration tests for parallel OCR processing using real PDF files.
+
+    These tests use actual temporary PDF files to test the parallel processing
+    code path, since multiprocessing requires pickle-able objects (MagicMock
+    cannot be pickled).
+    """
+
+    @pytest.fixture
+    def multi_page_pdf_path(self, tmp_path):
+        """Create a temporary multi-page PDF for testing parallel processing."""
+        pdf_path = tmp_path / "test_multipage.pdf"
+        doc = pymupdf.open()
+
+        # Create 4 pages (enough to trigger parallel processing with num_processes=2)
+        for i in range(4):
+            page = doc.new_page(width=612, height=792)  # Standard letter size
+            # Add some simple content to each page
+            text_point = pymupdf.Point(72, 72)
+            page.insert_text(text_point, f"Page {i + 1} content", fontsize=12)
+
+        doc.save(str(pdf_path))
+        doc.close()
+
+        return str(pdf_path)
+
+    def test_process_parallel_produces_correct_page_count(self, multi_page_pdf_path):
+        """Test that parallel processing produces output with correct page count."""
+        processor = OCRProcessor(language="eng", dpi=72, num_processes=2)
+
+        # Process the document in parallel
+        result_doc = processor._process_parallel(multi_page_pdf_path, num_processes=2, show_progress=False)
+
+        # Verify the result has the same number of pages as input
+        input_doc = pymupdf.open(multi_page_pdf_path)
+        expected_page_count = input_doc.page_count
+        input_doc.close()
+
+        assert result_doc.page_count == expected_page_count
+        result_doc.close()
+
+    def test_process_in_memory_uses_parallel_for_real_file(self, multi_page_pdf_path):
+        """Test that process_in_memory actually uses parallel path for file-backed docs."""
+        processor = OCRProcessor(language="eng", dpi=72, num_processes=2)
+
+        # Open document from file (has doc.name set)
+        doc = pymupdf.open(multi_page_pdf_path)
+        assert doc.name == multi_page_pdf_path  # Verify file path is set
+
+        # Process the document - should use parallel path
+        result_doc = processor.process_in_memory(doc, show_progress=False)
+
+        # Verify the result has the same number of pages
+        assert result_doc.page_count == doc.page_count
+
+        doc.close()
+        result_doc.close()
