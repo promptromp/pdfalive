@@ -18,7 +18,11 @@ from tenacity import (
 )
 
 from pdfalive.models.toc import TOC, TOCFeature
-from pdfalive.prompts import TOC_GENERATOR_CONTINUATION_SYSTEM_PROMPT, TOC_GENERATOR_SYSTEM_PROMPT
+from pdfalive.prompts import (
+    TOC_GENERATOR_CONTINUATION_SYSTEM_PROMPT,
+    TOC_GENERATOR_SYSTEM_PROMPT,
+    TOC_POSTPROCESSOR_SYSTEM_PROMPT,
+)
 from pdfalive.tokens import TokenUsage, estimate_tokens
 
 
@@ -158,6 +162,7 @@ class TOCGenerator:
         output_file: str,
         force: bool = False,
         request_delay: float = DEFAULT_REQUEST_DELAY_SECONDS,
+        postprocess: bool = False,
     ) -> TokenUsage:
         """Generate the table of contents.
 
@@ -165,6 +170,7 @@ class TOCGenerator:
             output_file: Path to save the modified PDF with TOC.
             force: If True, overwrite existing TOC. Otherwise raise if TOC exists.
             request_delay: Delay in seconds between LLM calls to avoid rate limiting.
+            postprocess: If True, run a postprocessing step to clean up and improve the TOC.
 
         Returns:
             TokenUsage statistics from the LLM calls.
@@ -180,6 +186,11 @@ class TOCGenerator:
 
         features = self._extract_features(self.doc)
         toc, usage = self._extract_toc(features, request_delay=request_delay)
+
+        # Optionally postprocess the TOC to clean up duplicates, fix errors, etc.
+        if postprocess:
+            toc, postprocess_usage = self._postprocess_toc(toc, features)
+            usage = usage + postprocess_usage
 
         self.doc.set_toc(toc.to_list())
         self.doc.save(output_file)
@@ -629,3 +640,151 @@ class TOCGenerator:
         console.print(f"[bold green]All batches processed. Total TOC entries: {len(merged_toc.entries)}[/bold green]")
 
         return merged_toc, usage
+
+    def _extract_reference_toc_text(
+        self,
+        max_pages: int = 10,
+    ) -> str:
+        """Extract text from the first few pages that may contain a printed TOC.
+
+        Scans the first N pages of the document looking for text that might
+        be a printed table of contents, which can be used as a reference
+        for postprocessing.
+
+        Args:
+            max_pages: Maximum number of pages to scan from the beginning.
+
+        Returns:
+            Concatenated text from the first pages, with page markers.
+        """
+        pages_to_scan = min(max_pages, self.doc.page_count)
+        reference_texts = []
+
+        for page_idx in range(pages_to_scan):
+            page = self.doc[page_idx]
+            page_text = page.get_text("text")
+            if page_text.strip():
+                reference_texts.append(f"--- Page {page_idx + 1} ---\n{page_text}")
+
+        return "\n\n".join(reference_texts)
+
+    def _postprocess_toc(
+        self,
+        toc: TOC,
+        features: list,
+        max_pages_for_reference_toc: int = 10,
+    ) -> tuple[TOC, TokenUsage]:
+        """Postprocess a generated TOC using LLM to clean up and improve entries.
+
+        This method takes a previously generated TOC and refines it by:
+        - Removing duplicate entries
+        - Fixing typos in titles
+        - Adjusting page numbers based on any printed TOC found in the document
+        - Adding missing entries discovered from a printed TOC
+        - Removing false positives
+
+        Args:
+            toc: The previously generated TOC to postprocess.
+            features: The document features used for the original extraction.
+            max_pages_for_reference_toc: Maximum pages to scan for a printed TOC.
+
+        Returns:
+            A tuple of (refined TOC, TokenUsage) with the improved TOC.
+        """
+        usage = TokenUsage()
+        model = self.llm.with_structured_output(TOC)
+
+        # Extract reference text from first pages (may contain printed TOC)
+        reference_text = self._extract_reference_toc_text(max_pages=max_pages_for_reference_toc)
+
+        # Format the generated TOC for the prompt
+        toc_entries_str = "\n".join(
+            f"- {entry.title} (page {entry.page_number}, level {entry.level}, confidence {entry.confidence:.2f})"
+            for entry in toc.entries
+        )
+
+        # Build a compact representation of features for context
+        # Only include a summary to keep token count reasonable
+        features_summary = self._summarize_features_for_postprocessing(features)
+
+        user_content = f"""
+Please review and refine the following automatically generated Table of Contents.
+
+## Generated TOC (to be refined)
+
+{toc_entries_str if toc_entries_str else "(No entries were generated)"}
+
+## Reference Text from First Pages (may contain printed TOC)
+
+{reference_text if reference_text else "(No text extracted from first pages)"}
+
+## Document Features Summary
+
+{features_summary}
+
+Please return a cleaned and improved TOC based on the guidelines in your instructions.
+"""
+
+        messages = [
+            SystemMessage(content=TOC_POSTPROCESSOR_SYSTEM_PROMPT),
+            HumanMessage(content=user_content),
+        ]
+
+        # Estimate input tokens
+        input_text = TOC_POSTPROCESSOR_SYSTEM_PROMPT + user_content
+        input_tokens = estimate_tokens(input_text)
+
+        # Make LLM call with retry logic
+        console.print("[bold]Postprocessing TOC...[/bold]")
+        refined_toc = self._invoke_with_retry(model, messages, "TOC postprocessing", input_tokens)
+
+        # Estimate output tokens
+        output_tokens = estimate_tokens(str(refined_toc.entries))
+
+        # Record token usage
+        usage.add_call(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            description="TOC postprocessing",
+        )
+
+        console.print(
+            f"[bold green]Postprocessing complete. "
+            f"Refined TOC has {len(refined_toc.entries)} entries "
+            f"(was {len(toc.entries)})[/bold green]"
+        )
+
+        return refined_toc, usage
+
+    def _summarize_features_for_postprocessing(self, features: list, max_entries: int = 50) -> str:
+        """Create a compact summary of features for postprocessing context.
+
+        Args:
+            features: Nested list of TOCFeature objects.
+            max_entries: Maximum number of feature entries to include.
+
+        Returns:
+            A string summary of the most relevant features.
+        """
+        summary_lines = []
+        entry_count = 0
+
+        for block in features:
+            if entry_count >= max_entries:
+                break
+            for line in block:
+                if entry_count >= max_entries:
+                    break
+                for span in line:
+                    if entry_count >= max_entries:
+                        break
+                    if isinstance(span, TOCFeature):
+                        summary_lines.append(
+                            f'Page {span.page_number}: {span.font_name} {span.font_size}pt - "{span.text_snippet}"'
+                        )
+                        entry_count += 1
+
+        if not summary_lines:
+            return "(No features available)"
+
+        return "\n".join(summary_lines)

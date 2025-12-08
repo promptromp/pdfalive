@@ -102,3 +102,47 @@ class TestTokenUsage:
         assert len(usage._call_details) == 2
         assert usage._call_details[0]["description"] == "first call"
         assert usage._call_details[1]["description"] == "second call"
+
+    def test_add_token_usage_instances(self):
+        """Test combining two TokenUsage instances with + operator."""
+        usage1 = TokenUsage()
+        usage1.add_call(input_tokens=100, output_tokens=50, description="call 1")
+        usage1.add_call(input_tokens=200, output_tokens=75, description="call 2")
+
+        usage2 = TokenUsage()
+        usage2.add_call(input_tokens=150, output_tokens=60, description="call 3")
+
+        combined = usage1 + usage2
+
+        assert combined.input_tokens == 450
+        assert combined.output_tokens == 185
+        assert combined.llm_calls == 3
+        assert combined.total_tokens == 635
+
+    def test_add_token_usage_preserves_call_details(self):
+        """Test that combining TokenUsage instances preserves call details."""
+        usage1 = TokenUsage()
+        usage1.add_call(input_tokens=100, output_tokens=50, description="first")
+
+        usage2 = TokenUsage()
+        usage2.add_call(input_tokens=200, output_tokens=75, description="second")
+
+        combined = usage1 + usage2
+
+        assert len(combined._call_details) == 2
+        assert combined._call_details[0]["description"] == "first"
+        assert combined._call_details[1]["description"] == "second"
+        # Call numbers should be renumbered
+        assert combined._call_details[0]["call_number"] == 1
+        assert combined._call_details[1]["call_number"] == 2
+
+    def test_add_empty_token_usage(self, usage):
+        """Test combining with empty TokenUsage."""
+        usage.add_call(input_tokens=100, output_tokens=50, description="test")
+
+        empty = TokenUsage()
+        combined = usage + empty
+
+        assert combined.input_tokens == 100
+        assert combined.output_tokens == 50
+        assert combined.llm_calls == 1

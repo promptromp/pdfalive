@@ -32,6 +32,21 @@ class TokenUsage:
             }
         )
 
+    def __add__(self, other: "TokenUsage") -> "TokenUsage":
+        """Combine two TokenUsage instances."""
+        combined = TokenUsage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            llm_calls=self.llm_calls + other.llm_calls,
+        )
+        # Renumber call details when combining
+        combined._call_details = list(self._call_details)
+        for detail in other._call_details:
+            new_detail = detail.copy()
+            new_detail["call_number"] = len(combined._call_details) + 1
+            combined._call_details.append(new_detail)
+        return combined
+
     @property
     def total_tokens(self) -> int:
         """Total tokens used across all calls."""

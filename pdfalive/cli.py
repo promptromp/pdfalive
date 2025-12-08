@@ -58,6 +58,11 @@ def cli() -> None:
     default=False,
     help="Include OCR text layer in output (makes PDF searchable).",
 )
+@click.option(
+    "--postprocess/--no-postprocess",
+    default=False,
+    help="Enable/disable LLM postprocessing to clean up and improve the generated TOC.",
+)
 def generate_toc(
     input_file: str,
     output_file: str,
@@ -69,6 +74,7 @@ def generate_toc(
     ocr_language: str,
     ocr_dpi: int,
     ocr_output: bool,
+    postprocess: bool,
 ) -> None:
     """Generate a table of contents for a PDF file."""
     console.print(
@@ -110,7 +116,7 @@ def generate_toc(
     llm = init_chat_model(model=model_identifier)
     processor = TOCGenerator(doc=doc, llm=llm)
 
-    usage = processor.run(output_file=output_file, force=force, request_delay=request_delay)
+    usage = processor.run(output_file=output_file, force=force, request_delay=request_delay, postprocess=postprocess)
 
     # If --ocr-output is not set and we performed OCR, apply TOC to original and save that instead
     if not ocr_output and performed_ocr and original_doc is not None:
