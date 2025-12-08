@@ -37,7 +37,7 @@ def cli() -> None:
 )
 @click.option(
     "--ocr/--no-ocr",
-    default=False,
+    default=True,
     help="Enable/disable automatic OCR for scanned PDFs without text.",
 )
 @click.option(

@@ -267,10 +267,7 @@ class TOCGenerator:
         page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
 
         if show_progress:
-            console.print(
-                f"[cyan]Extracting features from {page_count} page(s) "
-                f"(using {cpu_count()} available CPU cores)...[/cyan]"
-            )
+            console.print(f"[cyan]Extracting features from {page_count} page(s)...[/cyan]")
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),

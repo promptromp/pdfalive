@@ -8,7 +8,7 @@
 [![PyPI - Version](https://img.shields.io/pypi/v/pdfalive)](https://pypi.org/project/pdfalive/)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pdfalive)](https://pypi.org/project/pdfalive/)
 
-A Python library and set of CLI tools to bring PDF files alive with the magic of LLMs.
+*pdfalive*: A Python library and set of CLI tools to bring PDF files alive with the magic of LLMs.
 
 Features:
 
@@ -50,13 +50,15 @@ Basic usage:
 
 Set the appropriate API key for your provider (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`).
 
-**Scanned PDFs:** If your PDF is a scanned document without extractable text, enable OCR with the `--ocr` flag:
-
-	pdfalive generate-toc --ocr scanned.pdf output.pdf
+**Scanned PDFs:** OCR is enabled by default. If your PDF is a scanned document without extractable text, OCR will be performed automatically to extract text before TOC generation.
 
 By default, the OCR text layer is included in the output (making it searchable). To generate TOC without keeping the OCR text (preserving original file size):
 
-	pdfalive generate-toc --ocr --no-ocr-output scanned.pdf output.pdf
+	pdfalive generate-toc --no-ocr-output scanned.pdf output.pdf
+
+To disable automatic OCR detection entirely:
+
+	pdfalive generate-toc --no-ocr input.pdf output.pdf
 
 **Other useful options:**
 

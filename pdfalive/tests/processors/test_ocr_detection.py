@@ -1,10 +1,14 @@
 """Unit tests for OCR detection strategies."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pdfalive.processors.ocr_detection import NoTextDetectionStrategy, OCRDetectionStrategy
+from pdfalive.processors.ocr_detection import (
+    NoTextDetectionStrategy,
+    OCRDetectionStrategy,
+    _check_page_has_text,
+)
 
 
 class TestOCRDetectionStrategy:
@@ -24,6 +28,7 @@ class TestNoTextDetectionStrategy:
         """Create a mock document that has extractable text."""
         doc = MagicMock()
         doc.page_count = 3
+        doc.name = ""  # Empty name forces sequential processing in tests
 
         # Mock page with text
         page_with_text = MagicMock()
@@ -50,6 +55,7 @@ class TestNoTextDetectionStrategy:
         """Create a mock document that has no extractable text (scanned images only)."""
         doc = MagicMock()
         doc.page_count = 3
+        doc.name = ""  # Empty name forces sequential processing in tests
 
         # Mock page with only image blocks (no text)
         page_without_text = MagicMock()
@@ -69,6 +75,7 @@ class TestNoTextDetectionStrategy:
         """Create a mock document with text blocks but empty/whitespace text."""
         doc = MagicMock()
         doc.page_count = 2
+        doc.name = ""  # Empty name forces sequential processing in tests
 
         page = MagicMock()
         page.get_text.return_value = {
@@ -95,13 +102,14 @@ class TestNoTextDetectionStrategy:
         """Create a mock document with no pages."""
         doc = MagicMock()
         doc.page_count = 0
+        doc.name = ""  # Empty name forces sequential processing in tests
         return doc
 
     def test_needs_ocr_when_document_has_text_on_all_pages(self, mock_doc_with_text):
         """Test that OCR is not needed when all pages have extractable text."""
         strategy = NoTextDetectionStrategy()
 
-        result = strategy.needs_ocr(mock_doc_with_text)
+        result = strategy.needs_ocr(mock_doc_with_text, show_progress=False)
 
         assert result is False
 
@@ -109,7 +117,7 @@ class TestNoTextDetectionStrategy:
         """Test that OCR is needed when document has no extractable text."""
         strategy = NoTextDetectionStrategy()
 
-        result = strategy.needs_ocr(mock_doc_without_text)
+        result = strategy.needs_ocr(mock_doc_without_text, show_progress=False)
 
         assert result is True
 
@@ -117,7 +125,7 @@ class TestNoTextDetectionStrategy:
         """Test that OCR is needed when document only has whitespace text."""
         strategy = NoTextDetectionStrategy()
 
-        result = strategy.needs_ocr(mock_doc_with_empty_text)
+        result = strategy.needs_ocr(mock_doc_with_empty_text, show_progress=False)
 
         assert result is True
 
@@ -125,7 +133,7 @@ class TestNoTextDetectionStrategy:
         """Test that OCR is needed for empty document (no pages)."""
         strategy = NoTextDetectionStrategy()
 
-        result = strategy.needs_ocr(mock_doc_empty)
+        result = strategy.needs_ocr(mock_doc_empty, show_progress=False)
 
         assert result is True
 
@@ -133,6 +141,7 @@ class TestNoTextDetectionStrategy:
         """Test that sample_pages parameter limits number of pages checked."""
         doc = MagicMock()
         doc.page_count = 100
+        doc.name = ""  # Empty name forces sequential processing in tests
 
         # First page has no text, but later pages do
         pages = []
@@ -157,16 +166,17 @@ class TestNoTextDetectionStrategy:
 
         # With sample_pages=1, only first page is checked (no text) -> needs OCR
         strategy_limited = NoTextDetectionStrategy(sample_pages=1)
-        assert strategy_limited.needs_ocr(doc) is True
+        assert strategy_limited.needs_ocr(doc, show_progress=False) is True
 
         # With sample_pages=5, checks 5 pages: 4/5 have text (80%) -> no OCR needed
         strategy_more = NoTextDetectionStrategy(sample_pages=5)
-        assert strategy_more.needs_ocr(doc) is False
+        assert strategy_more.needs_ocr(doc, show_progress=False) is False
 
     def test_sample_pages_exceeds_page_count(self):
         """Test that sample_pages works when it exceeds document page count."""
         doc = MagicMock()
         doc.page_count = 2
+        doc.name = ""  # Empty name forces sequential processing in tests
 
         page = MagicMock()
         page.get_text.return_value = {"blocks": [{"type": 1}]}  # no text
@@ -174,7 +184,7 @@ class TestNoTextDetectionStrategy:
 
         strategy = NoTextDetectionStrategy(sample_pages=100)
 
-        result = strategy.needs_ocr(doc)
+        result = strategy.needs_ocr(doc, show_progress=False)
 
         # Should check only 2 pages (the actual count) and determine OCR is needed
         assert result is True
@@ -240,6 +250,7 @@ class TestNoTextDetectionStrategy:
         """Test that min_text_coverage threshold works correctly."""
         doc = MagicMock()
         doc.page_count = total_pages
+        doc.name = ""  # Empty name forces sequential processing in tests
 
         pages = []
         for i in range(total_pages):
@@ -262,7 +273,7 @@ class TestNoTextDetectionStrategy:
         doc.__getitem__ = MagicMock(side_effect=lambda i: pages[i])
 
         strategy = NoTextDetectionStrategy(min_text_coverage=min_coverage)
-        result = strategy.needs_ocr(doc)
+        result = strategy.needs_ocr(doc, show_progress=False)
 
         assert result is expected_needs_ocr
 
@@ -275,6 +286,7 @@ class TestNoTextDetectionStrategy:
         """Test that document with only 1 page of text out of 100 needs OCR."""
         doc = MagicMock()
         doc.page_count = 100
+        doc.name = ""  # Empty name forces sequential processing in tests
 
         pages = []
         for i in range(100):
@@ -295,7 +307,199 @@ class TestNoTextDetectionStrategy:
         doc.__getitem__ = MagicMock(side_effect=lambda i: pages[i])
 
         strategy = NoTextDetectionStrategy()
-        result = strategy.needs_ocr(doc)
+        result = strategy.needs_ocr(doc, show_progress=False)
 
         # 1% text coverage is below 25% threshold, so OCR is needed
         assert result is True
+
+    def test_num_processes_parameter(self):
+        """Test that num_processes parameter is stored correctly."""
+        strategy_default = NoTextDetectionStrategy()
+        assert strategy_default.num_processes >= 1
+
+        strategy_custom = NoTextDetectionStrategy(num_processes=4)
+        assert strategy_custom.num_processes == 4
+
+    def test_sequential_fallback_for_in_memory_doc(self):
+        """Test that in-memory documents (no file path) use sequential processing."""
+        doc = MagicMock()
+        doc.page_count = 10
+        doc.name = ""  # Empty name indicates in-memory document
+
+        page = MagicMock()
+        page.get_text.return_value = {
+            "blocks": [
+                {
+                    "type": 0,
+                    "lines": [{"spans": [{"text": "Some text"}]}],
+                }
+            ]
+        }
+        doc.__getitem__ = MagicMock(return_value=page)
+
+        strategy = NoTextDetectionStrategy(num_processes=4)
+
+        with (
+            patch.object(strategy, "_needs_ocr_sequential", wraps=strategy._needs_ocr_sequential) as mock_sequential,
+            patch.object(strategy, "_needs_ocr_parallel", wraps=strategy._needs_ocr_parallel) as mock_parallel,
+        ):
+            strategy.needs_ocr(doc, show_progress=False)
+
+            # Sequential should be called, parallel should not
+            mock_sequential.assert_called_once()
+            mock_parallel.assert_not_called()
+
+    def test_sequential_fallback_for_single_page(self):
+        """Test that single-page documents use sequential processing."""
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.name = "/path/to/file.pdf"
+
+        page = MagicMock()
+        page.get_text.return_value = {
+            "blocks": [
+                {
+                    "type": 0,
+                    "lines": [{"spans": [{"text": "Some text"}]}],
+                }
+            ]
+        }
+        doc.__getitem__ = MagicMock(return_value=page)
+
+        # Even with multiple processes configured, should use sequential for 1 page
+        strategy = NoTextDetectionStrategy(num_processes=4)
+
+        with (
+            patch.object(strategy, "_needs_ocr_sequential", wraps=strategy._needs_ocr_sequential) as mock_sequential,
+            patch.object(strategy, "_needs_ocr_parallel", wraps=strategy._needs_ocr_parallel) as mock_parallel,
+        ):
+            strategy.needs_ocr(doc, show_progress=False)
+
+            mock_sequential.assert_called_once()
+            mock_parallel.assert_not_called()
+
+    def test_parallel_called_for_file_backed_multipage_doc(self):
+        """Test that file-backed multi-page documents use parallel processing."""
+        doc = MagicMock()
+        doc.page_count = 10
+        doc.name = "/path/to/file.pdf"
+
+        strategy = NoTextDetectionStrategy(num_processes=4)
+
+        with patch.object(strategy, "_needs_ocr_parallel", return_value=False) as mock_parallel:
+            result = strategy.needs_ocr(doc, show_progress=False)
+
+            mock_parallel.assert_called_once_with("/path/to/file.pdf", 10, 4, False)
+            assert result is False
+
+    def test_num_processes_limited_by_pages_to_check(self):
+        """Test that num_processes is limited by number of pages to check."""
+        doc = MagicMock()
+        doc.page_count = 3
+        doc.name = "/path/to/file.pdf"
+
+        strategy = NoTextDetectionStrategy(num_processes=10)
+
+        with patch.object(strategy, "_needs_ocr_parallel", return_value=False) as mock_parallel:
+            strategy.needs_ocr(doc, show_progress=False)
+
+            # num_processes should be min(10, 3) = 3
+            mock_parallel.assert_called_once_with("/path/to/file.pdf", 3, 3, False)
+
+    def test_show_progress_parameter_passed_to_sequential(self):
+        """Test that show_progress parameter is passed to sequential method."""
+        doc = MagicMock()
+        doc.page_count = 5
+        doc.name = ""  # Empty name forces sequential processing
+
+        page = MagicMock()
+        page.get_text.return_value = {"blocks": [{"type": 0, "lines": [{"spans": [{"text": "text"}]}]}]}
+        doc.__getitem__ = MagicMock(return_value=page)
+
+        strategy = NoTextDetectionStrategy()
+
+        with patch.object(strategy, "_needs_ocr_sequential", return_value=False) as mock_sequential:
+            strategy.needs_ocr(doc, show_progress=True)
+            mock_sequential.assert_called_once_with(doc, 5, True)
+
+            mock_sequential.reset_mock()
+            strategy.needs_ocr(doc, show_progress=False)
+            mock_sequential.assert_called_once_with(doc, 5, False)
+
+    def test_show_progress_parameter_passed_to_parallel(self):
+        """Test that show_progress parameter is passed to parallel method."""
+        doc = MagicMock()
+        doc.page_count = 10
+        doc.name = "/path/to/file.pdf"
+
+        strategy = NoTextDetectionStrategy(num_processes=4)
+
+        with patch.object(strategy, "_needs_ocr_parallel", return_value=False) as mock_parallel:
+            strategy.needs_ocr(doc, show_progress=True)
+            mock_parallel.assert_called_once_with("/path/to/file.pdf", 10, 4, True)
+
+            mock_parallel.reset_mock()
+            strategy.needs_ocr(doc, show_progress=False)
+            mock_parallel.assert_called_once_with("/path/to/file.pdf", 10, 4, False)
+
+
+class TestCheckPageHasTextWorker:
+    """Tests for the _check_page_has_text worker function."""
+
+    def test_worker_returns_page_index_and_result(self):
+        """Test that worker function returns correct tuple format."""
+        with patch("pdfalive.processors.ocr_detection.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_page = MagicMock()
+            mock_page.get_text.return_value = {
+                "blocks": [
+                    {
+                        "type": 0,
+                        "lines": [{"spans": [{"text": "Some text"}]}],
+                    }
+                ]
+            }
+            mock_doc.__getitem__ = MagicMock(return_value=mock_page)
+            mock_pymupdf.open.return_value = mock_doc
+
+            result = _check_page_has_text((5, "/path/to/file.pdf"))
+
+            assert result == (5, True)
+            mock_pymupdf.open.assert_called_once_with("/path/to/file.pdf")
+            mock_doc.__getitem__.assert_called_once_with(5)
+            mock_doc.close.assert_called_once()
+
+    def test_worker_detects_no_text(self):
+        """Test that worker correctly identifies pages without text."""
+        with patch("pdfalive.processors.ocr_detection.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_page = MagicMock()
+            mock_page.get_text.return_value = {
+                "blocks": [{"type": 1}]  # Image block only
+            }
+            mock_doc.__getitem__ = MagicMock(return_value=mock_page)
+            mock_pymupdf.open.return_value = mock_doc
+
+            result = _check_page_has_text((0, "/path/to/file.pdf"))
+
+            assert result == (0, False)
+
+    def test_worker_handles_empty_text(self):
+        """Test that worker correctly handles whitespace-only text."""
+        with patch("pdfalive.processors.ocr_detection.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_page = MagicMock()
+            mock_page.get_text.return_value = {
+                "blocks": [
+                    {
+                        "type": 0,
+                        "lines": [{"spans": [{"text": "   "}]}],  # Whitespace only
+                    }
+                ]
+            }
+            mock_doc.__getitem__ = MagicMock(return_value=mock_page)
+            mock_pymupdf.open.return_value = mock_doc
+
+            result = _check_page_has_text((0, "/path/to/file.pdf"))
+
+            assert result == (0, False)
