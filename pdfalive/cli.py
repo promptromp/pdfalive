@@ -5,6 +5,8 @@ import pymupdf
 from langchain.chat_models import init_chat_model
 from rich.console import Console
 
+from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
+from pdfalive.processors.ocr_processor import OCRProcessor
 from pdfalive.processors.toc_generator import DEFAULT_REQUEST_DELAY_SECONDS, TOCGenerator
 
 
@@ -29,6 +31,23 @@ def cli() -> None:
     default=DEFAULT_REQUEST_DELAY_SECONDS,
     help="Delay in seconds between LLM calls (for rate limiting).",
 )
+@click.option(
+    "--ocr/--no-ocr",
+    default=True,
+    help="Enable/disable automatic OCR for scanned PDFs without text.",
+)
+@click.option(
+    "--ocr-language",
+    type=str,
+    default="eng",
+    help="Tesseract language code for OCR (e.g., 'eng', 'deu', 'fra').",
+)
+@click.option(
+    "--ocr-dpi",
+    type=int,
+    default=300,
+    help="DPI resolution for OCR processing.",
+)
 def generate_toc(
     input_file: str,
     output_file: str,
@@ -36,6 +55,9 @@ def generate_toc(
     force: bool,
     show_token_usage: bool,
     request_delay: float,
+    ocr: bool,
+    ocr_language: str,
+    ocr_dpi: int,
 ) -> None:
     """Generate a table of contents for a PDF file."""
     console.print(
@@ -44,6 +66,23 @@ def generate_toc(
     )
 
     doc = pymupdf.open(input_file)
+
+    # Check if OCR is needed and perform it if enabled
+    if ocr:
+        ocr_processor = OCRProcessor(
+            detection_strategy=NoTextDetectionStrategy(),
+            language=ocr_language,
+            dpi=ocr_dpi,
+        )
+
+        if ocr_processor.needs_ocr(doc):
+            console.print("[yellow]No text detected in PDF. Performing OCR to extract text...[/yellow]")
+            # process_in_memory returns a NEW document with OCR text layer
+            ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True)
+            doc.close()
+            doc = ocr_doc
+            console.print("[green]OCR completed.[/green]")
+
     llm = init_chat_model(model=model_identifier)
     processor = TOCGenerator(doc=doc, llm=llm)
 
@@ -58,3 +97,66 @@ def generate_toc(
         console.print(f"  Input tokens: [cyan]{usage.input_tokens:,}[/cyan] (estimated)")
         console.print(f"  Output tokens: [cyan]{usage.output_tokens:,}[/cyan] (estimated)")
         console.print(f"  Total tokens: [cyan]{usage.total_tokens:,}[/cyan]")
+
+
+@cli.command("extract-text")
+@click.argument("input_file", type=click.Path(exists=True))
+@click.argument("output_file", type=click.Path())
+@click.option(
+    "--ocr-language",
+    type=str,
+    default="eng",
+    help="Tesseract language code for OCR (e.g., 'eng', 'deu', 'fra').",
+)
+@click.option(
+    "--ocr-dpi",
+    type=int,
+    default=300,
+    help="DPI resolution for OCR processing.",
+)
+@click.option(
+    "--force-ocr",
+    is_flag=True,
+    default=False,
+    help="Force OCR even if document already has text.",
+)
+def extract_text(
+    input_file: str,
+    output_file: str,
+    ocr_language: str,
+    ocr_dpi: int,
+    force_ocr: bool,
+) -> None:
+    """Extract text from a PDF using OCR and save to a new PDF with text layer."""
+    console.print(f"Processing [bold cyan]{input_file}[/bold cyan]...")
+
+    doc = pymupdf.open(input_file)
+
+    ocr_processor = OCRProcessor(
+        detection_strategy=NoTextDetectionStrategy(),
+        language=ocr_language,
+        dpi=ocr_dpi,
+    )
+
+    needs_ocr = ocr_processor.needs_ocr(doc)
+
+    if needs_ocr or force_ocr:
+        if needs_ocr:
+            console.print("[yellow]No text detected in PDF. Performing OCR...[/yellow]")
+        else:
+            console.print("[yellow]Force OCR enabled. Performing OCR...[/yellow]")
+
+        # process_in_memory returns a NEW document with OCR text layer
+        ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True)
+        doc.close()
+        console.print("[green]OCR completed.[/green]")
+
+        # Save the document with OCR text layer
+        ocr_doc.save(output_file)
+        ocr_doc.close()
+
+        console.print(f"[bold green]Done.[/bold green] Saved to [bold cyan]{output_file}[/bold cyan].")
+    else:
+        doc.close()
+        console.print("[green]Document already has extractable text. No OCR needed.[/green]")
+        console.print("Use --force-ocr to process anyway.")

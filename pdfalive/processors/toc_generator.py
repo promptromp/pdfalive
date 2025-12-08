@@ -2,19 +2,20 @@
 
 import time
 from collections.abc import Iterator
+from multiprocessing import Pool, cpu_count
 from typing import cast
 
 import pymupdf
 from langchain.chat_models.base import BaseChatModel
 from langchain.messages import HumanMessage, SystemMessage
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from tenacity import (
     retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
-from tqdm import tqdm
 
 from pdfalive.models.toc import TOC, TOCFeature
 from pdfalive.prompts import TOC_GENERATOR_CONTINUATION_SYSTEM_PROMPT, TOC_GENERATOR_SYSTEM_PROMPT
@@ -50,12 +51,91 @@ RETRY_MIN_WAIT_SECONDS = 10  # Minimum wait time between retries
 RETRY_MAX_WAIT_SECONDS = 120  # Maximum wait time between retries
 
 
+def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list]:
+    """Worker function to extract features from a range of pages.
+
+    This function is designed to be called in a separate process.
+    It opens the document independently and processes its assigned pages.
+
+    Args:
+        args: Tuple of (process_index, total_processes, input_path,
+                       max_blocks_per_page, max_lines_per_block, text_snippet_length)
+
+    Returns:
+        Tuple of (start_page, end_page, features_list) for the processed range.
+    """
+    (
+        process_idx,
+        total_processes,
+        input_path,
+        max_blocks_per_page,
+        max_lines_per_block,
+        text_snippet_length,
+    ) = args
+
+    doc = pymupdf.open(input_path)
+    page_count = doc.page_count
+
+    # Calculate page range for this process
+    pages_per_process = page_count // total_processes
+    start_page = process_idx * pages_per_process
+    end_page = start_page + pages_per_process if process_idx < total_processes - 1 else page_count
+
+    features: list[list] = []
+
+    for page_idx in range(start_page, end_page):
+        page = doc[page_idx]
+        page_number = page_idx + 1  # 1-indexed
+        page_dict = page.get_text("dict")
+
+        for block_ix, block in enumerate(page_dict["blocks"]):
+            if block_ix >= max_blocks_per_page:
+                break
+
+            features.append([])
+            if block["type"] == 0:
+                # text block
+                for line_ix, line in enumerate(block["lines"]):
+                    if line_ix >= max_lines_per_block:
+                        break
+
+                    features[-1].append([])
+
+                    for span in line["spans"]:
+                        features[-1][-1].append(
+                            TOCFeature(
+                                page_number=page_number,
+                                font_name=span["font"],
+                                font_size=span["size"],
+                                text_length=len(span["text"]),
+                                text_snippet=span["text"][:text_snippet_length],
+                            )
+                        )
+
+    doc.close()
+    return start_page, end_page, features
+
+
 class TOCGenerator:
     """Class to generate table of contents for a PDF document."""
 
-    def __init__(self, doc: pymupdf.Document, llm: BaseChatModel) -> None:
+    def __init__(
+        self,
+        doc: pymupdf.Document,
+        llm: BaseChatModel,
+        num_processes: int | None = None,
+    ) -> None:
+        """Initialize the TOC generator.
+
+        Args:
+            doc: PyMuPDF Document object.
+            llm: LangChain chat model for TOC inference.
+            num_processes: Number of parallel processes for feature extraction.
+                          Defaults to CPU count - 1.
+        """
         self.doc = doc
         self.llm = llm
+        self.num_processes = num_processes or max(1, cpu_count() - 1)
 
     def run(
         self,
@@ -95,53 +175,225 @@ class TOCGenerator:
     def _extract_features(
         self,
         doc: pymupdf.Document,
-        max_pages=None,
-        max_blocks_per_page=3,
-        max_lines_per_block=5,
-        text_snippet_length=25,
+        max_pages: int | None = None,
+        max_blocks_per_page: int = 3,
+        max_lines_per_block: int = 5,
+        text_snippet_length: int = 25,
+        show_progress: bool = True,
     ) -> list:
         """Extract features from the document to generate TOC entries.
 
         Features are indexed by page, block, line, and span.
         They include attributes such as: font name, size, text length, and a text snippet.
 
+        Uses multiprocessing for large documents to speed up extraction.
+
+        Args:
+            doc: PyMuPDF Document object.
+            max_pages: Maximum number of pages to process (None for all).
+            max_blocks_per_page: Maximum blocks to extract per page.
+            max_lines_per_block: Maximum lines to extract per block.
+            text_snippet_length: Maximum characters for text snippets.
+            show_progress: Whether to show progress indicator.
+
+        Returns:
+            Nested list of TOCFeature objects.
         """
+        # For documents opened in memory (not from file), use sequential processing
+        if not doc.name:
+            return self._extract_features_sequential(
+                doc, max_pages, max_blocks_per_page, max_lines_per_block, text_snippet_length, show_progress
+            )
 
-        # hierarchical structure of features detected in the page for (blocks, lines, spans)
+        page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
+        num_processes = min(self.num_processes, page_count)
+
+        if num_processes <= 1:
+            return self._extract_features_sequential(
+                doc, max_pages, max_blocks_per_page, max_lines_per_block, text_snippet_length, show_progress
+            )
+
+        return self._extract_features_parallel(
+            doc.name,
+            page_count,
+            num_processes,
+            max_blocks_per_page,
+            max_lines_per_block,
+            text_snippet_length,
+            show_progress,
+        )
+
+    def _extract_features_sequential(
+        self,
+        doc: pymupdf.Document,
+        max_pages: int | None = None,
+        max_blocks_per_page: int = 3,
+        max_lines_per_block: int = 5,
+        text_snippet_length: int = 25,
+        show_progress: bool = True,
+    ) -> list:
+        """Extract features sequentially (single process).
+
+        Args:
+            doc: PyMuPDF Document object.
+            max_pages: Maximum number of pages to process.
+            max_blocks_per_page: Maximum blocks per page.
+            max_lines_per_block: Maximum lines per block.
+            text_snippet_length: Maximum characters for snippets.
+            show_progress: Whether to show progress indicator.
+
+        Returns:
+            Nested list of TOCFeature objects.
+        """
         features: list[list] = []
+        page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
 
-        for ix, page in enumerate(tqdm(self.doc, desc="Processing pages...", total=self.doc.page_count)):
-            page_number = ix + 1  # 1-indexed
-            page_dict = page.get_text("dict")
+        if show_progress:
+            console.print(
+                f"[cyan]Extracting features from {page_count} page(s) "
+                f"(using {cpu_count()} available CPU cores)...[/cyan]"
+            )
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                console=console,
+            ) as progress:
+                task = progress.add_task("Extracting features...", total=page_count)
 
-            for block_ix, block in enumerate(page_dict["blocks"]):
-                if block_ix >= max_blocks_per_page:
-                    break
+                for ix, page in enumerate(doc):
+                    if max_pages is not None and ix >= max_pages:
+                        break
 
-                features.append([])
-                if block["type"] == 0:
-                    # text block
-                    for line_ix, line in enumerate(block["lines"]):
-                        if line_ix >= max_lines_per_block:
+                    page_number = ix + 1  # 1-indexed
+                    page_dict = page.get_text("dict")
+
+                    for block_ix, block in enumerate(page_dict["blocks"]):
+                        if block_ix >= max_blocks_per_page:
                             break
 
-                        features[-1].append([])
+                        features.append([])
+                        if block["type"] == 0:
+                            # text block
+                            for line_ix, line in enumerate(block["lines"]):
+                                if line_ix >= max_lines_per_block:
+                                    break
 
-                        for span in line["spans"]:
-                            features[-1][-1].append(
-                                TOCFeature(
-                                    page_number=page_number,
-                                    font_name=span["font"],
-                                    font_size=span["size"],
-                                    text_length=len(span["text"]),
-                                    text_snippet=span["text"][:text_snippet_length],
+                                features[-1].append([])
+
+                                for span in line["spans"]:
+                                    features[-1][-1].append(
+                                        TOCFeature(
+                                            page_number=page_number,
+                                            font_name=span["font"],
+                                            font_size=span["size"],
+                                            text_length=len(span["text"]),
+                                            text_snippet=span["text"][:text_snippet_length],
+                                        )
+                                    )
+
+                    progress.advance(task)
+        else:
+            for ix, page in enumerate(doc):
+                if max_pages is not None and ix >= max_pages:
+                    break
+
+                page_number = ix + 1
+                page_dict = page.get_text("dict")
+
+                for block_ix, block in enumerate(page_dict["blocks"]):
+                    if block_ix >= max_blocks_per_page:
+                        break
+
+                    features.append([])
+                    if block["type"] == 0:
+                        for line_ix, line in enumerate(block["lines"]):
+                            if line_ix >= max_lines_per_block:
+                                break
+
+                            features[-1].append([])
+
+                            for span in line["spans"]:
+                                features[-1][-1].append(
+                                    TOCFeature(
+                                        page_number=page_number,
+                                        font_name=span["font"],
+                                        font_size=span["size"],
+                                        text_length=len(span["text"]),
+                                        text_snippet=span["text"][:text_snippet_length],
+                                    )
                                 )
-                            )
-
-            if max_pages is not None and (ix + 1) >= max_pages:
-                break
 
         return features
+
+    def _extract_features_parallel(
+        self,
+        input_path: str,
+        page_count: int,
+        num_processes: int,
+        max_blocks_per_page: int = 3,
+        max_lines_per_block: int = 5,
+        text_snippet_length: int = 25,
+        show_progress: bool = True,
+    ) -> list:
+        """Extract features in parallel using multiprocessing.
+
+        Args:
+            input_path: Path to the PDF file.
+            page_count: Total number of pages to process.
+            num_processes: Number of parallel processes.
+            max_blocks_per_page: Maximum blocks per page.
+            max_lines_per_block: Maximum lines per block.
+            text_snippet_length: Maximum characters for snippets.
+            show_progress: Whether to show progress indicator.
+
+        Returns:
+            Merged list of features from all processes.
+        """
+        if show_progress:
+            console.print(
+                f"[cyan]Extracting features from {page_count} page(s) "
+                f"(using {num_processes} parallel processes)...[/cyan]"
+            )
+
+        # Prepare arguments for worker processes
+        args_list = [
+            (i, num_processes, input_path, max_blocks_per_page, max_lines_per_block, text_snippet_length)
+            for i in range(num_processes)
+        ]
+
+        # Process in parallel
+        with Pool(processes=num_processes) as pool:
+            results = []
+            if show_progress:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TaskProgressColumn(),
+                    console=console,
+                ) as progress:
+                    task = progress.add_task("Extracting features...", total=num_processes)
+
+                    for result in pool.imap_unordered(_extract_features_from_page_range, args_list):
+                        results.append(result)
+                        progress.advance(task)
+            else:
+                results = pool.map(_extract_features_from_page_range, args_list)
+
+        # Sort results by start page to maintain order
+        results = sorted(results, key=lambda x: x[0])
+
+        # Merge features from all processes
+        if show_progress:
+            console.print("[cyan]Merging extracted features...[/cyan]")
+
+        all_features: list = []
+        for _, _, features in results:
+            all_features.extend(features)
+
+        return all_features
 
     def _extract_toc(
         self,

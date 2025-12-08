@@ -15,6 +15,8 @@ def mock_doc():
     doc = MagicMock()
     doc.page_count = 2
     doc.get_toc.return_value = []
+    # Set name to None to force sequential processing (mocks can't be pickled for multiprocessing)
+    doc.name = None
 
     # Mock page iteration
     page1 = MagicMock()
@@ -94,7 +96,7 @@ class TestTOCGenerator:
         """Test feature extraction from document."""
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
 
-        features = generator._extract_features(mock_doc)
+        features = generator._extract_features(mock_doc, show_progress=False)
 
         assert len(features) > 0
         # Check that features contain expected TOCFeature structure
@@ -102,6 +104,23 @@ class TestTOCGenerator:
         assert first_span.page_number == 1
         assert first_span.font_name == "Times-Bold"
         assert first_span.font_size == 16
+
+    def test_extract_features_sequential(self, mock_doc, mock_llm):
+        """Test sequential feature extraction."""
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+
+        features = generator._extract_features_sequential(mock_doc, show_progress=False)
+
+        assert len(features) > 0
+        first_span = features[0][0][0]
+        assert first_span.page_number == 1
+        assert first_span.font_name == "Times-Bold"
+
+    def test_init_with_custom_num_processes(self, mock_doc, mock_llm):
+        """Test TOCGenerator initialization with custom num_processes."""
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm, num_processes=4)
+
+        assert generator.num_processes == 4
 
     def test_run_success(self, mock_doc, mock_llm, sample_toc_response, tmp_path):
         """Test successful TOC generation run."""

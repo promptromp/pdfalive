@@ -10,6 +10,22 @@
 
 A Python library and set of CLI tools to bring PDF files alive with the magic of LLMs.
 
+Features:
+
+* Automatically generate a Table of Contents via PDF Bookmarks for PDF file using LLMs. Supports arbitrarily large files with intelligent batching.
+* Automatically detect if OCR is needed to parse text from raster data. If needed, performs OCR via Tesseract OCR library.
+* Choose which LLM to use from any vendor. Supports using local models via `ollama` as well. Retry logic included for handling rate limits.
+
+## Installation
+
+the [tesseract](https://github.com/tesseract-ocr/tesseract) library is required for OCR. This is used for PDFs where text is not parsed. On MacOS, can install via Homebrew:
+
+	brew install tesseract
+
+You can then install the pdfalive package via pip for example:
+
+	pip install pdfalive
+
 
 ## Usage
 
