@@ -50,17 +50,18 @@ Basic usage:
 
 Set the appropriate API key for your provider (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`).
 
-**Scanned PDFs:** If your PDF is a scanned document without extractable text, OCR is automatically performed using Tesseract. By default, the OCR text layer is included in the output, which increases file size.
+**Scanned PDFs:** If your PDF is a scanned document without extractable text, enable OCR with the `--ocr` flag:
 
-To generate TOC without keeping the OCR text (preserving original file size):
+	pdfalive generate-toc --ocr scanned.pdf output.pdf
 
-	pdfalive generate-toc --no-ocr-output input.pdf output.pdf
+By default, the OCR text layer is included in the output (making it searchable). To generate TOC without keeping the OCR text (preserving original file size):
+
+	pdfalive generate-toc --ocr --no-ocr-output scanned.pdf output.pdf
 
 **Other useful options:**
 
 - `--force` - Overwrite existing TOC if the PDF already has bookmarks
 - `--ocr-language` - Set OCR language (default: `eng`). Use Tesseract language codes like `deu`, `fra`, etc.
-- `--no-ocr` - Disable automatic OCR entirely
 
 ### extract-text
 

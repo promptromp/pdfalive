@@ -36,16 +36,13 @@ Don't forget to set the appropriate API key environment variable for your provid
 
 **Working with scanned PDFs:**
 
-For scanned documents without extractable text, OCR is performed automatically. You have several options:
+For scanned documents without extractable text, enable OCR with the `--ocr` flag:
 
-	# Default: Include OCR text layer in output (larger file, but searchable)
-	pdfalive generate-toc scanned.pdf output.pdf
+	# Enable OCR - includes text layer in output (larger file, but searchable)
+	pdfalive generate-toc --ocr scanned.pdf output.pdf
 
-	# Discard OCR text after TOC generation (keeps original file size)
-	pdfalive generate-toc --no-ocr-output scanned.pdf output.pdf
-
-	# Disable OCR entirely (only works if PDF already has text)
-	pdfalive generate-toc --no-ocr document.pdf output.pdf
+	# Enable OCR but discard text after TOC generation (keeps original file size)
+	pdfalive generate-toc --ocr --no-ocr-output scanned.pdf output.pdf
 
 **OCR options:**
 

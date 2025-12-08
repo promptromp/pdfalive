@@ -174,7 +174,9 @@ class TOCGenerator:
         """
         if self._check_for_existing_toc() and not force:
             # TODO: can also use any existing toc to guide LLM generation.
-            raise ValueError("The document already has a Table of Contents. Use `--force` to overwrite.")
+            raise ValueError(
+                "The input document already has a Table of Contents. Use `--force` to force TOC generation."
+            )
 
         features = self._extract_features(self.doc)
         toc, usage = self._extract_toc(features, request_delay=request_delay)

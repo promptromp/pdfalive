@@ -37,7 +37,7 @@ def cli() -> None:
 )
 @click.option(
     "--ocr/--no-ocr",
-    default=True,
+    default=False,
     help="Enable/disable automatic OCR for scanned PDFs without text.",
 )
 @click.option(
@@ -82,6 +82,7 @@ def generate_toc(
 
     # Check if OCR is needed and perform it if enabled
     if ocr:
+        console.print("[cyan]Checking if document needs OCR...[/cyan]")
         ocr_processor = OCRProcessor(
             detection_strategy=NoTextDetectionStrategy(),
             language=ocr_language,
