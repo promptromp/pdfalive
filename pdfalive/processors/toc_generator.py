@@ -233,8 +233,18 @@ class TOCGenerator:
         def _log_retry(retry_state) -> None:
             """Log retry attempt information."""
             wait_time = getattr(retry_state.next_action, "sleep", 0) if retry_state.next_action else 0
+
+            # Extract exception details if available
+            exception_info = ""
+            if retry_state.outcome is not None:
+                exc = retry_state.outcome.exception()
+                if exc is not None:
+                    exc_name = type(exc).__name__
+                    exc_msg = str(exc) or getattr(exc, "message", "")
+                    exception_info = f" ({exc_name}: {exc_msg})" if exc_msg else f" ({exc_name})"
+
             console.print(
-                f"  [yellow]Rate limited or error. Retrying in {wait_time:.1f}s "
+                f"  [yellow]Error encountered{exception_info}. Retrying in {wait_time:.1f}s "
                 f"(attempt {retry_state.attempt_number}/{MAX_RETRY_ATTEMPTS})...[/yellow]"
             )
 

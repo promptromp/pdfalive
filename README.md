@@ -28,9 +28,11 @@ Example usage:
 
 	pdfalive generate-toc input.pdf output.pdf
 
-By default we use the latest Anthropic Claude Sonnet available, but you can change this by setting the model as part of invocation:
+By default we use the latest OpenAI ChatGPT available (run with --help to check what is the latest model we use as default), but you can change this by setting the model as part of invocation:
 
-	pdfalive generate-toc --model-identifier 'claude-haiku-4-5' input.pdf output.pdf
+	pdfalive generate-toc --model-identifier 'claude-sonnet-4-5' input.pdf output.pdf
+
+Model names should match the identifiers used by [LangChain](https://www.langchain.com/), which generally line up with the names used by the various provider APIs themselves.
 
 Note that for using Anthropic models you'd want to set your api key via the environment variable `ANTHROPIC_API_KEY`. Similar mechanisms apply to OpenAI (`OPENAI_API_KEY`) and other vendors.
 
