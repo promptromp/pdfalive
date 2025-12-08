@@ -24,6 +24,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install Tesseract OCR
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends -y tesseract-ocr tesseract-ocr-eng
     - name: Install uv and set the python version
       uses: astral-sh/setup-uv@v5
       with:
