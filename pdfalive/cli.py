@@ -53,10 +53,10 @@ def cli() -> None:
     help="DPI resolution for OCR processing.",
 )
 @click.option(
-    "--no-ocr-output",
+    "--ocr-output",
     is_flag=True,
     default=False,
-    help="Discard OCR text layer from output. Keeps original file size but still uses OCR for TOC generation.",
+    help="Include OCR text layer in output (makes PDF searchable).",
 )
 def generate_toc(
     input_file: str,
@@ -68,7 +68,7 @@ def generate_toc(
     ocr: bool,
     ocr_language: str,
     ocr_dpi: int,
-    no_ocr_output: bool,
+    ocr_output: bool,
 ) -> None:
     """Generate a table of contents for a PDF file."""
     console.print(
@@ -93,15 +93,15 @@ def generate_toc(
         if needs_ocr:
             console.print("[yellow]Insufficient text detected in PDF. Performing OCR to extract text...[/yellow]")
 
-            # If --no-ocr-output is set, keep the original document for final output
-            if no_ocr_output:
-                console.print("[dim]  --no-ocr-output: OCR text used for TOC generation only[/dim]")
+            # If --ocr-output is not set, keep the original document for final output
+            if not ocr_output:
+                console.print("[dim]  OCR text used for TOC generation only (use --ocr-output to include)[/dim]")
                 original_doc = doc
                 doc = pymupdf.open(input_file)  # Reopen for OCR processing
 
             # process_in_memory returns a NEW document with OCR text layer
             ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True)
-            if not no_ocr_output:
+            if ocr_output:
                 doc.close()
             doc = ocr_doc
             performed_ocr = True
@@ -112,8 +112,8 @@ def generate_toc(
 
     usage = processor.run(output_file=output_file, force=force, request_delay=request_delay)
 
-    # If --no-ocr-output and we performed OCR, apply TOC to original and save that instead
-    if no_ocr_output and performed_ocr and original_doc is not None:
+    # If --ocr-output is not set and we performed OCR, apply TOC to original and save that instead
+    if not ocr_output and performed_ocr and original_doc is not None:
         console.print("[cyan]Applying TOC to original document (discarding OCR text layer)...[/cyan]")
         toc = doc.get_toc()
         apply_toc_to_document(original_doc, toc, output_file)

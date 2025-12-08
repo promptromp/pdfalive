@@ -32,7 +32,7 @@ repos:
   hooks:
   - id: pytest
     name: pytest [with coverage, without slow]
-    entry: bash -ec "uv run python -m pytest --cov=pdfalive pdfalive/tests -m 'not slow'"
+    entry: bash -ec "uv run python -m pytest --cov=pdfalive --cov-fail-under='85' pdfalive/tests -m 'not slow'"
     language: system
     types: [python]
     pass_filenames: false

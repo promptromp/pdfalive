@@ -52,9 +52,9 @@ Set the appropriate API key for your provider (e.g., `OPENAI_API_KEY`, `ANTHROPI
 
 **Scanned PDFs:** OCR is enabled by default. If your PDF is a scanned document without extractable text, OCR will be performed automatically to extract text before TOC generation.
 
-By default, the OCR text layer is included in the output (making it searchable). To generate TOC without keeping the OCR text (preserving original file size):
+By default, the OCR text layer is discarded after TOC generation (preserving original file size). To include the OCR text layer in the output (making it searchable):
 
-	pdfalive generate-toc --no-ocr-output scanned.pdf output.pdf
+	pdfalive generate-toc --ocr-output scanned.pdf output.pdf
 
 To disable automatic OCR detection entirely:
 

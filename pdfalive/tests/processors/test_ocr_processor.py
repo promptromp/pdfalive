@@ -1,5 +1,6 @@
 """Unit tests for OCR processor."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pymupdf
@@ -406,3 +407,62 @@ class TestOCRProcessorParallelIntegration:
 
         doc.close()
         result_doc.close()
+
+    def test_process_parallel_returns_file_backed_doc(self, tmp_path, monkeypatch):
+        """Test that _process_parallel returns a file-backed document."""
+        # Create a simple input PDF to pass as input_path
+        input_pdf = tmp_path / "input.pdf"
+        doc = pymupdf.open()
+        for _ in range(4):
+            doc.new_page()
+        doc.save(str(input_pdf))
+        doc.close()
+
+        # Monkeypatch the OCR worker to create simple part PDFs without running real OCR
+        def fake_ocr_page_range(args):
+            process_idx, total_processes, input_path, output_dir, language, dpi = args
+            part_path = Path(output_dir) / f"ocr_part_{process_idx}.pdf"
+            part_doc = pymupdf.open()
+            part_doc.new_page()
+            part_doc.save(str(part_path))
+            part_doc.close()
+            # return a plausible start/end range along with path
+            return process_idx, process_idx + 1, str(part_path)
+
+        # Replace the module-level _ocr_page_range with our fake
+        monkeypatch.setattr("pdfalive.processors.ocr_processor._ocr_page_range", fake_ocr_page_range)
+
+        # Replace Pool with a simple fake that runs the function sequentially in-process
+        class FakePool:
+            def __init__(self, processes=None):
+                pass
+
+            def imap_unordered(self, func, args_list):
+                for args in args_list:
+                    yield func(args)
+
+            def map(self, func, args_list):
+                return [func(a) for a in args_list]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr("pdfalive.processors.ocr_processor.Pool", FakePool)
+
+        ocr = OCRProcessor(num_processes=2)
+
+        # Call the parallel processor; because we've faked the worker and Pool,
+        # it will create parts and merge them into a single PDF file and return
+        # a file-backed pymupdf.Document
+        result_doc = ocr._process_parallel(str(input_pdf), num_processes=2, show_progress=False)
+
+        # The returned document should be file-backed (truthy .name) and file should exist
+        assert getattr(result_doc, "name", None), "Returned OCR doc is not file-backed"
+        assert Path(result_doc.name).exists(), "Temporary OCR output file does not exist"
+
+        # Cleanup
+        result_doc.close()
+        Path(result_doc.name).unlink()
