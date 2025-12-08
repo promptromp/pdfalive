@@ -75,8 +75,9 @@ def generate_toc(
             dpi=ocr_dpi,
         )
 
-        if ocr_processor.needs_ocr(doc):
-            console.print("[yellow]No text detected in PDF. Performing OCR to extract text...[/yellow]")
+        needs_ocr = ocr_processor.needs_ocr(doc)
+        if needs_ocr:
+            console.print("[yellow]Insufficient text detected in PDF. Performing OCR to extract text...[/yellow]")
             # process_in_memory returns a NEW document with OCR text layer
             ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True)
             doc.close()
@@ -115,7 +116,7 @@ def generate_toc(
     help="DPI resolution for OCR processing.",
 )
 @click.option(
-    "--force-ocr",
+    "--force",
     is_flag=True,
     default=False,
     help="Force OCR even if document already has text.",
@@ -125,10 +126,13 @@ def extract_text(
     output_file: str,
     ocr_language: str,
     ocr_dpi: int,
-    force_ocr: bool,
+    force: bool,
 ) -> None:
     """Extract text from a PDF using OCR and save to a new PDF with text layer."""
     console.print(f"Processing [bold cyan]{input_file}[/bold cyan]...")
+    console.print(
+        f"  Language: [cyan]{ocr_language}[/cyan], DPI: [cyan]{ocr_dpi}[/cyan], Force OCR: [cyan]{force}[/cyan]"
+    )
 
     doc = pymupdf.open(input_file)
 
@@ -139,10 +143,11 @@ def extract_text(
     )
 
     needs_ocr = ocr_processor.needs_ocr(doc)
+    console.print(f"  OCR detection: document {'needs' if needs_ocr else 'does not need'} OCR")
 
-    if needs_ocr or force_ocr:
+    if needs_ocr or force:
         if needs_ocr:
-            console.print("[yellow]No text detected in PDF. Performing OCR...[/yellow]")
+            console.print("[yellow]Insufficient text detected in PDF. Performing OCR...[/yellow]")
         else:
             console.print("[yellow]Force OCR enabled. Performing OCR...[/yellow]")
 
@@ -158,5 +163,5 @@ def extract_text(
         console.print(f"[bold green]Done.[/bold green] Saved to [bold cyan]{output_file}[/bold cyan].")
     else:
         doc.close()
-        console.print("[green]Document already has extractable text. No OCR needed.[/green]")
+        console.print("[green]Document already has sufficient extractable text. No OCR needed.[/green]")
         console.print("Use --force-ocr to process anyway.")
