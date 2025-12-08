@@ -38,11 +38,11 @@ Don't forget to set the appropriate API key environment variable for your provid
 
 OCR is enabled by default. Scanned documents without extractable text will be automatically detected and OCR will be performed to extract text before TOC generation.
 
-	# Default behavior: OCR enabled, text layer included in output (searchable)
+	# Default behavior: OCR enabled, text layer discarded (preserves file size)
 	pdfalive generate-toc scanned.pdf output.pdf
 
-	# Discard OCR text after TOC generation (keeps original file size)
-	pdfalive generate-toc --no-ocr-output scanned.pdf output.pdf
+	# Include OCR text layer in output (makes PDF searchable)
+	pdfalive generate-toc --ocr-output scanned.pdf output.pdf
 
 	# Disable automatic OCR entirely
 	pdfalive generate-toc --no-ocr input.pdf output.pdf

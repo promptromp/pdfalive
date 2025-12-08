@@ -55,7 +55,7 @@ def cli() -> None:
 @click.option(
     "--no-ocr-output",
     is_flag=True,
-    default=False,
+    default=True,
     help="Discard OCR text layer from output. Keeps original file size but still uses OCR for TOC generation.",
 )
 def generate_toc(
