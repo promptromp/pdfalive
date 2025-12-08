@@ -297,4 +297,14 @@ class OCRProcessor:
                 merged_doc.insert_pdf(part_doc)
                 part_doc.close()
 
-            return merged_doc
+            # Persist merged document to a temporary file so downstream
+            # consumers have a file-backed document (truthy `doc.name`) and
+            # can use multiprocessing for later processing (e.g., feature extraction).
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_path = tmp_file.name
+
+            merged_doc.save(tmp_path)
+            merged_doc.close()
+
+            # Return a file-backed document opened from the temp file
+            return pymupdf.open(tmp_path)

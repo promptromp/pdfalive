@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+import pymupdf
 import pytest
 
 from pdfalive.models.toc import TOC, TOCEntry, TOCFeature
@@ -783,3 +784,42 @@ class TestFeatureExtractionMultiprocessing:
                 expected_text = f"Chapter {i + 1}"
                 actual_text = block[0][0].text_snippet
                 assert expected_text in actual_text, f"Page {i + 1}: expected '{expected_text}' in '{actual_text}'"
+
+
+class TestTOCGeneratorParallelExtraction:
+    """Tests for parallel feature extraction with file-backed documents."""
+
+    class DummyLLM:
+        """Minimal LLM stub for testing."""
+
+        def with_structured_output(self, schema):
+            return None
+
+    def test_tocgenerator_uses_parallel_for_file_backed_docs(self, tmp_path, monkeypatch):
+        """Test that TOCGenerator uses parallel extraction for file-backed documents."""
+        # Create a simple file-backed PDF with several blank pages
+        input_pdf = tmp_path / "test.pdf"
+        doc = pymupdf.open()
+        for _ in range(4):
+            doc.new_page()
+        doc.save(str(input_pdf))
+        doc.close()
+
+        doc = pymupdf.open(str(input_pdf))
+
+        called = {"parallel": False}
+
+        def fake_parallel(self, *args, **kwargs):
+            called["parallel"] = True
+            return []
+
+        generator = TOCGenerator(doc=doc, llm=self.DummyLLM(), num_processes=2)
+
+        # Monkeypatch the parallel extractor
+        monkeypatch.setattr(TOCGenerator, "_extract_features_parallel", fake_parallel)
+
+        generator._extract_features(doc)
+
+        assert called["parallel"], "TOCGenerator did not use parallel extraction for file-backed document"
+
+        doc.close()

@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+import pymupdf
 import pytest
 
 from pdfalive.processors.ocr_detection import (
@@ -503,3 +504,85 @@ class TestCheckPageHasTextWorker:
             result = _check_page_has_text((0, "/path/to/file.pdf"))
 
             assert result == (0, False)
+
+
+class TestNoTextDetectionStrategyParallelIntegration:
+    """Integration tests for parallel OCR detection using real PDF files.
+
+    These tests use actual temporary PDF files to test the parallel processing
+    code path, since multiprocessing requires pickle-able objects.
+    """
+
+    @pytest.fixture
+    def multi_page_pdf_with_text(self, tmp_path):
+        """Create a temporary multi-page PDF with text for testing."""
+        pdf_path = tmp_path / "test_with_text.pdf"
+        doc = pymupdf.open()
+
+        for i in range(4):
+            page = doc.new_page(width=612, height=792)
+            text_point = pymupdf.Point(72, 72)
+            page.insert_text(text_point, f"Page {i + 1} has text content", fontsize=12)
+
+        doc.save(str(pdf_path))
+        doc.close()
+
+        return str(pdf_path)
+
+    @pytest.fixture
+    def multi_page_pdf_without_text(self, tmp_path):
+        """Create a temporary multi-page PDF without text (blank pages)."""
+        pdf_path = tmp_path / "test_without_text.pdf"
+        doc = pymupdf.open()
+
+        for _ in range(4):
+            doc.new_page(width=612, height=792)
+
+        doc.save(str(pdf_path))
+        doc.close()
+
+        return str(pdf_path)
+
+    def test_parallel_detection_with_text_returns_no_ocr_needed(self, multi_page_pdf_with_text):
+        """Test that parallel detection correctly identifies documents with text."""
+        strategy = NoTextDetectionStrategy(num_processes=2)
+
+        doc = pymupdf.open(multi_page_pdf_with_text)
+        assert doc.name == multi_page_pdf_with_text  # Verify file-backed
+
+        result = strategy.needs_ocr(doc, show_progress=False)
+        doc.close()
+
+        assert result is False, "Document with text on all pages should not need OCR"
+
+    def test_parallel_detection_without_text_returns_ocr_needed(self, multi_page_pdf_without_text):
+        """Test that parallel detection correctly identifies documents without text."""
+        strategy = NoTextDetectionStrategy(num_processes=2)
+
+        doc = pymupdf.open(multi_page_pdf_without_text)
+        assert doc.name == multi_page_pdf_without_text  # Verify file-backed
+
+        result = strategy.needs_ocr(doc, show_progress=False)
+        doc.close()
+
+        assert result is True, "Document without text should need OCR"
+
+    def test_parallel_detection_uses_parallel_path(self, multi_page_pdf_with_text, monkeypatch):
+        """Test that detection actually uses the parallel code path for file-backed docs."""
+        called = {"parallel": False}
+
+        original_parallel = NoTextDetectionStrategy._needs_ocr_parallel
+
+        def tracking_parallel(self, *args, **kwargs):
+            called["parallel"] = True
+            return original_parallel(self, *args, **kwargs)
+
+        monkeypatch.setattr(NoTextDetectionStrategy, "_needs_ocr_parallel", tracking_parallel)
+
+        strategy = NoTextDetectionStrategy(num_processes=2)
+        doc = pymupdf.open(multi_page_pdf_with_text)
+
+        strategy.needs_ocr(doc, show_progress=False)
+        doc.close()
+
+        assert called["parallel"], "Detection should use parallel path for file-backed multi-page document"
