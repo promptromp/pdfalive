@@ -20,7 +20,7 @@ def cli() -> None:
 @cli.command("generate-toc")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.argument("output_file", type=click.Path())
-@click.option("--model-identifier", type=str, default="chatgpt-5.1", help="LLM model to use.")
+@click.option("--model-identifier", type=str, default="gpt-5.1", help="LLM model to use.")
 @click.option("--force", is_flag=True, default=False, help="Force overwrite existing TOC if present.")
 @click.option("--show-token-usage", is_flag=True, default=True, help="Display token usage statistics.")
 @click.option(
