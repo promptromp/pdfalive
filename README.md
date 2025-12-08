@@ -60,6 +60,18 @@ To disable automatic OCR detection entirely:
 
 	pdfalive generate-toc --no-ocr input.pdf output.pdf
 
+**Improving TOC quality with postprocessing:**
+
+For documents with a printed table of contents page, you can enable LLM postprocessing to refine the generated TOC:
+
+	pdfalive generate-toc --postprocess input.pdf output.pdf
+
+Postprocessing uses an additional LLM call to:
+- Remove duplicate entries
+- Fix typos in section titles
+- Cross-reference against any printed TOC found in the document
+- Add missing entries and correct page numbers
+
 **Other useful options:**
 
 - `--force` - Overwrite existing TOC if the PDF already has bookmarks

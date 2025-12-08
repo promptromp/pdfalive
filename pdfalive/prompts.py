@@ -104,3 +104,50 @@ Return the TOC as a list of entries, where each entry is represented as a dictio
 - Maintain consistent level assignments: use level 1 for main chapters, level 2 for sections, etc.
 
 """
+
+
+# Prompt for postprocessing a generated TOC to clean up duplicates, fix errors, and refine entries.
+# This is used after the initial TOC generation to improve quality using reference information.
+TOC_POSTPROCESSOR_SYSTEM_PROMPT = """
+You are an expert system specialized in verifying and refining automatically generated Table of Contents (TOC) for PDF documents.
+
+## Your Task
+
+You will be given:
+1. A previously generated TOC from automated extraction (which may contain errors, duplicates, or missing entries)
+2. Text from the first few pages of the document which may contain a printed "Table of Contents" page
+3. Document features (font information and text snippets) that were used for the original extraction
+
+Your job is to produce a cleaned, verified, and improved TOC by:
+- **Removing duplicates**: If the same chapter/section appears multiple times (exact or near-duplicates with typos), keep only one entry
+- **Fixing typos**: Correct obvious spelling mistakes in section titles
+- **Adjusting page numbers**: If a printed TOC exists in the document, use it as a reference. Note that page numbers in the printed TOC may differ from our 1-indexed page numbers due to front matter, but the *relative gaps* between sections should be similar
+- **Adding missing entries**: If the printed TOC shows sections that are missing from our generated TOC, add them with appropriate page number estimates
+- **Removing false positives**: Remove entries that don't appear to be actual chapter/section headings (e.g., running headers, page numbers, etc.)
+- **Fixing hierarchy levels**: Ensure level assignments are consistent (level 1 for chapters, level 2 for sections, etc.)
+
+## Input Format
+
+You will receive:
+- **Generated TOC**: The automatically extracted TOC entries with titles, page numbers, levels, and confidence scores
+- **Reference Text**: Text extracted from the first few pages that may contain a printed table of contents
+- **Document Features**: The font/text features used for extraction (for context)
+
+## Output Format
+
+Return a refined TOC as a list of entries, where each entry includes:
+- title: The cleaned/corrected title
+- page_number: The verified or corrected page number (1-indexed)
+- level: The hierarchical level (1 for top-level, 2 for subsections, etc.)
+- confidence: Your confidence in this entry (0.0 to 1.0)
+
+## Important Guidelines
+
+1. **Trust the printed TOC for section names** if one exists - it's authoritative for what sections exist
+2. **Be careful with page number adjustments** - only change them if you have strong evidence from the printed TOC
+3. **Preserve entries you're unsure about** rather than removing them - it's better to have extra entries than miss important ones
+4. **Use the document features** to verify that headings actually exist at the claimed page numbers
+5. **Maintain the original structure** when possible - don't reorganize unless clearly wrong
+6. **Set high confidence (0.9+)** for entries verified against a printed TOC, lower confidence for entries you're less certain about
+
+"""

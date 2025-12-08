@@ -55,6 +55,19 @@ OCR is enabled by default. Scanned documents without extractable text will be au
 	# Adjust OCR resolution (default: 300 DPI)
 	pdfalive generate-toc --ocr-dpi 150 input.pdf output.pdf
 
+**Postprocessing for improved quality:**
+
+Enable LLM postprocessing to refine the generated TOC. This is especially useful for documents that have a printed table of contents page:
+
+	# Enable postprocessing to clean up and improve the TOC
+	pdfalive generate-toc --postprocess input.pdf output.pdf
+
+Postprocessing performs an additional LLM call that:
+- Removes duplicate entries and fixes typos
+- Cross-references against any printed TOC found in the first pages
+- Adds missing entries and corrects page numbers based on the printed TOC
+- Ensures consistent hierarchy levels
+
 **Other options:**
 
 	# Overwrite existing bookmarks

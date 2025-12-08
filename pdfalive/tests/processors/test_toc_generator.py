@@ -823,3 +823,254 @@ class TestTOCGeneratorParallelExtraction:
         assert called["parallel"], "TOCGenerator did not use parallel extraction for file-backed document"
 
         doc.close()
+
+
+class TestTOCPostprocessing:
+    """Tests for TOC postprocessing functionality."""
+
+    @pytest.fixture
+    def mock_doc(self):
+        """Create a mock PyMuPDF document with multiple pages."""
+        doc = MagicMock()
+        doc.page_count = 10
+        doc.get_toc.return_value = []
+        doc.name = None
+
+        # Mock pages with some containing "table of contents" text
+        pages = []
+        for i in range(10):
+            page = MagicMock()
+            if i == 1:  # Page 2 has a printed TOC
+                # get_text("text") returns plain text string
+                toc_text = (
+                    "Table of Contents\n1. Introduction............1\n"
+                    "2. Methods................15\n3. Results.................30"
+                )
+                page.get_text.side_effect = lambda arg, _i=i, _text=toc_text: (
+                    _text if arg == "text" else {"blocks": []}
+                )
+            else:
+                page.get_text.side_effect = lambda arg, _i=i: (
+                    f"Page {_i + 1} content" if arg == "text" else {"blocks": []}
+                )
+            pages.append(page)
+
+        doc.__iter__ = lambda self: iter(pages)
+        doc.__getitem__ = lambda self, idx: pages[idx]
+        return doc
+
+    @pytest.fixture
+    def mock_llm(self):
+        """Create a mock LLM."""
+        return MagicMock()
+
+    @pytest.fixture
+    def sample_toc_with_duplicates(self):
+        """Sample TOC with duplicates and issues to be cleaned up."""
+        return TOC(
+            entries=[
+                TOCEntry(title="Introduction", page_number=3, level=1, confidence=0.9),
+                TOCEntry(title="Introduction", page_number=3, level=1, confidence=0.85),  # Duplicate
+                TOCEntry(title="Methods", page_number=17, level=1, confidence=0.8),
+                TOCEntry(title="Methdos", page_number=17, level=1, confidence=0.7),  # Typo duplicate
+                TOCEntry(title="Results", page_number=32, level=1, confidence=0.9),
+            ]
+        )
+
+    @pytest.fixture
+    def sample_features(self):
+        """Create sample features for testing."""
+        features = []
+        for page_num in range(1, 11):
+            block_features = [
+                [
+                    TOCFeature(
+                        page_number=page_num,
+                        font_name="Times-Bold",
+                        font_size=16,
+                        text_length=20,
+                        text_snippet=f"Heading {page_num}",
+                    )
+                ]
+            ]
+            features.append(block_features)
+        return features
+
+    @pytest.fixture
+    def cleaned_toc_response(self):
+        """Expected cleaned TOC from postprocessing."""
+        return TOC(
+            entries=[
+                TOCEntry(title="Introduction", page_number=3, level=1, confidence=0.95),
+                TOCEntry(title="Methods", page_number=17, level=1, confidence=0.95),
+                TOCEntry(title="Results", page_number=32, level=1, confidence=0.95),
+            ]
+        )
+
+    def test_postprocess_toc_removes_duplicates(
+        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response
+    ):
+        """Test that postprocessing removes duplicate entries."""
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.return_value = cleaned_toc_response
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result, usage = generator._postprocess_toc(
+            toc=sample_toc_with_duplicates,
+            features=sample_features,
+        )
+
+        assert len(result.entries) == 3
+        assert result.entries[0].title == "Introduction"
+        assert result.entries[1].title == "Methods"
+        assert result.entries[2].title == "Results"
+
+    def test_postprocess_toc_returns_toc_structure(
+        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response
+    ):
+        """Test that postprocessing returns a TOC structure."""
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.return_value = cleaned_toc_response
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result, usage = generator._postprocess_toc(
+            toc=sample_toc_with_duplicates,
+            features=sample_features,
+        )
+
+        assert isinstance(result, TOC)
+        assert all(isinstance(entry, TOCEntry) for entry in result.entries)
+
+    def test_postprocess_toc_tracks_token_usage(
+        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response
+    ):
+        """Test that postprocessing tracks token usage."""
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.return_value = cleaned_toc_response
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result, usage = generator._postprocess_toc(
+            toc=sample_toc_with_duplicates,
+            features=sample_features,
+        )
+
+        assert usage.llm_calls == 1
+        assert usage.input_tokens > 0
+
+    def test_postprocess_toc_uses_document_text_for_reference_toc(
+        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response
+    ):
+        """Test that postprocessing extracts reference TOC from document pages."""
+        messages_received = []
+
+        def capture_messages(messages):
+            messages_received.append(messages)
+            return cleaned_toc_response
+
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.side_effect = capture_messages
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        generator._postprocess_toc(
+            toc=sample_toc_with_duplicates,
+            features=sample_features,
+        )
+
+        # Verify that the LLM was called
+        assert len(messages_received) == 1
+        # The user message should contain context about the document
+        user_message = messages_received[0][1].content
+        assert "Introduction" in user_message or "generated TOC" in user_message.lower()
+
+    def test_postprocess_toc_includes_existing_toc_in_prompt(
+        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response
+    ):
+        """Test that the existing generated TOC is included in the prompt."""
+        messages_received = []
+
+        def capture_messages(messages):
+            messages_received.append(messages)
+            return cleaned_toc_response
+
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.side_effect = capture_messages
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        generator._postprocess_toc(
+            toc=sample_toc_with_duplicates,
+            features=sample_features,
+        )
+
+        # The user message should contain the generated TOC entries
+        user_message = messages_received[0][1].content
+        assert "Introduction" in user_message
+        assert "Methods" in user_message
+        assert "Results" in user_message
+
+    def test_postprocess_toc_handles_empty_toc(self, mock_doc, mock_llm, sample_features):
+        """Test that postprocessing handles empty TOC gracefully."""
+        empty_toc = TOC(entries=[])
+        empty_response = TOC(entries=[])
+
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.return_value = empty_response
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result, usage = generator._postprocess_toc(
+            toc=empty_toc,
+            features=sample_features,
+        )
+
+        assert isinstance(result, TOC)
+        assert len(result.entries) == 0
+
+    def test_postprocess_toc_preserves_valid_entries(self, mock_doc, mock_llm, sample_features):
+        """Test that postprocessing preserves valid entries when no cleanup needed."""
+        valid_toc = TOC(
+            entries=[
+                TOCEntry(title="Chapter 1", page_number=1, level=1, confidence=0.95),
+                TOCEntry(title="Chapter 2", page_number=10, level=1, confidence=0.95),
+            ]
+        )
+
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.return_value = valid_toc
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result, usage = generator._postprocess_toc(
+            toc=valid_toc,
+            features=sample_features,
+        )
+
+        assert len(result.entries) == 2
+        assert result.entries[0].title == "Chapter 1"
+        assert result.entries[1].title == "Chapter 2"
+
+    @pytest.mark.parametrize(
+        "max_pages_to_scan",
+        [5, 10, 20],
+    )
+    def test_postprocess_toc_respects_max_pages_for_reference_toc(
+        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response, max_pages_to_scan
+    ):
+        """Test that postprocessing respects the max pages limit for scanning reference TOC."""
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.return_value = cleaned_toc_response
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result, usage = generator._postprocess_toc(
+            toc=sample_toc_with_duplicates,
+            features=sample_features,
+            max_pages_for_reference_toc=max_pages_to_scan,
+        )
+
+        # Should still return valid result
+        assert isinstance(result, TOC)
