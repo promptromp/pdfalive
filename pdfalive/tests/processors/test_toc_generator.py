@@ -1,11 +1,11 @@
 """Unit tests for TOC generator processor."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pdfalive.models.toc import TOC, TOCEntry, TOCFeature
-from pdfalive.processors.toc_generator import TOCGenerator
+from pdfalive.processors.toc_generator import TOCGenerator, _extract_features_from_page_range
 from pdfalive.tokens import TokenUsage
 
 
@@ -15,6 +15,8 @@ def mock_doc():
     doc = MagicMock()
     doc.page_count = 2
     doc.get_toc.return_value = []
+    # Set name to None to force sequential processing (mocks can't be pickled for multiprocessing)
+    doc.name = None
 
     # Mock page iteration
     page1 = MagicMock()
@@ -94,7 +96,7 @@ class TestTOCGenerator:
         """Test feature extraction from document."""
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
 
-        features = generator._extract_features(mock_doc)
+        features = generator._extract_features(mock_doc, show_progress=False)
 
         assert len(features) > 0
         # Check that features contain expected TOCFeature structure
@@ -102,6 +104,23 @@ class TestTOCGenerator:
         assert first_span.page_number == 1
         assert first_span.font_name == "Times-Bold"
         assert first_span.font_size == 16
+
+    def test_extract_features_sequential(self, mock_doc, mock_llm):
+        """Test sequential feature extraction."""
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+
+        features = generator._extract_features_sequential(mock_doc, show_progress=False)
+
+        assert len(features) > 0
+        first_span = features[0][0][0]
+        assert first_span.page_number == 1
+        assert first_span.font_name == "Times-Bold"
+
+    def test_init_with_custom_num_processes(self, mock_doc, mock_llm):
+        """Test TOCGenerator initialization with custom num_processes."""
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm, num_processes=4)
+
+        assert generator.num_processes == 4
 
     def test_run_success(self, mock_doc, mock_llm, sample_toc_response, tmp_path):
         """Test successful TOC generation run."""
@@ -357,3 +376,410 @@ class TestTOCGeneratorPagination:
             second_system = messages_received[1][0].content
             assert "CONTINUATION" in second_system
             assert "CONTINUATION" not in first_system
+
+
+class TestFeatureExtractionMultiprocessing:
+    """Tests for multiprocessing feature extraction and merge logic."""
+
+    @pytest.fixture
+    def mock_llm(self):
+        """Create a mock LLM."""
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_doc(self):
+        """Create a minimal mock document."""
+        doc = MagicMock()
+        doc.page_count = 0
+        doc.get_toc.return_value = []
+        doc.name = None  # Force sequential processing for basic tests
+        doc.__iter__ = lambda self: iter([])
+        return doc
+
+    def test_extract_features_from_page_range_single_process(self):
+        """Test worker function with a single process handling all pages."""
+        # Create mock document data
+        mock_page_data = {
+            "blocks": [
+                {
+                    "type": 0,
+                    "lines": [
+                        {"spans": [{"font": "Times-Bold", "size": 18, "text": "Chapter Title"}]},
+                        {"spans": [{"font": "Times-Roman", "size": 12, "text": "Body text"}]},
+                    ],
+                }
+            ]
+        }
+
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_doc.page_count = 3
+
+            # Create mock pages
+            mock_pages = []
+            for _ in range(3):
+                mock_page = MagicMock()
+                mock_page.get_text.return_value = mock_page_data
+                mock_pages.append(mock_page)
+
+            mock_doc.__getitem__ = lambda self, idx: mock_pages[idx]
+            mock_pymupdf.open.return_value = mock_doc
+
+            # Single process handling all 3 pages
+            args = (0, 1, "/fake/path.pdf", 3, 5, 25)
+            start, end, features = _extract_features_from_page_range(args)
+
+            assert start == 0
+            assert end == 3
+            # Should have features from all 3 pages (1 block per page)
+            assert len(features) == 3
+            # Each block should have 2 lines
+            assert len(features[0]) == 2
+            # First line, first span should be the chapter title
+            assert features[0][0][0].font_name == "Times-Bold"
+            assert features[0][0][0].font_size == 18
+            assert features[0][0][0].text_snippet == "Chapter Title"
+
+    def test_extract_features_from_page_range_calculates_correct_ranges(self):
+        """Test that page ranges are calculated correctly for multiple processes."""
+        mock_page_data = {
+            "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Arial", "size": 12, "text": "Test"}]}]}]
+        }
+
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_doc.page_count = 12
+
+            mock_page = MagicMock()
+            mock_page.get_text.return_value = mock_page_data
+            mock_doc.__getitem__ = lambda self, idx: mock_page
+            mock_pymupdf.open.return_value = mock_doc
+
+            # Test with 4 processes on 12 pages
+            # Process 0: pages 0-2 (3 pages)
+            start0, end0, _ = _extract_features_from_page_range((0, 4, "/fake/path.pdf", 3, 5, 25))
+            assert start0 == 0
+            assert end0 == 3
+
+            # Process 1: pages 3-5 (3 pages)
+            start1, end1, _ = _extract_features_from_page_range((1, 4, "/fake/path.pdf", 3, 5, 25))
+            assert start1 == 3
+            assert end1 == 6
+
+            # Process 2: pages 6-8 (3 pages)
+            start2, end2, _ = _extract_features_from_page_range((2, 4, "/fake/path.pdf", 3, 5, 25))
+            assert start2 == 6
+            assert end2 == 9
+
+            # Process 3 (last): pages 9-11 (gets remainder)
+            start3, end3, _ = _extract_features_from_page_range((3, 4, "/fake/path.pdf", 3, 5, 25))
+            assert start3 == 9
+            assert end3 == 12
+
+    @pytest.mark.parametrize(
+        "num_pages,num_processes,expected_ranges",
+        [
+            (10, 2, [(0, 5), (5, 10)]),
+            (10, 3, [(0, 3), (3, 6), (6, 10)]),
+            (10, 4, [(0, 2), (2, 4), (4, 6), (6, 10)]),
+            (7, 3, [(0, 2), (2, 4), (4, 7)]),
+            (100, 5, [(0, 20), (20, 40), (40, 60), (60, 80), (80, 100)]),
+        ],
+    )
+    def test_page_range_distribution(self, num_pages, num_processes, expected_ranges):
+        """Test that pages are distributed correctly across processes."""
+        mock_page_data = {"blocks": [{"type": 0, "lines": [{"spans": [{"font": "Arial", "size": 12, "text": "X"}]}]}]}
+
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_doc.page_count = num_pages
+
+            mock_page = MagicMock()
+            mock_page.get_text.return_value = mock_page_data
+            mock_doc.__getitem__ = lambda self, idx: mock_page
+            mock_pymupdf.open.return_value = mock_doc
+
+            actual_ranges = []
+            for proc_idx in range(num_processes):
+                start, end, _ = _extract_features_from_page_range((proc_idx, num_processes, "/fake/path.pdf", 3, 5, 25))
+                actual_ranges.append((start, end))
+
+            assert actual_ranges == expected_ranges
+
+    def test_merged_features_maintain_page_order(self):
+        """Test that merged features from multiple processes maintain correct page order."""
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_doc.page_count = 9
+
+            # Create pages with distinct content per page
+            def create_page_data(page_idx):
+                return {
+                    "blocks": [
+                        {
+                            "type": 0,
+                            "lines": [{"spans": [{"font": "Bold", "size": 16, "text": f"Page {page_idx + 1} Title"}]}],
+                        }
+                    ]
+                }
+
+            mock_pages = [MagicMock() for _ in range(9)]
+            for i, page in enumerate(mock_pages):
+                page.get_text.return_value = create_page_data(i)
+
+            mock_doc.__getitem__ = lambda self, idx: mock_pages[idx]
+            mock_pymupdf.open.return_value = mock_doc
+
+            # Simulate 3 processes
+            results = []
+            for proc_idx in range(3):
+                start, end, features = _extract_features_from_page_range((proc_idx, 3, "/fake/path.pdf", 3, 5, 25))
+                results.append((start, end, features))
+
+            # Sort by start page (simulating what _extract_features_parallel does)
+            results = sorted(results, key=lambda x: x[0])
+
+            # Merge features
+            all_features = []
+            for _, _, features in results:
+                all_features.extend(features)
+
+            # Verify order: should have 9 blocks, each with page-specific content
+            assert len(all_features) == 9
+            for i, block in enumerate(all_features):
+                page_num = block[0][0].page_number
+                text = block[0][0].text_snippet
+                assert page_num == i + 1, f"Expected page {i + 1}, got {page_num}"
+                assert f"Page {i + 1}" in text, f"Expected 'Page {i + 1}' in text, got '{text}'"
+
+    def test_merged_features_with_multiple_blocks_per_page(self):
+        """Test merging when pages have multiple blocks."""
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_doc.page_count = 4
+
+            def create_multi_block_page(page_idx):
+                return {
+                    "blocks": [
+                        {
+                            "type": 0,
+                            "lines": [{"spans": [{"font": "Bold", "size": 18, "text": f"P{page_idx + 1} Block1"}]}],
+                        },
+                        {
+                            "type": 0,
+                            "lines": [{"spans": [{"font": "Regular", "size": 12, "text": f"P{page_idx + 1} Block2"}]}],
+                        },
+                    ]
+                }
+
+            mock_pages = [MagicMock() for _ in range(4)]
+            for i, page in enumerate(mock_pages):
+                page.get_text.return_value = create_multi_block_page(i)
+
+            mock_doc.__getitem__ = lambda self, idx: mock_pages[idx]
+            mock_pymupdf.open.return_value = mock_doc
+
+            # Simulate 2 processes
+            results = []
+            for proc_idx in range(2):
+                start, end, features = _extract_features_from_page_range((proc_idx, 2, "/fake/path.pdf", 3, 5, 25))
+                results.append((start, end, features))
+
+            results = sorted(results, key=lambda x: x[0])
+
+            all_features = []
+            for _, _, features in results:
+                all_features.extend(features)
+
+            # 4 pages × 2 blocks = 8 blocks total
+            assert len(all_features) == 8
+
+            # Verify blocks are in order: P1B1, P1B2, P2B1, P2B2, P3B1, P3B2, P4B1, P4B2
+            expected_order = [
+                ("P1 Block1", 1),
+                ("P1 Block2", 1),
+                ("P2 Block1", 2),
+                ("P2 Block2", 2),
+                ("P3 Block1", 3),
+                ("P3 Block2", 3),
+                ("P4 Block1", 4),
+                ("P4 Block2", 4),
+            ]
+            for i, (expected_text, expected_page) in enumerate(expected_order):
+                actual_text = all_features[i][0][0].text_snippet
+                actual_page = all_features[i][0][0].page_number
+                assert expected_text in actual_text, f"Block {i}: expected '{expected_text}' in '{actual_text}'"
+                assert actual_page == expected_page, f"Block {i}: expected page {expected_page}, got {actual_page}"
+
+    def test_extract_features_respects_max_blocks_per_page(self):
+        """Test that max_blocks_per_page limit is respected."""
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_doc.page_count = 1
+
+            # Page with 5 blocks
+            page_data = {
+                "blocks": [
+                    {"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 12, "text": f"Block {i}"}]}]}
+                    for i in range(5)
+                ]
+            }
+
+            mock_page = MagicMock()
+            mock_page.get_text.return_value = page_data
+            mock_doc.__getitem__ = lambda self, idx: mock_page
+            mock_pymupdf.open.return_value = mock_doc
+
+            # Limit to 2 blocks per page
+            _, _, features = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 2, 5, 25))
+
+            assert len(features) == 2
+            assert "Block 0" in features[0][0][0].text_snippet
+            assert "Block 1" in features[1][0][0].text_snippet
+
+    def test_extract_features_respects_max_lines_per_block(self):
+        """Test that max_lines_per_block limit is respected."""
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_doc.page_count = 1
+
+            # Block with 5 lines
+            page_data = {
+                "blocks": [
+                    {
+                        "type": 0,
+                        "lines": [{"spans": [{"font": "Bold", "size": 12, "text": f"Line {i}"}]} for i in range(5)],
+                    }
+                ]
+            }
+
+            mock_page = MagicMock()
+            mock_page.get_text.return_value = page_data
+            mock_doc.__getitem__ = lambda self, idx: mock_page
+            mock_pymupdf.open.return_value = mock_doc
+
+            # Limit to 3 lines per block
+            _, _, features = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 3, 25))
+
+            assert len(features) == 1  # 1 block
+            assert len(features[0]) == 3  # 3 lines
+            assert "Line 0" in features[0][0][0].text_snippet
+            assert "Line 2" in features[0][2][0].text_snippet
+
+    def test_extract_features_respects_text_snippet_length(self):
+        """Test that text_snippet_length limit is respected."""
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_doc.page_count = 1
+
+            long_text = "This is a very long text that should be truncated"
+            page_data = {
+                "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 12, "text": long_text}]}]}]
+            }
+
+            mock_page = MagicMock()
+            mock_page.get_text.return_value = page_data
+            mock_doc.__getitem__ = lambda self, idx: mock_page
+            mock_pymupdf.open.return_value = mock_doc
+
+            # Limit snippet to 10 characters
+            _, _, features = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 5, 10))
+
+            assert len(features[0][0][0].text_snippet) == 10
+            assert features[0][0][0].text_snippet == "This is a "
+            # But text_length should reflect full length
+            assert features[0][0][0].text_length == len(long_text)
+
+    def test_extract_features_skips_non_text_blocks(self):
+        """Test that non-text blocks (type != 0) are skipped."""
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_doc.page_count = 1
+
+            page_data = {
+                "blocks": [
+                    {"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 12, "text": "Text block"}]}]},
+                    {"type": 1, "image": "some_image_data"},  # Image block
+                    {"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 12, "text": "Another text"}]}]},
+                ]
+            }
+
+            mock_page = MagicMock()
+            mock_page.get_text.return_value = page_data
+            mock_doc.__getitem__ = lambda self, idx: mock_page
+            mock_pymupdf.open.return_value = mock_doc
+
+            _, _, features = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 10, 5, 25))
+
+            # Should have 3 blocks in features list, but image block will have empty lines
+            assert len(features) == 3
+            # First and third blocks should have content
+            assert len(features[0]) == 1
+            assert len(features[1]) == 0  # Image block - no lines
+            assert len(features[2]) == 1
+
+    def test_parallel_extraction_simulation_with_many_processes(self):
+        """Simulate parallel extraction with many processes and verify merge correctness."""
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            num_pages = 50
+            num_processes = 7  # Odd number to test uneven distribution
+
+            mock_doc_obj = MagicMock()
+            mock_doc_obj.page_count = num_pages
+
+            def create_page(page_idx):
+                mock_page = MagicMock()
+                mock_page.get_text.return_value = {
+                    "blocks": [
+                        {
+                            "type": 0,
+                            "lines": [
+                                {"spans": [{"font": "Bold", "size": 16, "text": f"Chapter {page_idx + 1}"}]},
+                                {"spans": [{"font": "Regular", "size": 12, "text": f"Page {page_idx + 1}"}]},
+                            ],
+                        }
+                    ]
+                }
+                return mock_page
+
+            mock_pages = [create_page(i) for i in range(num_pages)]
+            mock_doc_obj.__getitem__ = lambda self, idx: mock_pages[idx]
+            mock_pymupdf.open.return_value = mock_doc_obj
+
+            # Collect results from all "processes"
+            results = []
+            for proc_idx in range(num_processes):
+                start, end, features = _extract_features_from_page_range(
+                    (proc_idx, num_processes, "/fake/path.pdf", 3, 5, 25)
+                )
+                results.append((start, end, features))
+
+            # Verify no gaps or overlaps in page coverage
+            results = sorted(results, key=lambda x: x[0])
+            for i, (start, _, _) in enumerate(results):
+                if i == 0:
+                    assert start == 0, "First process should start at page 0"
+                else:
+                    prev_end = results[i - 1][1]
+                    assert start == prev_end, f"Gap: process {i} starts at {start}, prev ended at {prev_end}"
+
+            # Last process should end at num_pages
+            assert results[-1][1] == num_pages, f"Last process should end at {num_pages}"
+
+            # Merge and verify
+            all_features = []
+            for _, _, features in results:
+                all_features.extend(features)
+
+            # Should have exactly num_pages blocks (1 block per page)
+            assert len(all_features) == num_pages
+
+            # Verify page numbers are sequential
+            page_numbers = [block[0][0].page_number for block in all_features]
+            assert page_numbers == list(range(1, num_pages + 1)), "Page numbers should be sequential 1 to N"
+
+            # Verify content matches expected pages
+            for i, block in enumerate(all_features):
+                expected_text = f"Chapter {i + 1}"
+                actual_text = block[0][0].text_snippet
+                assert expected_text in actual_text, f"Page {i + 1}: expected '{expected_text}' in '{actual_text}'"

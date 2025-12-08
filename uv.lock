@@ -681,7 +681,6 @@ dependencies = [
     { name = "pymupdf" },
     { name = "rich" },
     { name = "tenacity" },
-    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -718,7 +717,6 @@ requires-dist = [
     { name = "pymupdf", specifier = ">=1.26.6" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "tenacity", specifier = ">=9.1.0" },
-    { name = "tqdm", specifier = ">=4.67.1" },
 ]
 provides-extras = ["anthropic", "openai", "ollama"]
 
