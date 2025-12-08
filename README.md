@@ -1,4 +1,4 @@
-# pdfalive
+![pdfalive logo](https://github.com/promptromp/pdfalive/raw/main/docs/assets/pdfalive.png)
 
 --------------------------------------------------------------------------------
 
