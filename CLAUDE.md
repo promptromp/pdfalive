@@ -81,3 +81,4 @@ When `--ocr` is enabled (default), `generate-toc` automatically detects if a PDF
 
 - When making changes, always make sure formatting, linting, type checks, and tests work afterwards. We use ruff, mypy and pytest for these, and can run them via uv, e.g. `uv run ruff ...`, `uv run mypy`, etc.
 - When writing unit-tests, use variables and/or pytest fixtures (e.g. via conftest.py and `@pytest.fixture` decorator) for fixture values and objects, rather than repeating literal values in test setup and assertions. Prefer using pytest's `@pytest.mark.parametrize` decorator when you wish to test different values or combinations of values rather than creating repetitive standalone test cases.
+- always prefer placing imports at top of files rather than inline. Especially when writing unit-test. only do otherwise to avoid circular dependencies in rare cases. In those cases, mention explicitly why you are doing this in a comment on the relevant code line.
