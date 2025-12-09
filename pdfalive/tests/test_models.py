@@ -2,6 +2,7 @@
 
 import pytest
 
+from pdfalive.models.rename import RenameOp, RenameResult
 from pdfalive.models.toc import TOC, TOCEntry
 
 
@@ -184,3 +185,95 @@ class TestTOC:
         # Sorted by page_number, then level
         assert merged.entries[0].level == 1
         assert merged.entries[1].level == 2
+
+
+class TestRenameOp:
+    """Tests for RenameOp model."""
+
+    @pytest.fixture
+    def sample_op(self):
+        return RenameOp(
+            input_filename="old_file.pdf",
+            output_filename="new_file.pdf",
+            confidence=0.85,
+            reasoning="Applied naming convention",
+        )
+
+    def test_basic_creation(self, sample_op):
+        """Test basic model creation."""
+        assert sample_op.input_filename == "old_file.pdf"
+        assert sample_op.output_filename == "new_file.pdf"
+        assert sample_op.confidence == 0.85
+        assert sample_op.reasoning == "Applied naming convention"
+
+    def test_str_representation(self, sample_op):
+        """Test string representation."""
+        result = str(sample_op)
+
+        assert "old_file.pdf" in result
+        assert "new_file.pdf" in result
+        assert "0.85" in result
+
+    @pytest.mark.parametrize(
+        "confidence",
+        [0.0, 0.5, 1.0],
+    )
+    def test_valid_confidence_values(self, confidence):
+        """Test valid confidence values."""
+        op = RenameOp(
+            input_filename="a.pdf",
+            output_filename="b.pdf",
+            confidence=confidence,
+            reasoning="test",
+        )
+        assert op.confidence == confidence
+
+    def test_default_reasoning(self):
+        """Test that reasoning defaults to empty string."""
+        op = RenameOp(
+            input_filename="a.pdf",
+            output_filename="b.pdf",
+            confidence=0.9,
+        )
+        assert op.reasoning == ""
+
+
+class TestRenameResult:
+    """Tests for RenameResult model."""
+
+    @pytest.fixture
+    def sample_operations(self):
+        return [
+            RenameOp(
+                input_filename="file1.pdf",
+                output_filename="renamed1.pdf",
+                confidence=0.9,
+                reasoning="Test 1",
+            ),
+            RenameOp(
+                input_filename="file2.pdf",
+                output_filename="renamed2.pdf",
+                confidence=0.8,
+                reasoning="Test 2",
+            ),
+        ]
+
+    @pytest.fixture
+    def sample_result(self, sample_operations):
+        return RenameResult(operations=sample_operations)
+
+    def test_len(self, sample_result):
+        """Test __len__ method."""
+        assert len(sample_result) == 2
+
+    def test_empty_result(self):
+        """Test empty result."""
+        result = RenameResult()
+        assert len(result) == 0
+        assert result.operations == []
+
+    def test_operations_list(self, sample_result):
+        """Test accessing operations list."""
+        assert len(sample_result.operations) == 2
+        assert sample_result.operations[0].input_filename == "file1.pdf"
+        assert sample_result.operations[1].input_filename == "file2.pdf"

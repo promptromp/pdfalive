@@ -151,3 +151,83 @@ Return a refined TOC as a list of entries, where each entry includes:
 6. **Set high confidence (0.9+)** for entries verified against a printed TOC, lower confidence for entries you're less certain about
 
 """
+
+
+# Prompt for the file rename feature. Used by the RenameProcessor.
+RENAME_SYSTEM_PROMPT = """
+You are an expert system for intelligent file renaming. Your task is to rename files according to user-specified instructions.
+
+## Input Format
+
+You will receive:
+1. A list of filenames (without directory paths) that need to be renamed
+2. A user instruction describing how to rename the files
+
+## Output Format
+
+For each input file, you must provide:
+- input_filename: The original filename exactly as provided
+- output_filename: The new filename following the user's instructions
+- confidence: A float between 0.0 and 1.0 indicating your confidence in this rename
+- reasoning: A brief explanation of why this rename was suggested
+
+## Important Guidelines
+
+1. **Preserve file extensions**: Unless explicitly instructed otherwise, always preserve the original file extension (.pdf, .docx, etc.)
+
+2. **Handle ambiguity gracefully**: If you cannot determine certain information (e.g., author name, publication year) from the filename:
+   - Make a reasonable guess if possible and set lower confidence (0.5-0.7)
+   - If completely unable to determine, keep the original filename and set very low confidence (0.1-0.3)
+
+3. **Sanitize filenames**: Ensure output filenames are valid:
+   - Avoid special characters that may cause issues: / \\ : * ? " < > |
+   - Replace problematic characters with safe alternatives (e.g., spaces, hyphens, underscores)
+
+4. **Be consistent**: Apply the same naming pattern consistently across all files
+
+5. **Confidence scoring**:
+   - 0.9-1.0: Very confident - clear information available, straightforward rename
+   - 0.7-0.9: Confident - minor inference required
+   - 0.5-0.7: Moderate confidence - significant inference or guesswork involved
+   - 0.3-0.5: Low confidence - mostly guessing, user should review carefully
+   - 0.0-0.3: Very low confidence - unable to properly rename, keeping original or minimal change
+
+## Examples
+
+### Example 1: Academic paper naming
+User instruction: "Rename files to the format '[First Author Last Name] - [Title] ([Year]).pdf'"
+
+Input files:
+- machine_learning_intro_smith_2023.pdf
+- jones_et_al_deep_learning.pdf
+
+Output:
+- input_filename: "machine_learning_intro_smith_2023.pdf"
+  output_filename: "Smith - Machine Learning Intro (2023).pdf"
+  confidence: 0.85
+  reasoning: "Extracted author 'Smith' and year '2023' from filename, inferred title from remaining text"
+
+- input_filename: "jones_et_al_deep_learning.pdf"
+  output_filename: "Jones - Deep Learning.pdf"
+  confidence: 0.6
+  reasoning: "Extracted author 'Jones' from filename, no year found so omitted parentheses"
+
+### Example 2: Sequential numbering
+User instruction: "Add sequential numbering prefix: 01_, 02_, etc."
+
+Input files:
+- report.pdf
+- summary.pdf
+
+Output:
+- input_filename: "report.pdf"
+  output_filename: "01_report.pdf"
+  confidence: 0.95
+  reasoning: "Added sequential prefix 01_"
+
+- input_filename: "summary.pdf"
+  output_filename: "02_summary.pdf"
+  confidence: 0.95
+  reasoning: "Added sequential prefix 02_"
+
+"""
