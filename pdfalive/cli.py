@@ -1,13 +1,17 @@
 """CLI entrypoints."""
 
+from pathlib import Path
+
 import click
 import pymupdf
 from langchain.chat_models import init_chat_model
 from langsmith import traceable
 from rich.console import Console
+from rich.table import Table
 
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
+from pdfalive.processors.rename_processor import RenameProcessor
 from pdfalive.processors.toc_generator import (
     DEFAULT_REQUEST_DELAY_SECONDS,
     TOCGenerator,
@@ -134,12 +138,7 @@ def generate_toc(
     console.print(f"[bold green]All done.[/bold green] Saved modified PDF to [bold cyan]{output_file}[/bold cyan].")
 
     if show_token_usage:
-        console.print()
-        console.print("[bold]Token Usage:[/bold]")
-        console.print(f"  LLM calls: [cyan]{usage.llm_calls}[/cyan]")
-        console.print(f"  Input tokens: [cyan]{usage.input_tokens:,}[/cyan] (estimated)")
-        console.print(f"  Output tokens: [cyan]{usage.output_tokens:,}[/cyan] (estimated)")
-        console.print(f"  Total tokens: [cyan]{usage.total_tokens:,}[/cyan]")
+        usage.print_summary(console)
 
 
 @cli.command("extract-text")
@@ -208,3 +207,137 @@ def extract_text(
         doc.close()
         console.print("[green]Document already has sufficient extractable text. No OCR needed.[/green]")
         console.print("Use --force-ocr to process anyway.")
+
+
+@cli.command("rename")
+@click.argument("input_files", type=click.Path(exists=True), nargs=-1, required=True)
+@click.option(
+    "-q",
+    "--query",
+    type=str,
+    required=True,
+    help="Renaming instruction query describing how to rename the files.",
+)
+@click.option("--model-identifier", type=str, default="gpt-5.1", help="LLM model to use.")
+@click.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Automatically apply renames without asking for confirmation.",
+)
+@click.option("--show-token-usage", is_flag=True, default=True, help="Display token usage statistics.")
+@traceable
+def rename(
+    input_files: tuple[str, ...],
+    query: str,
+    model_identifier: str,
+    yes: bool,
+    show_token_usage: bool,
+) -> None:
+    """Rename files using LLM-powered intelligent renaming.
+
+    Provide one or more input files and a renaming instruction query.
+    The LLM will suggest new names based on your instruction.
+
+    Examples:
+
+        pdfalive rename --query "Add 'REVIEWED_' prefix" *.pdf
+
+        pdfalive rename -q "Rename to '[Author] - [Title] (Year).pdf'" paper1.pdf paper2.pdf
+    """
+    console.print(
+        f"Renaming [bold cyan]{len(input_files)}[/bold cyan] file(s) "
+        f"using model [bold magenta]{model_identifier}[/bold magenta]..."
+    )
+    console.print(f"Query: [italic]{query}[/italic]")
+    console.print()
+
+    # Convert to Path objects
+    paths = [Path(f) for f in input_files]
+
+    # Initialize LLM and processor
+    llm = init_chat_model(model=model_identifier)
+    processor = RenameProcessor(llm=llm)
+
+    # Generate rename suggestions
+    console.print("[cyan]Generating rename suggestions...[/cyan]")
+    try:
+        result, usage = processor.generate_renames(paths, query)
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise SystemExit(1) from e
+
+    if not result.operations:
+        console.print("[yellow]No rename operations suggested.[/yellow]")
+        return
+
+    # Resolve full paths
+    resolved = processor._resolve_full_paths(result.operations, paths)
+
+    if not resolved:
+        console.print("[yellow]No valid rename operations to apply.[/yellow]")
+        return
+
+    # Build operation lookup for display
+    op_lookup = {op.input_filename: op for op in result.operations}
+
+    # Display proposed renames in a table
+    console.print()
+    console.print("[bold]Proposed renames:[/bold]")
+
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        padding=(1, 1),  # Add vertical and horizontal padding for better readability
+        show_lines=True,  # Add horizontal lines between rows
+    )
+    table.add_column("Original", style="cyan", overflow="fold")
+    table.add_column("New Name", style="green", overflow="fold")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Reasoning", style="dim", overflow="fold")
+
+    for source, target in resolved:
+        op = op_lookup.get(source.name)
+        confidence_str = f"{op.confidence:.0%}" if op else "N/A"
+        reasoning = op.reasoning if op else ""
+
+        # Color-code confidence
+        if op and op.confidence >= 0.9:
+            confidence_style = "green"
+        elif op and op.confidence >= 0.7:
+            confidence_style = "yellow"
+        else:
+            confidence_style = "red"
+
+        table.add_row(
+            source.name,
+            target.name,
+            f"[{confidence_style}]{confidence_str}[/{confidence_style}]",
+            reasoning[:50] + "..." if len(reasoning) > 50 else reasoning,
+        )
+
+    console.print(table)
+    console.print()
+
+    # Ask for confirmation unless --yes is provided
+    if not yes and not click.confirm("Apply these renames?", default=False):
+        console.print("[yellow]Aborted. No files were renamed.[/yellow]")
+        if show_token_usage:
+            usage.print_summary(console)
+        return
+
+    # Apply renames
+    console.print("[cyan]Applying renames...[/cyan]")
+    try:
+        processor.apply_renames(resolved)
+    except (FileNotFoundError, FileExistsError) as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        if show_token_usage:
+            usage.print_summary(console)
+        raise SystemExit(1) from e
+
+    console.print(f"[bold green]Successfully renamed {len(resolved)} file(s).[/bold green]")
+
+    if show_token_usage:
+        usage.print_summary(console)

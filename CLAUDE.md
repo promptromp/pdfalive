@@ -42,27 +42,32 @@ pdfalive/
 ├── prompts.py             # LLM system prompts
 ├── models/
 │   ├── toc.py             # TOC, TOCEntry, TOCFeature models
-│   └── page_content.py    # PageContent model
+│   ├── page_content.py    # PageContent model
+│   └── rename.py          # RenameOp, RenameResult models
 ├── processors/
 │   ├── toc_generator.py   # TOCGenerator processor
 │   ├── ocr_processor.py   # OCRProcessor for text extraction
-│   └── ocr_detection.py   # OCR detection strategies
+│   ├── ocr_detection.py   # OCR detection strategies
+│   └── rename_processor.py # RenameProcessor for file renaming
 └── tests/                 # Unit tests
 ```
 
 **CLI Commands:**
 - `generate-toc` - Main command for TOC generation (with optional automatic OCR)
 - `extract-text` - OCR-only command for text extraction from scanned PDFs
+- `rename` - Intelligent file renaming using LLM inference
 
 **Processor Classes:**
 - `TOCGenerator` - Extracts font/text features from PDF pages, sends to LLM for TOC inference, writes bookmarks back to PDF. Supports multiprocessing, intelligent batching for large documents, and retry logic with exponential backoff.
 - `OCRProcessor` - Performs OCR on scanned PDFs using PyMuPDF's Tesseract integration. Supports multiprocessing for parallel page processing.
 - `OCRDetectionStrategy` / `NoTextDetectionStrategy` - Strategy pattern for determining if a document needs OCR.
+- `RenameProcessor` - Uses LLM to generate intelligent file rename suggestions based on user instructions. Supports batch renaming with confirmation preview.
 
 **Model Classes:**
 - `TOC` / `TOCEntry` - Pydantic models for structured LLM output with confidence scores
 - `TOCFeature` - Compact representation of page features sent to the LLM
 - `PageContent` - Data model for page representation
+- `RenameOp` / `RenameResult` - Pydantic models for file rename operations with confidence scores and reasoning
 
 **Key Integration Points:**
 - PyMuPDF (`pymupdf`) for PDF reading/writing and OCR via Tesseract
