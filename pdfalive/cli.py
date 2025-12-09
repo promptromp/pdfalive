@@ -138,12 +138,7 @@ def generate_toc(
     console.print(f"[bold green]All done.[/bold green] Saved modified PDF to [bold cyan]{output_file}[/bold cyan].")
 
     if show_token_usage:
-        console.print()
-        console.print("[bold]Token Usage:[/bold]")
-        console.print(f"  LLM calls: [cyan]{usage.llm_calls}[/cyan]")
-        console.print(f"  Input tokens: [cyan]{usage.input_tokens:,}[/cyan] (estimated)")
-        console.print(f"  Output tokens: [cyan]{usage.output_tokens:,}[/cyan] (estimated)")
-        console.print(f"  Total tokens: [cyan]{usage.total_tokens:,}[/cyan]")
+        usage.print_summary(console)
 
 
 @cli.command("extract-text")
@@ -231,12 +226,14 @@ def extract_text(
     default=False,
     help="Automatically apply renames without asking for confirmation.",
 )
+@click.option("--show-token-usage", is_flag=True, default=True, help="Display token usage statistics.")
 @traceable
 def rename(
     input_files: tuple[str, ...],
     query: str,
     model_identifier: str,
     yes: bool,
+    show_token_usage: bool,
 ) -> None:
     """Rename files using LLM-powered intelligent renaming.
 
@@ -266,7 +263,7 @@ def rename(
     # Generate rename suggestions
     console.print("[cyan]Generating rename suggestions...[/cyan]")
     try:
-        result = processor.generate_renames(paths, query)
+        result, usage = processor.generate_renames(paths, query)
     except ValueError as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
         raise SystemExit(1) from e
@@ -326,6 +323,8 @@ def rename(
     # Ask for confirmation unless --yes is provided
     if not yes and not click.confirm("Apply these renames?", default=False):
         console.print("[yellow]Aborted. No files were renamed.[/yellow]")
+        if show_token_usage:
+            usage.print_summary(console)
         return
 
     # Apply renames
@@ -334,6 +333,11 @@ def rename(
         processor.apply_renames(resolved)
     except (FileNotFoundError, FileExistsError) as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
+        if show_token_usage:
+            usage.print_summary(console)
         raise SystemExit(1) from e
 
     console.print(f"[bold green]Successfully renamed {len(resolved)} file(s).[/bold green]")
+
+    if show_token_usage:
+        usage.print_summary(console)

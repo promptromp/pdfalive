@@ -1,6 +1,9 @@
 """Unit tests for token counting utilities."""
 
+from io import StringIO
+
 import pytest
+from rich.console import Console
 
 from pdfalive.tokens import (
     TokenUsage,
@@ -146,3 +149,46 @@ class TestTokenUsage:
         assert combined.input_tokens == 100
         assert combined.output_tokens == 50
         assert combined.llm_calls == 1
+
+    def test_print_summary_output(self, usage):
+        """Test that print_summary outputs formatted token usage."""
+        usage.add_call(input_tokens=1000, output_tokens=500, description="test")
+
+        # Capture console output without ANSI codes for easier assertion
+        string_io = StringIO()
+        console = Console(file=string_io, force_terminal=False, no_color=True)
+
+        usage.print_summary(console)
+
+        output = string_io.getvalue()
+
+        assert "Token Usage:" in output
+        assert "LLM calls:" in output
+        assert "1" in output  # llm_calls
+        assert "Input tokens:" in output
+        assert "1,000" in output  # input_tokens formatted
+        assert "Output tokens:" in output
+        assert "500" in output  # output_tokens
+        assert "Total tokens:" in output
+        assert "1,500" in output  # total_tokens formatted
+
+    def test_print_summary_creates_console_if_none(self, usage):
+        """Test that print_summary works without passing a console."""
+        usage.add_call(input_tokens=100, output_tokens=50, description="test")
+
+        # Should not raise an error
+        usage.print_summary()
+
+    def test_print_summary_with_zero_usage(self):
+        """Test print_summary with zero token usage."""
+        usage = TokenUsage()
+
+        string_io = StringIO()
+        console = Console(file=string_io, force_terminal=False, no_color=True)
+
+        usage.print_summary(console)
+
+        output = string_io.getvalue()
+
+        assert "LLM calls:" in output
+        assert "0" in output

@@ -32,3 +32,29 @@ class RenameResult(BaseModel):
 
     def __len__(self) -> int:
         return len(self.operations)
+
+    def merge(self, other: "RenameResult") -> "RenameResult":
+        """Merge another RenameResult into this one, handling duplicates.
+
+        When operations have the same input_filename, the operation from `self`
+        (the earlier batch) is preferred.
+
+        Args:
+            other: Another RenameResult to merge with this one.
+
+        Returns:
+            A new RenameResult containing operations from both, with duplicates removed.
+        """
+        # Use input_filename as key for deduplication
+        # Prefer operations from self (earlier batch)
+        seen: dict[str, RenameOp] = {}
+
+        for op in self.operations:
+            if op.input_filename not in seen:
+                seen[op.input_filename] = op
+
+        for op in other.operations:
+            if op.input_filename not in seen:
+                seen[op.input_filename] = op
+
+        return RenameResult(operations=list(seen.values()))

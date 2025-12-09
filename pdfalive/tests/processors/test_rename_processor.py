@@ -6,7 +6,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from pdfalive.models.rename import RenameOp, RenameResult
-from pdfalive.processors.rename_processor import RenameProcessor
+from pdfalive.processors.rename_processor import (
+    PROMPT_OVERHEAD_TOKENS,
+    RenameProcessor,
+)
+from pdfalive.tokens import TokenUsage
 
 
 @pytest.fixture
@@ -90,11 +94,12 @@ class TestRenameProcessor:
         paths = [Path("/docs/old_file.pdf"), Path("/docs/another_file.pdf")]
         query = "Rename to title case"
 
-        result = processor.generate_renames(paths, query)
+        result, usage = processor.generate_renames(paths, query)
 
         mock_llm.with_structured_output.assert_called_once_with(RenameResult)
         mock_structured_llm.invoke.assert_called_once()
         assert len(result.operations) == 2
+        assert isinstance(usage, TokenUsage)
 
     def test_generate_renames_includes_query_in_prompt(self, mock_llm, sample_rename_result):
         """Test that the user query is included in the LLM prompt."""
@@ -138,6 +143,23 @@ class TestRenameProcessor:
 
         user_message = messages_received[0][1].content
         assert "my_special_file.pdf" in user_message
+
+    def test_generate_renames_returns_token_usage(self, mock_llm, sample_rename_result):
+        """Test that generate_renames returns token usage statistics."""
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.return_value = sample_rename_result
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        processor = RenameProcessor(llm=mock_llm)
+        paths = [Path("/docs/file.pdf")]
+        query = "Add prefix"
+
+        result, usage = processor.generate_renames(paths, query)
+
+        assert isinstance(usage, TokenUsage)
+        assert usage.llm_calls == 1
+        assert usage.input_tokens > 0
+        assert usage.output_tokens >= 0
 
     def test_resolve_full_paths(self, mock_llm):
         """Test resolving rename operations to full paths."""
@@ -253,19 +275,181 @@ class TestRenameProcessor:
             processor.apply_renames(renames)
 
 
+class TestRenameProcessorBatching:
+    """Tests for RenameProcessor batching functionality."""
+
+    def test_batch_filenames_single_batch(self, mock_llm):
+        """Test that small file lists stay in a single batch."""
+        processor = RenameProcessor(llm=mock_llm)
+        filenames = ["file1.pdf", "file2.pdf", "file3.pdf"]
+
+        batches = list(processor._batch_filenames(filenames, max_tokens=10000))
+
+        assert len(batches) == 1
+        assert batches[0] == filenames
+
+    def test_batch_filenames_multiple_batches(self, mock_llm):
+        """Test that large file lists are split into multiple batches."""
+        processor = RenameProcessor(llm=mock_llm)
+        # Create many long filenames to force batching
+        filenames = [f"very_long_filename_number_{i:04d}_with_lots_of_text.pdf" for i in range(100)]
+
+        # Use a very small max_tokens to force multiple batches
+        batches = list(processor._batch_filenames(filenames, max_tokens=500 + PROMPT_OVERHEAD_TOKENS))
+
+        assert len(batches) > 1
+        # All filenames should be in some batch
+        all_batched = []
+        for batch in batches:
+            all_batched.extend(batch)
+        assert set(all_batched) == set(filenames)
+
+    def test_batch_filenames_empty_list(self, mock_llm):
+        """Test batching empty file list."""
+        processor = RenameProcessor(llm=mock_llm)
+
+        batches = list(processor._batch_filenames([]))
+
+        assert len(batches) == 1
+        assert batches[0] == []
+
+    def test_batch_filenames_preserves_order(self, mock_llm):
+        """Test that batching preserves filename order."""
+        processor = RenameProcessor(llm=mock_llm)
+        filenames = [f"file_{i:03d}.pdf" for i in range(50)]
+
+        batches = list(processor._batch_filenames(filenames, max_tokens=500 + PROMPT_OVERHEAD_TOKENS))
+
+        # Flatten batches and check order
+        all_batched = []
+        for batch in batches:
+            all_batched.extend(batch)
+        assert all_batched == filenames
+
+    def test_generate_renames_batched_merges_results(self, mock_llm):
+        """Test that batched generation merges results correctly."""
+        # Create mock that returns different results for each batch
+        batch_results = [
+            RenameResult(
+                operations=[
+                    RenameOp(
+                        input_filename="very_long_filename_to_force_batching_file1.pdf",
+                        output_filename="new1.pdf",
+                        confidence=0.9,
+                        reasoning="Batch 1",
+                    ),
+                ]
+            ),
+            RenameResult(
+                operations=[
+                    RenameOp(
+                        input_filename="very_long_filename_to_force_batching_file2.pdf",
+                        output_filename="new2.pdf",
+                        confidence=0.85,
+                        reasoning="Batch 2",
+                    ),
+                ]
+            ),
+        ]
+        call_count = [0]
+
+        def mock_invoke(messages):
+            result = batch_results[call_count[0]]
+            call_count[0] += 1
+            return result
+
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.side_effect = mock_invoke
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        processor = RenameProcessor(llm=mock_llm)
+        # Use long filenames to force batching with small token limit
+        paths = [
+            Path("/docs/very_long_filename_to_force_batching_file1.pdf"),
+            Path("/docs/very_long_filename_to_force_batching_file2.pdf"),
+        ]
+        query = "Rename files"
+
+        # Force multiple batches with very small token limit (just enough for prompt overhead + 1 file)
+        # Each filename is ~50 chars = ~17 tokens, so set limit to fit only 1 file
+        result, usage = processor.generate_renames(
+            paths, query, max_tokens_per_batch=PROMPT_OVERHEAD_TOKENS + 20, request_delay=0
+        )
+
+        # Should have called LLM twice (once per batch)
+        assert mock_structured_llm.invoke.call_count == 2
+        # Results should be merged
+        assert len(result.operations) == 2
+        filenames = {op.input_filename for op in result.operations}
+        expected = {
+            "very_long_filename_to_force_batching_file1.pdf",
+            "very_long_filename_to_force_batching_file2.pdf",
+        }
+        assert filenames == expected
+
+    def test_generate_renames_batched_tracks_usage(self, mock_llm, sample_rename_result):
+        """Test that batched generation tracks token usage across batches."""
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.return_value = sample_rename_result
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        processor = RenameProcessor(llm=mock_llm)
+        # Create enough files to force multiple batches
+        paths = [Path(f"/docs/file{i}.pdf") for i in range(10)]
+        query = "Rename files"
+
+        # Force multiple batches with small token limit
+        result, usage = processor.generate_renames(paths, query, max_tokens_per_batch=200 + PROMPT_OVERHEAD_TOKENS)
+
+        # Should track usage across all batches
+        assert usage.llm_calls >= 1
+        assert usage.input_tokens > 0
+
+    def test_generate_renames_uses_continuation_prompt_for_later_batches(self, mock_llm):
+        """Test that continuation prompt is used for batches after the first."""
+        messages_received = []
+
+        def capture_invoke(messages):
+            messages_received.append(messages)
+            return RenameResult(operations=[])
+
+        mock_structured_llm = MagicMock()
+        mock_structured_llm.invoke.side_effect = capture_invoke
+        mock_llm.with_structured_output.return_value = mock_structured_llm
+
+        processor = RenameProcessor(llm=mock_llm)
+        # Create files with long names to force multiple batches with small token limit
+        paths = [
+            Path("/docs/very_long_filename_to_force_multiple_batches_file1.pdf"),
+            Path("/docs/very_long_filename_to_force_multiple_batches_file2.pdf"),
+        ]
+        query = "Rename files"
+
+        # Use very small token limit to force batching
+        processor.generate_renames(paths, query, max_tokens_per_batch=PROMPT_OVERHEAD_TOKENS + 25, request_delay=0)
+
+        # Should have multiple calls
+        assert len(messages_received) >= 2
+
+        # First batch should use main prompt
+        first_system = messages_received[0][0].content
+        assert "CONTINUATION" not in first_system
+
+        # Later batches should use continuation prompt
+        second_system = messages_received[1][0].content
+        assert "CONTINUATION" in second_system
+
+
 class TestRenameProcessorEdgeCases:
     """Tests for edge cases in RenameProcessor."""
 
     def test_empty_file_list(self, mock_llm):
         """Test handling empty file list."""
-        mock_structured_llm = MagicMock()
-        mock_structured_llm.invoke.return_value = RenameResult(operations=[])
-        mock_llm.with_structured_output.return_value = mock_structured_llm
-
         processor = RenameProcessor(llm=mock_llm)
-        result = processor.generate_renames([], "some query")
+        result, usage = processor.generate_renames([], "some query")
 
         assert len(result.operations) == 0
+        assert usage.llm_calls == 0
 
     def test_duplicate_filenames_different_paths(self, mock_llm):
         """Test handling files with same name in different directories."""
@@ -297,7 +481,7 @@ class TestRenameProcessorEdgeCases:
         processor = RenameProcessor(llm=mock_llm)
         paths = [Path("/docs/file with spaces & special.pdf")]
 
-        result = processor.generate_renames(paths, "clean names")
+        result, usage = processor.generate_renames(paths, "clean names")
 
         assert result.operations[0].output_filename == "clean_filename.pdf"
 
@@ -337,7 +521,7 @@ class TestRenameProcessorIntegration:
         # Execute workflow
         processor = RenameProcessor(llm=mock_llm)
         paths = [file1, file2]
-        result = processor.generate_renames(paths, "rename files")
+        result, usage = processor.generate_renames(paths, "rename files")
 
         # Resolve and apply
         resolved = processor._resolve_full_paths(result.operations, paths)
@@ -348,3 +532,4 @@ class TestRenameProcessorIntegration:
         assert not file2.exists()
         assert (tmp_path / "New File.pdf").exists()
         assert (tmp_path / "Another New.pdf").exists()
+        assert usage.llm_calls == 1

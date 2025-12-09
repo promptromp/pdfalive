@@ -277,3 +277,98 @@ class TestRenameResult:
         assert len(sample_result.operations) == 2
         assert sample_result.operations[0].input_filename == "file1.pdf"
         assert sample_result.operations[1].input_filename == "file2.pdf"
+
+    def test_merge_non_overlapping(self):
+        """Test merging two RenameResults with no overlapping filenames."""
+        result1 = RenameResult(
+            operations=[
+                RenameOp(input_filename="file1.pdf", output_filename="new1.pdf", confidence=0.9, reasoning="Test 1"),
+                RenameOp(input_filename="file2.pdf", output_filename="new2.pdf", confidence=0.85, reasoning="Test 2"),
+            ]
+        )
+        result2 = RenameResult(
+            operations=[
+                RenameOp(input_filename="file3.pdf", output_filename="new3.pdf", confidence=0.9, reasoning="Test 3"),
+                RenameOp(input_filename="file4.pdf", output_filename="new4.pdf", confidence=0.95, reasoning="Test 4"),
+            ]
+        )
+
+        merged = result1.merge(result2)
+
+        assert len(merged) == 4
+        filenames = {op.input_filename for op in merged.operations}
+        assert filenames == {"file1.pdf", "file2.pdf", "file3.pdf", "file4.pdf"}
+
+    def test_merge_with_duplicates_prefers_earlier(self):
+        """Test that merging prefers operations from the first result when duplicates exist."""
+        result1 = RenameResult(
+            operations=[
+                RenameOp(
+                    input_filename="file1.pdf",
+                    output_filename="first_rename.pdf",
+                    confidence=0.85,
+                    reasoning="First",
+                ),
+            ]
+        )
+        result2 = RenameResult(
+            operations=[
+                RenameOp(
+                    input_filename="file1.pdf",
+                    output_filename="second_rename.pdf",
+                    confidence=0.95,
+                    reasoning="Second",
+                ),
+                RenameOp(
+                    input_filename="file2.pdf",
+                    output_filename="new2.pdf",
+                    confidence=0.9,
+                    reasoning="Test",
+                ),
+            ]
+        )
+
+        merged = result1.merge(result2)
+
+        assert len(merged) == 2
+        # The overlapping entry should have output_filename from result1
+        file1_op = next(op for op in merged.operations if op.input_filename == "file1.pdf")
+        assert file1_op.output_filename == "first_rename.pdf"
+        assert file1_op.confidence == 0.85
+
+    def test_merge_empty_results(self):
+        """Test merging empty RenameResults."""
+        result1 = RenameResult(operations=[])
+        result2 = RenameResult(operations=[])
+
+        merged = result1.merge(result2)
+
+        assert len(merged) == 0
+
+    def test_merge_into_empty_result(self):
+        """Test merging into an empty RenameResult."""
+        result1 = RenameResult(operations=[])
+        result2 = RenameResult(
+            operations=[
+                RenameOp(input_filename="file1.pdf", output_filename="new1.pdf", confidence=0.9, reasoning="Test"),
+            ]
+        )
+
+        merged = result1.merge(result2)
+
+        assert len(merged) == 1
+        assert merged.operations[0].input_filename == "file1.pdf"
+
+    def test_merge_from_empty_result(self):
+        """Test merging an empty RenameResult into a non-empty one."""
+        result1 = RenameResult(
+            operations=[
+                RenameOp(input_filename="file1.pdf", output_filename="new1.pdf", confidence=0.9, reasoning="Test"),
+            ]
+        )
+        result2 = RenameResult(operations=[])
+
+        merged = result1.merge(result2)
+
+        assert len(merged) == 1
+        assert merged.operations[0].input_filename == "file1.pdf"

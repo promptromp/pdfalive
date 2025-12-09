@@ -154,6 +154,7 @@ Return a refined TOC as a list of entries, where each entry includes:
 
 
 # Prompt for the file rename feature. Used by the RenameProcessor.
+# This is used for the first batch or when all files fit in a single call.
 RENAME_SYSTEM_PROMPT = """
 You are an expert system for intelligent file renaming. Your task is to rename files according to user-specified instructions.
 
@@ -162,6 +163,8 @@ You are an expert system for intelligent file renaming. Your task is to rename f
 You will receive:
 1. A list of filenames (without directory paths) that need to be renamed
 2. A user instruction describing how to rename the files
+
+**Note on batching**: For large numbers of files, you may receive them in batches. Process ONLY the files provided in each request. Apply the user's naming convention consistently across all files you receive.
 
 ## Output Format
 
@@ -236,5 +239,57 @@ Output:
   output_filename: "02_summary.pdf"
   confidence: 0.95
   reasoning: "Added sequential prefix 02_"
+
+"""
+
+
+# Prompt for continuation batches when files are paginated across multiple LLM calls.
+# This is a standalone prompt (no conversation history) that explains we're continuing from where we left off.
+RENAME_CONTINUATION_SYSTEM_PROMPT = """
+You are an expert system for intelligent file renaming. Your task is to rename files according to user-specified instructions.
+
+This is a CONTINUATION of a multi-part file renaming task. Due to the large number of files, they are being processed in batches.
+
+## Context
+
+You are processing a batch of files from a larger set. Earlier batches have already been processed separately. Your task is to rename ONLY the files provided in this batch, applying the same naming convention consistently.
+
+## Input Format
+
+You will receive:
+1. A list of filenames (without directory paths) that need to be renamed
+2. A user instruction describing how to rename the files
+3. Information about which batch this is (e.g., "batch 2 of 5")
+
+## Output Format
+
+For each input file, you must provide:
+- input_filename: The original filename exactly as provided
+- output_filename: The new filename following the user's instructions
+- confidence: A float between 0.0 and 1.0 indicating your confidence in this rename
+- reasoning: A brief explanation of why this rename was suggested
+
+## Important Guidelines
+
+1. **Process ONLY this batch**: Only rename the files provided in this request. Do not assume anything about files in other batches.
+
+2. **Maintain consistency**: Apply the same naming pattern that would be applied to any other batch. The user's naming instruction should be applied uniformly.
+
+3. **RESPECT USER FORMATTING EXACTLY**: When the user specifies a format with special characters, you MUST include those characters:
+   - Square brackets: `[Author] - Title` becomes `[Smith] - Report.pdf`
+   - Curly braces: `{Year}_Title` becomes `{2023}_Report.pdf`
+   - Parentheses: `(Category) Name` becomes `(Finance) Report.pdf`
+   - Only avoid filesystem-forbidden characters: / \\ : * ? " < > |
+
+4. **Sequential numbering considerations**: If the user requested sequential numbering, you will be told what starting number to use for this batch.
+
+5. **Confidence scoring**:
+   - 0.9-1.0: Very confident - clear information available, straightforward rename
+   - 0.7-0.9: Confident - minor inference required
+   - 0.5-0.7: Moderate confidence - significant inference or guesswork involved
+   - 0.3-0.5: Low confidence - mostly guessing
+   - 0.0-0.3: Very low confidence - unable to properly rename
+
+6. **Preserve file extensions**: Unless explicitly instructed otherwise, always preserve the original file extension.
 
 """
