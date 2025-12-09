@@ -3,6 +3,7 @@
 import click
 import pymupdf
 from langchain.chat_models import init_chat_model
+from langsmith import traceable
 from rich.console import Console
 
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
@@ -63,6 +64,7 @@ def cli() -> None:
     default=False,
     help="Enable/disable LLM postprocessing to clean up and improve the generated TOC.",
 )
+@traceable
 def generate_toc(
     input_file: str,
     output_file: str,
@@ -161,6 +163,7 @@ def generate_toc(
     default=False,
     help="Force OCR even if document already has text.",
 )
+@traceable
 def extract_text(
     input_file: str,
     output_file: str,

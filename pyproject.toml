@@ -21,6 +21,7 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
     "click>=8.3.1",
     "langchain>=1.1.2",
+    "langsmith>=0.4.55",
     "pydantic>=2.12.5",
     "pymupdf>=1.26.6",
     "tenacity>=9.1.0",
