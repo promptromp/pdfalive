@@ -85,6 +85,33 @@ Extract text from scanned PDFs using OCR and save to a new PDF with an embedded 
 
 This is useful when you want a searchable/selectable text layer without generating a TOC.
 
+### rename
+
+Intelligently rename PDF files using LLM inference. The tool analyzes filenames and applies renaming rules based on your instructions.
+
+Basic usage:
+
+	pdfalive rename -q "Add 'REVIEWED_' prefix" *.pdf
+
+**Custom naming formats:** Specify exact formatting including special characters:
+
+	pdfalive rename -q "[Author Last Name] - Title (Year).pdf" paper1.pdf paper2.pdf
+
+The LLM will extract metadata from filenames and apply your specified format, preserving special characters like brackets, parentheses, and dashes.
+
+**Batch renaming with confirmation:** By default, the tool shows a preview table and asks for confirmation before renaming:
+
+	pdfalive rename -q "Rename to 'Report_[Date].pdf'" *.pdf
+
+**Automatic confirmation:** Skip the confirmation prompt with `-y`:
+
+	pdfalive rename -q "Add sequential numbering prefix" -y *.pdf
+
+**Other useful options:**
+
+- `--model-identifier` - Choose which LLM to use (default: `gpt-5.1`)
+- `-y, --yes` - Automatically apply renames without confirmation
+
 
 ## Development
 

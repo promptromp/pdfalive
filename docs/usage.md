@@ -94,6 +94,40 @@ Extract text from scanned PDFs using OCR, creating a searchable PDF with an embe
 	pdfalive extract-text --ocr-language fra french_document.pdf output.pdf
 
 
+### rename
+
+Intelligently rename PDF files using LLM-powered inference. The tool analyzes filenames and applies your renaming instructions.
+
+**Basic usage:**
+
+	pdfalive rename -q "Add 'REVIEWED_' prefix" *.pdf
+
+**Custom naming formats with special characters:**
+
+	# Rename to format: [Author Last Name] - Title (Year).pdf
+	pdfalive rename -q "[Author Last Name] - Title (Year).pdf" paper1.pdf paper2.pdf
+
+	# Rename with curly braces: {Category}_Filename.pdf
+	pdfalive rename -q "{Category}_Filename.pdf" *.pdf
+
+The LLM respects your exact formatting, including brackets, parentheses, dashes, and other special characters.
+
+**Options:**
+
+	# Use a different LLM
+	pdfalive rename -q "Standardize filenames" --model-identifier 'claude-sonnet-4-5' *.pdf
+
+	# Skip confirmation prompt
+	pdfalive rename -q "Add sequential numbering" -y *.pdf
+
+**Workflow:**
+
+1. The tool analyzes each filename and generates rename suggestions
+2. A preview table shows original names, proposed new names, confidence scores, and reasoning
+3. You confirm or cancel the operation (unless `-y` is used)
+4. Files are renamed in place (same directory)
+
+
 ## Tips
 
 - For large documents, the tool automatically batches LLM requests to stay within context limits

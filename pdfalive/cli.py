@@ -289,11 +289,16 @@ def rename(
     console.print()
     console.print("[bold]Proposed renames:[/bold]")
 
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Original", style="cyan")
-    table.add_column("New Name", style="green")
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        padding=(1, 1),  # Add vertical and horizontal padding for better readability
+        show_lines=True,  # Add horizontal lines between rows
+    )
+    table.add_column("Original", style="cyan", overflow="fold")
+    table.add_column("New Name", style="green", overflow="fold")
     table.add_column("Confidence", justify="right")
-    table.add_column("Reasoning", style="dim")
+    table.add_column("Reasoning", style="dim", overflow="fold")
 
     for source, target in resolved:
         op = op_lookup.get(source.name)

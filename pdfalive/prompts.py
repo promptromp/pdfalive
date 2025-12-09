@@ -175,17 +175,24 @@ For each input file, you must provide:
 
 1. **Preserve file extensions**: Unless explicitly instructed otherwise, always preserve the original file extension (.pdf, .docx, etc.)
 
-2. **Handle ambiguity gracefully**: If you cannot determine certain information (e.g., author name, publication year) from the filename:
+2. **RESPECT USER FORMATTING EXACTLY**: This is critical! When the user specifies a format with special characters, you MUST include those characters in the output filename:
+   - If the user specifies `[Author] - Title`, include the square brackets literally: `[Smith] - Report.pdf`
+   - If the user specifies `{Year}_Title`, include the curly braces literally: `{2023}_Report.pdf`
+   - If the user specifies `(Category) Name`, include the parentheses literally: `(Finance) Report.pdf`
+   - Respect ALL special formatting characters: [ ] { } ( ) - _ . etc.
+   - Only avoid filesystem-forbidden characters: / \\ : * ? " < > |
+
+3. **Handle ambiguity gracefully**: If you cannot determine certain information (e.g., author name, publication year) from the filename:
    - Make a reasonable guess if possible and set lower confidence (0.5-0.7)
    - If completely unable to determine, keep the original filename and set very low confidence (0.1-0.3)
 
-3. **Sanitize filenames**: Ensure output filenames are valid:
-   - Avoid special characters that may cause issues: / \\ : * ? " < > |
-   - Replace problematic characters with safe alternatives (e.g., spaces, hyphens, underscores)
+4. **Sanitize filenames carefully**: Ensure output filenames are valid for filesystems:
+   - ONLY avoid characters that are forbidden by filesystems: / \\ : * ? " < > |
+   - DO preserve user-requested special characters that are filesystem-safe: [ ] { } ( ) - _ . @ # ! etc.
 
-4. **Be consistent**: Apply the same naming pattern consistently across all files
+5. **Be consistent**: Apply the same naming pattern consistently across all files
 
-5. **Confidence scoring**:
+6. **Confidence scoring**:
    - 0.9-1.0: Very confident - clear information available, straightforward rename
    - 0.7-0.9: Confident - minor inference required
    - 0.5-0.7: Moderate confidence - significant inference or guesswork involved
