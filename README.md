@@ -2,122 +2,196 @@
 
 --------------------------------------------------------------------------------
 
-
 [![CI](https://github.com/promptromp/pdfalive/actions/workflows/ci.yml/badge.svg)](https://github.com/promptromp/pdfalive/actions/workflows/ci.yml)
 [![GitHub License](https://img.shields.io/github/license/promptromp/pdfalive)](https://github.com/promptromp/pdfalive/blob/main/LICENSE)
 [![PyPI - Version](https://img.shields.io/pypi/v/pdfalive)](https://pypi.org/project/pdfalive/)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pdfalive)](https://pypi.org/project/pdfalive/)
 
-*pdfalive*: A Python library and set of CLI tools to bring PDF files alive with the magic of LLMs.
+A Python library and CLI toolkit that brings PDF files alive with the power of LLMs.
 
-Features:
+## Highlights
 
-* Automatically generate a Table of Contents via PDF Bookmarks for PDF file using LLMs. Supports arbitrarily large files with intelligent batching.
-* Automatically detect if OCR is needed to parse text from raster data. If needed, performs OCR via Tesseract OCR library.
-* Choose which LLM to use from any vendor. Supports using local models via `ollama` as well. Retry logic included for handling rate limits.
+- 📑 **Automatic TOC Generation** — Generate clickable Table of Contents (PDF bookmarks) using LLM inference. Supports arbitrarily large documents with intelligent batching.
+- 🔍 **Smart OCR Detection** — Automatically detects scanned PDFs and performs OCR via [Tesseract](https://github.com/tesseract-ocr/tesseract) when needed.
+- 📝 **Intelligent File Renaming** — Batch rename files using natural language instructions with LLM-powered inference.
+- 🤖 **Multi-Provider LLM Support** — Use any LLM provider via [LangChain](https://github.com/langchain-ai/langchain): OpenAI, Anthropic, local models via [Ollama](https://ollama.ai/), and more.
+- 🔄 **Built-in Resilience** — Automatic retry logic with exponential backoff for handling API rate limits.
 
 ## Installation
 
-the [tesseract](https://github.com/tesseract-ocr/tesseract) library is required for OCR. This is used for PDFs where text is not parsed. On MacOS, can install via Homebrew:
+[Tesseract](https://github.com/tesseract-ocr/tesseract) is required for OCR functionality. On macOS:
 
-	brew install tesseract
+```bash
+brew install tesseract
+```
 
-You can then install the pdfalive package via pip for example:
+Install pdfalive via [pip](https://pip.pypa.io/):
 
-	pip install pdfalive
+```bash
+pip install pdfalive
+```
 
+Or run directly without installation using [uvx](https://docs.astral.sh/uv/guides/tools/):
+
+```bash
+uvx pdfalive generate-toc input.pdf output.pdf
+```
 
 ## Usage
 
-To use the CLIs described below, you can install the python package (`pip install pdfalive`), or run the cli directly using [uvx](https://docs.astral.sh/uv/guides/tools/):
+Use `--help` on any command for detailed options:
 
-	uvx pdfalive generate-toc input.pdf output.pdf
-
-More detailed examples of the CLI sub-commands are provided below.
-You can also use `--help` on the main command-line and any of the sub-commands to get an idea of the different options supported.
+```bash
+pdfalive --help
+pdfalive generate-toc --help
+```
 
 ### generate-toc
 
-Automatically generate clickable Table of Contents (using PDF bookmarks) for a PDF file. The tool extracts font and text features from the PDF and uses an LLM to intelligently identify chapter and section headings.
+Generate a clickable Table of Contents using PDF bookmarks. The tool extracts font and text features from the PDF and uses an LLM to intelligently identify chapter and section headings.
 
-Basic usage:
+```bash
+pdfalive generate-toc input.pdf output.pdf
+```
 
-	pdfalive generate-toc input.pdf output.pdf
+**Choosing an LLM:**
 
-**Choosing an LLM:** By default we use the latest OpenAI model, but you can use any LLM supported by LangChain:
+By default, pdfalive uses the latest OpenAI model. Use any [LangChain-supported model](https://python.langchain.com/docs/integrations/chat/):
 
-	pdfalive generate-toc --model-identifier 'claude-sonnet-4-5' input.pdf output.pdf
+```bash
+# Use Claude
+pdfalive generate-toc --model-identifier 'claude-sonnet-4-5' input.pdf output.pdf
 
-Set the appropriate API key for your provider (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`).
+# Use a local model via Ollama
+pdfalive generate-toc --model-identifier 'ollama/llama3' input.pdf output.pdf
+```
 
-**Scanned PDFs:** OCR is enabled by default. If your PDF is a scanned document without extractable text, OCR will be performed automatically to extract text before TOC generation.
+Set the appropriate API key for your provider (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
 
-By default, the OCR text layer is discarded after TOC generation (preserving original file size). To include the OCR text layer in the output (making it searchable):
+**Scanned PDFs:**
 
-	pdfalive generate-toc --ocr-output scanned.pdf output.pdf
+OCR is enabled by default. Scanned documents without extractable text are automatically detected and processed:
 
-To disable automatic OCR detection entirely:
+```bash
+# Default: OCR text layer discarded after TOC generation (preserves file size)
+pdfalive generate-toc scanned.pdf output.pdf
 
-	pdfalive generate-toc --no-ocr input.pdf output.pdf
+# Include OCR text layer in output (makes PDF searchable)
+pdfalive generate-toc --ocr-output scanned.pdf output.pdf
 
-**Improving TOC quality with postprocessing:**
+# Disable automatic OCR entirely
+pdfalive generate-toc --no-ocr input.pdf output.pdf
+```
 
-For documents with a printed table of contents page, you can enable LLM postprocessing to refine the generated TOC:
+**Postprocessing:**
 
-	pdfalive generate-toc --postprocess input.pdf output.pdf
+For documents with a printed table of contents page, enable LLM postprocessing to refine results:
+
+```bash
+pdfalive generate-toc --postprocess input.pdf output.pdf
+```
 
 Postprocessing uses an additional LLM call to:
-- Remove duplicate entries
-- Fix typos in section titles
+- Remove duplicate entries and fix typos
 - Cross-reference against any printed TOC found in the document
 - Add missing entries and correct page numbers
 
-**Other useful options:**
+**Other options:**
 
-- `--force` - Overwrite existing TOC if the PDF already has bookmarks
-- `--ocr-language` - Set OCR language (default: `eng`). Use Tesseract language codes like `deu`, `fra`, etc.
+| Option | Description |
+|--------|-------------|
+| `--force` | Overwrite existing TOC if the PDF already has bookmarks |
+| `--ocr-language` | Set OCR language (default: `eng`). Use [Tesseract language codes](https://tesseract-ocr.github.io/tessdoc/Data-Files-in-different-versions.html) |
+| `--request-delay` | Delay between LLM calls for rate limiting (default: 2s) |
 
 ### extract-text
 
 Extract text from scanned PDFs using OCR and save to a new PDF with an embedded text layer:
 
-	pdfalive extract-text input.pdf output.pdf
+```bash
+pdfalive extract-text input.pdf output.pdf
+```
 
-This is useful when you want a searchable/selectable text layer without generating a TOC.
+This creates a searchable/selectable PDF without generating a TOC.
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--force` | Force OCR even if document already has text |
+| `--ocr-language` | Set OCR language (default: `eng`) |
+| `--ocr-dpi` | DPI resolution for OCR processing (default: 300) |
 
 ### rename
 
-Intelligently rename PDF files using LLM inference. The tool analyzes filenames and applies renaming rules based on your instructions.
+Intelligently rename files using LLM inference. Analyzes filenames and applies renaming rules based on natural language instructions.
 
-Basic usage:
+```bash
+pdfalive rename -q "Add 'REVIEWED_' prefix" *.pdf
+```
 
-	pdfalive rename -q "Add 'REVIEWED_' prefix" *.pdf
+**Custom naming formats:**
 
-**Custom naming formats:** Specify exact formatting including special characters:
+Specify exact formatting including special characters — the LLM respects brackets, parentheses, dashes, and other formatting:
 
-	pdfalive rename -q "[Author Last Name] - Title (Year).pdf" paper1.pdf paper2.pdf
+```bash
+pdfalive rename -q "[Author Last Name] - Title (Year).pdf" paper1.pdf paper2.pdf
+```
 
-The LLM will extract metadata from filenames and apply your specified format, preserving special characters like brackets, parentheses, and dashes.
+**Workflow:**
 
-**Batch renaming with confirmation:** By default, the tool shows a preview table and asks for confirmation before renaming:
+1. The tool analyzes each filename and generates rename suggestions
+2. A preview table shows original names, proposed names, confidence scores, and reasoning
+3. Confirm or cancel the operation (unless `-y` is used)
+4. Files are renamed in place
 
-	pdfalive rename -q "Rename to 'Report_[Date].pdf'" *.pdf
+**Automatic confirmation:**
 
-**Automatic confirmation:** Skip the confirmation prompt with `-y`:
+```bash
+pdfalive rename -q "Add sequential numbering prefix" -y *.pdf
+```
 
-	pdfalive rename -q "Add sequential numbering prefix" -y *.pdf
+**Options:**
 
-**Other useful options:**
-
-- `--model-identifier` - Choose which LLM to use (default: `gpt-5.1`)
-- `-y, --yes` - Automatically apply renames without confirmation
-
+| Option | Description |
+|--------|-------------|
+| `--model-identifier` | Choose which LLM to use (default: `gpt-5.1`) |
+| `-y, --yes` | Automatically apply renames without confirmation |
+| `--show-token-usage` | Display token usage statistics (default: enabled) |
 
 ## Development
 
-We use `uv` to manage the library. To install locally can run e.g. with:
+We use [uv](https://docs.astral.sh/uv/) to manage the project:
 
-	uv sync
-	uv pip install -e .
+```bash
+# Install dependencies
+uv sync
 
-We use `ruff` for formatting and linting, `mypy` for static type checking, and `pytest` for running unit-tests. We also use [pre-commit](https://pre-commit.com/) for ensuring high-quality commits.
+# Install in editable mode
+uv pip install -e .
+```
+
+**Code quality tools:**
+
+| Tool | Purpose |
+|------|---------|
+| [ruff](https://docs.astral.sh/ruff/) | Formatting and linting |
+| [mypy](https://mypy-lang.org/) | Static type checking |
+| [pytest](https://docs.pytest.org/) | Unit testing |
+| [pre-commit](https://pre-commit.com/) | Git hooks for quality checks |
+
+```bash
+# Run linting
+uv run ruff check .
+uv run ruff format .
+
+# Run type checking
+uv run mypy pdfalive
+
+# Run tests
+uv run pytest
+```
+
+## License
+
+pdfalive is distributed under the terms of the [MIT License](LICENSE).
