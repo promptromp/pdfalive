@@ -2,6 +2,7 @@
 
 import os
 import stat
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -64,7 +65,7 @@ class TestExtractTextInplace:
 class TestSaveInplace:
     """Tests for the _save_inplace helper function."""
 
-    def test_replaces_target_with_temp_file(self, tmp_path: "pytest.TempPathFactory") -> None:
+    def test_replaces_target_with_temp_file(self, tmp_path: Path) -> None:
         """Test that _save_inplace replaces target file with temp file contents."""
         # Create original file with some content
         target_file = tmp_path / "original.pdf"
@@ -81,7 +82,7 @@ class TestSaveInplace:
         # Temp file should be gone (moved)
         assert not temp_file.exists()
 
-    def test_preserves_file_permissions(self, tmp_path: "pytest.TempPathFactory") -> None:
+    def test_preserves_file_permissions(self, tmp_path: Path) -> None:
         """Test that _save_inplace preserves the original file's permissions."""
         # Create original file with specific permissions
         target_file = tmp_path / "original.pdf"
