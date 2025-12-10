@@ -24,6 +24,9 @@ Generate a clickable Table of Contents for any PDF. The tool analyzes font sizes
 
 	pdfalive generate-toc input.pdf output.pdf
 
+	# Or modify the file in place
+	pdfalive generate-toc --inplace input.pdf
+
 **Using a different LLM:**
 
 	# Use Claude instead of the default OpenAI model
@@ -70,6 +73,9 @@ Postprocessing performs an additional LLM call that:
 
 **Other options:**
 
+	# Modify file in place
+	pdfalive generate-toc --inplace input.pdf
+
 	# Overwrite existing bookmarks
 	pdfalive generate-toc --force input.pdf output.pdf
 
@@ -85,7 +91,13 @@ Extract text from scanned PDFs using OCR, creating a searchable PDF with an embe
 
 	pdfalive extract-text scanned.pdf searchable.pdf
 
+	# Or modify the file in place
+	pdfalive extract-text --inplace scanned.pdf
+
 **Options:**
+
+	# Modify file in place
+	pdfalive extract-text --inplace input.pdf
 
 	# Force OCR even if document already has text
 	pdfalive extract-text --force input.pdf output.pdf

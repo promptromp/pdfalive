@@ -52,6 +52,9 @@ Generate a clickable Table of Contents using PDF bookmarks. The tool extracts fo
 
 ```bash
 pdfalive generate-toc input.pdf output.pdf
+
+# Or modify the file in place
+pdfalive generate-toc --inplace input.pdf
 ```
 
 **Choosing an LLM:**
@@ -100,6 +103,7 @@ Postprocessing uses an additional LLM call to:
 
 | Option | Description |
 |--------|-------------|
+| `--inplace` | Modify the input file in place instead of creating a new output file |
 | `--force` | Overwrite existing TOC if the PDF already has bookmarks |
 | `--ocr-language` | Set OCR language (default: `eng`). Use [Tesseract language codes](https://tesseract-ocr.github.io/tessdoc/Data-Files-in-different-versions.html) |
 | `--request-delay` | Delay between LLM calls for rate limiting (default: 2s) |
@@ -110,6 +114,9 @@ Extract text from scanned PDFs using OCR and save to a new PDF with an embedded 
 
 ```bash
 pdfalive extract-text input.pdf output.pdf
+
+# Or modify the file in place
+pdfalive extract-text --inplace input.pdf
 ```
 
 This creates a searchable/selectable PDF without generating a TOC.
@@ -118,6 +125,7 @@ This creates a searchable/selectable PDF without generating a TOC.
 
 | Option | Description |
 |--------|-------------|
+| `--inplace` | Modify the input file in place instead of creating a new output file |
 | `--force` | Force OCR even if document already has text |
 | `--ocr-language` | Set OCR language (default: `eng`) |
 | `--ocr-dpi` | DPI resolution for OCR processing (default: 300) |

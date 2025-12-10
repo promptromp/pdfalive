@@ -1,5 +1,8 @@
 """CLI entrypoints."""
 
+import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import click
@@ -19,6 +22,23 @@ from pdfalive.processors.toc_generator import (
 )
 
 
+def _save_inplace(temp_file: str, target_file: str) -> None:
+    """Replace target file with temp file contents, preserving original permissions.
+
+    PyMuPDF cannot save directly to the same file it opened (requires incremental save
+    which isn't always possible). This helper saves to a temp file first, then replaces
+    the original.
+
+    Args:
+        temp_file: Path to the temporary file containing the new content.
+        target_file: Path to the original file to replace.
+    """
+    # Preserve original file permissions
+    original_stat = os.stat(target_file)
+    shutil.move(temp_file, target_file)
+    os.chmod(target_file, original_stat.st_mode)
+
+
 console = Console()
 
 
@@ -30,7 +50,7 @@ def cli() -> None:
 
 @cli.command("generate-toc")
 @click.argument("input_file", type=click.Path(exists=True))
-@click.argument("output_file", type=click.Path())
+@click.argument("output_file", type=click.Path(), required=False)
 @click.option("--model-identifier", type=str, default="gpt-5.1", help="LLM model to use.")
 @click.option("--force", is_flag=True, default=False, help="Force overwrite existing TOC if present.")
 @click.option("--show-token-usage", is_flag=True, default=True, help="Display token usage statistics.")
@@ -68,10 +88,16 @@ def cli() -> None:
     default=False,
     help="Enable/disable LLM postprocessing to clean up and improve the generated TOC.",
 )
+@click.option(
+    "--inplace",
+    is_flag=True,
+    default=False,
+    help="Modify the input file in place instead of creating a new output file.",
+)
 @traceable
 def generate_toc(
     input_file: str,
-    output_file: str,
+    output_file: str | None,
     model_identifier: str,
     force: bool,
     show_token_usage: bool,
@@ -81,12 +107,33 @@ def generate_toc(
     ocr_dpi: int,
     ocr_output: bool,
     postprocess: bool,
+    inplace: bool,
 ) -> None:
     """Generate a table of contents for a PDF file."""
-    console.print(
-        f"Generating TOC for [bold cyan]{input_file}[/bold cyan] "
-        f"using model [bold magenta]{model_identifier}[/bold magenta]..."
-    )
+    # Validate that either output_file is provided or --inplace is set
+    if not inplace and not output_file:
+        raise click.UsageError("Either OUTPUT_FILE must be provided or --inplace must be set.")
+    if inplace and output_file:
+        raise click.UsageError("Cannot specify both OUTPUT_FILE and --inplace.")
+
+    # Determine the actual output path
+    # For inplace mode, we use a temp file then replace the original (PyMuPDF limitation)
+    if inplace:
+        input_path = Path(input_file)
+        temp_fd, temp_path = tempfile.mkstemp(suffix=input_path.suffix, dir=input_path.parent)
+        os.close(temp_fd)
+        actual_output_file = temp_path
+        console.print(
+            f"Generating TOC for [bold cyan]{input_file}[/bold cyan] [yellow](in place)[/yellow] "
+            f"using model [bold magenta]{model_identifier}[/bold magenta]..."
+        )
+    else:
+        assert output_file is not None  # Validated above
+        actual_output_file = output_file
+        console.print(
+            f"Generating TOC for [bold cyan]{input_file}[/bold cyan] "
+            f"using model [bold magenta]{model_identifier}[/bold magenta]..."
+        )
 
     doc = pymupdf.open(input_file)
     original_doc = None  # Keep reference to original if we need to discard OCR
@@ -122,20 +169,29 @@ def generate_toc(
     llm = init_chat_model(model=model_identifier)
     processor = TOCGenerator(doc=doc, llm=llm)
 
-    usage = processor.run(output_file=output_file, force=force, request_delay=request_delay, postprocess=postprocess)
+    usage = processor.run(
+        output_file=actual_output_file, force=force, request_delay=request_delay, postprocess=postprocess
+    )
 
     # If --ocr-output is not set and we performed OCR, apply TOC to original and save that instead
     if not ocr_output and performed_ocr and original_doc is not None:
         console.print("[cyan]Applying TOC to original document (discarding OCR text layer)...[/cyan]")
         toc = doc.get_toc()
-        apply_toc_to_document(original_doc, toc, output_file)
+        apply_toc_to_document(original_doc, toc, actual_output_file)
         original_doc.close()
         doc.close()
     else:
         if original_doc is not None:
             original_doc.close()
 
-    console.print(f"[bold green]All done.[/bold green] Saved modified PDF to [bold cyan]{output_file}[/bold cyan].")
+    # For inplace mode, replace the original file with the temp file
+    if inplace:
+        _save_inplace(actual_output_file, input_file)
+        console.print(f"[bold green]All done.[/bold green] Modified [bold cyan]{input_file}[/bold cyan] in place.")
+    else:
+        console.print(
+            f"[bold green]All done.[/bold green] Saved modified PDF to [bold cyan]{actual_output_file}[/bold cyan]."
+        )
 
     if show_token_usage:
         usage.print_summary(console)
@@ -143,7 +199,7 @@ def generate_toc(
 
 @cli.command("extract-text")
 @click.argument("input_file", type=click.Path(exists=True))
-@click.argument("output_file", type=click.Path())
+@click.argument("output_file", type=click.Path(), required=False)
 @click.option(
     "--ocr-language",
     type=str,
@@ -162,16 +218,43 @@ def generate_toc(
     default=False,
     help="Force OCR even if document already has text.",
 )
+@click.option(
+    "--inplace",
+    is_flag=True,
+    default=False,
+    help="Modify the input file in place instead of creating a new output file.",
+)
 @traceable
 def extract_text(
     input_file: str,
-    output_file: str,
+    output_file: str | None,
     ocr_language: str,
     ocr_dpi: int,
     force: bool,
+    inplace: bool,
 ) -> None:
     """Extract text from a PDF using OCR and save to a new PDF with text layer."""
-    console.print(f"Processing [bold cyan]{input_file}[/bold cyan]...")
+    # Validate that either output_file is provided or --inplace is set
+    if not inplace and not output_file:
+        raise click.UsageError("Either OUTPUT_FILE must be provided or --inplace must be set.")
+    if inplace and output_file:
+        raise click.UsageError("Cannot specify both OUTPUT_FILE and --inplace.")
+
+    # Determine the actual output path
+    # For inplace mode, we use a temp file then replace the original (PyMuPDF limitation)
+    if inplace:
+        input_path = Path(input_file)
+        temp_fd, temp_path = tempfile.mkstemp(suffix=input_path.suffix, dir=input_path.parent)
+        os.close(temp_fd)
+        actual_output_file = temp_path
+    else:
+        assert output_file is not None  # Validated above
+        actual_output_file = output_file
+
+    if inplace:
+        console.print(f"Processing [bold cyan]{input_file}[/bold cyan] [yellow](in place)[/yellow]...")
+    else:
+        console.print(f"Processing [bold cyan]{input_file}[/bold cyan]...")
     console.print(
         f"  Language: [cyan]{ocr_language}[/cyan], DPI: [cyan]{ocr_dpi}[/cyan], Force OCR: [cyan]{force}[/cyan]"
     )
@@ -199,14 +282,22 @@ def extract_text(
         console.print("[green]OCR completed.[/green]")
 
         # Save the document with OCR text layer
-        ocr_doc.save(output_file)
+        ocr_doc.save(actual_output_file)
         ocr_doc.close()
 
-        console.print(f"[bold green]Done.[/bold green] Saved to [bold cyan]{output_file}[/bold cyan].")
+        # For inplace mode, replace the original file with the temp file
+        if inplace:
+            _save_inplace(actual_output_file, input_file)
+            console.print(f"[bold green]All Done.[/bold green] Modified [bold cyan]{input_file}[/bold cyan] in place.")
+        else:
+            console.print(f"[bold green]All Done.[/bold green] Saved to [bold cyan]{actual_output_file}[/bold cyan].")
     else:
         doc.close()
+        # Clean up temp file if it was created but not used
+        if inplace:
+            os.unlink(actual_output_file)
         console.print("[green]Document already has sufficient extractable text. No OCR needed.[/green]")
-        console.print("Use --force-ocr to process anyway.")
+        console.print("Use --force to process anyway.")
 
 
 @cli.command("rename")
