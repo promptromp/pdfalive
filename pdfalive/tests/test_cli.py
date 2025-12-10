@@ -21,15 +21,20 @@ class TestGenerateTocInplace:
 
     def test_missing_output_and_inplace_raises_error(self, runner: CliRunner) -> None:
         """Test that missing both OUTPUT_FILE and --inplace raises an error."""
-        result = runner.invoke(cli, ["generate-toc", "input.pdf"])
-        assert result.exit_code != 0
-        assert "Either OUTPUT_FILE must be provided or --inplace must be set" in result.output
+        with runner.isolated_filesystem():
+            # Create a dummy input file so Click's exists=True check passes
+            Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
+            result = runner.invoke(cli, ["generate-toc", "input.pdf"])
+            assert result.exit_code != 0
+            assert "Either OUTPUT_FILE must be provided or --inplace must be set" in result.output
 
     def test_both_output_and_inplace_raises_error(self, runner: CliRunner) -> None:
         """Test that providing both OUTPUT_FILE and --inplace raises an error."""
-        result = runner.invoke(cli, ["generate-toc", "input.pdf", "output.pdf", "--inplace"])
-        assert result.exit_code != 0
-        assert "Cannot specify both OUTPUT_FILE and --inplace" in result.output
+        with runner.isolated_filesystem():
+            Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
+            result = runner.invoke(cli, ["generate-toc", "input.pdf", "output.pdf", "--inplace"])
+            assert result.exit_code != 0
+            assert "Cannot specify both OUTPUT_FILE and --inplace" in result.output
 
     def test_help_shows_inplace_option(self, runner: CliRunner) -> None:
         """Test that --help shows the --inplace option."""
@@ -44,15 +49,19 @@ class TestExtractTextInplace:
 
     def test_missing_output_and_inplace_raises_error(self, runner: CliRunner) -> None:
         """Test that missing both OUTPUT_FILE and --inplace raises an error."""
-        result = runner.invoke(cli, ["extract-text", "input.pdf"])
-        assert result.exit_code != 0
-        assert "Either OUTPUT_FILE must be provided or --inplace must be set" in result.output
+        with runner.isolated_filesystem():
+            Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
+            result = runner.invoke(cli, ["extract-text", "input.pdf"])
+            assert result.exit_code != 0
+            assert "Either OUTPUT_FILE must be provided or --inplace must be set" in result.output
 
     def test_both_output_and_inplace_raises_error(self, runner: CliRunner) -> None:
         """Test that providing both OUTPUT_FILE and --inplace raises an error."""
-        result = runner.invoke(cli, ["extract-text", "input.pdf", "output.pdf", "--inplace"])
-        assert result.exit_code != 0
-        assert "Cannot specify both OUTPUT_FILE and --inplace" in result.output
+        with runner.isolated_filesystem():
+            Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
+            result = runner.invoke(cli, ["extract-text", "input.pdf", "output.pdf", "--inplace"])
+            assert result.exit_code != 0
+            assert "Cannot specify both OUTPUT_FILE and --inplace" in result.output
 
     def test_help_shows_inplace_option(self, runner: CliRunner) -> None:
         """Test that --help shows the --inplace option."""
