@@ -95,6 +95,7 @@ The config is loaded via an eager callback on the `--config` option in `cli.py`.
 
 ## Development Guidelines
 
-- When making changes, always make sure formatting, linting, type checks, and tests work afterwards. We use ruff, mypy and pytest for these, and can run them via uv, e.g. `uv run ruff ...`, `uv run mypy`, etc.
-- When writing unit-tests, use variables and/or pytest fixtures (e.g. via conftest.py and `@pytest.fixture` decorator) for fixture values and objects, rather than repeating literal values in test setup and assertions. Prefer using pytest's `@pytest.mark.parametrize` decorator when you wish to test different values or combinations of values rather than creating repetitive standalone test cases.
 - always prefer placing imports at top of files rather than inline. Especially when writing unit-test. only do otherwise to avoid circular dependencies in rare cases. In those cases, mention explicitly why you are doing this in a comment on the relevant code line.
+- When writing unit-tests, use variables and/or pytest fixtures (e.g. via conftest.py and `@pytest.fixture` decorator) for fixture values and objects, rather than repeating literal values in test setup and assertions. Prefer using pytest's `@pytest.mark.parametrize` decorator when you wish to test different values or combinations of values rather than creating repetitive standalone test cases.
+- When making changes, always make sure formatting, linting, type checks, and tests work afterwards. We use ruff, mypy and pytest for these, and can run them via uv, e.g. `uv run ruff ...`, `uv run mypy`, etc.
+- When finished making substantial changes to functionality and/or API (e.g. CLI usage) make sure to update documentation - README.md, CLAUDE.md and docs/ markdown files should all be kept up to date. Changing any CLI configuration options should also result in update the config/ submodule which lets us use TOML configuration files for defaults.
