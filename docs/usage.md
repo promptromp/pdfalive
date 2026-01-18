@@ -124,6 +124,18 @@ Intelligently rename PDF files using LLM-powered inference. The tool analyzes fi
 
 The LLM respects your exact formatting, including brackets, parentheses, dashes, and other special characters.
 
+**Reading paths from a file:**
+
+When dealing with many files or long filenames that exceed command-line limits, use the `-f`/`--input-file` option:
+
+	# Generate a list of files to rename
+	find /path/to/docs -name "*.pdf" > files.txt
+
+	# Rename using the file list
+	pdfalive rename -q "Standardize filenames" -f files.txt
+
+The input file should contain one path per line. Lines starting with `#` are treated as comments and blank lines are ignored.
+
 **Options:**
 
 	# Use a different LLM
@@ -131,6 +143,9 @@ The LLM respects your exact formatting, including brackets, parentheses, dashes,
 
 	# Skip confirmation prompt
 	pdfalive rename -q "Add sequential numbering" -y *.pdf
+
+	# Read paths from a file
+	pdfalive rename -q "Add prefix" -f paths.txt
 
 **Workflow:**
 

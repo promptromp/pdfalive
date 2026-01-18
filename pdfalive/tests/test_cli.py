@@ -110,6 +110,89 @@ class TestSaveInplace:
         assert result_mode == original_mode
 
 
+class TestRenameInputFile:
+    """Tests for rename --input-file option."""
+
+    def test_help_shows_input_file_option(self, runner: CliRunner) -> None:
+        """Test that --help shows the --input-file option."""
+        result = runner.invoke(cli, ["rename", "--help"])
+        assert result.exit_code == 0
+        assert "--input-file" in result.output
+        assert "-f" in result.output
+        assert "text file" in result.output
+
+    def test_missing_both_input_files_and_input_file_raises_error(self, runner: CliRunner) -> None:
+        """Test that missing both INPUT_FILES and --input-file raises an error."""
+        result = runner.invoke(cli, ["rename", "-q", "Add prefix"])
+        assert result.exit_code != 0
+        assert "Either INPUT_FILES arguments or --input-file option must be provided" in result.output
+
+    def test_both_input_files_and_input_file_raises_error(self, runner: CliRunner) -> None:
+        """Test that providing both INPUT_FILES and --input-file raises an error."""
+        with runner.isolated_filesystem():
+            Path("test.pdf").write_bytes(b"%PDF-1.4 dummy")
+            Path("paths.txt").write_text("test.pdf\n")
+            result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt", "test.pdf"])
+            assert result.exit_code != 0
+            assert "Cannot specify both INPUT_FILES arguments and --input-file option" in result.output
+
+    def test_input_file_not_found_raises_error(self, runner: CliRunner) -> None:
+        """Test that a non-existent --input-file raises an error."""
+        result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "nonexistent.txt"])
+        assert result.exit_code != 0
+        # Click's exists=True validation catches this
+        assert "does not exist" in result.output.lower() or "no such file" in result.output.lower()
+
+    def test_input_file_with_nonexistent_path_raises_error(self, runner: CliRunner) -> None:
+        """Test that a path in --input-file that doesn't exist raises an error."""
+        with runner.isolated_filesystem():
+            Path("paths.txt").write_text("nonexistent.pdf\n")
+            result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
+            assert result.exit_code != 0
+            assert "File not found" in result.output
+            assert "nonexistent.pdf" in result.output
+            assert "line 1" in result.output
+
+    def test_input_file_empty_raises_error(self, runner: CliRunner) -> None:
+        """Test that an empty --input-file raises an error."""
+        with runner.isolated_filesystem():
+            Path("paths.txt").write_text("")
+            result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
+            assert result.exit_code != 0
+            assert "No valid file paths found" in result.output
+
+    def test_input_file_only_comments_and_blanks_raises_error(self, runner: CliRunner) -> None:
+        """Test that --input-file with only comments and blank lines raises an error."""
+        with runner.isolated_filesystem():
+            Path("paths.txt").write_text("# This is a comment\n\n# Another comment\n   \n")
+            result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
+            assert result.exit_code != 0
+            assert "No valid file paths found" in result.output
+
+    def test_input_file_skips_comments_and_blank_lines(self, runner: CliRunner) -> None:
+        """Test that --input-file correctly skips comments and blank lines."""
+        with runner.isolated_filesystem():
+            # Create test files
+            Path("file1.pdf").write_bytes(b"%PDF-1.4 dummy")
+            Path("file2.pdf").write_bytes(b"%PDF-1.4 dummy")
+
+            # Create input file with comments and blank lines
+            input_content = """# This is a comment
+file1.pdf
+
+# Another comment
+file2.pdf
+
+"""
+            Path("paths.txt").write_text(input_content)
+
+            # The command will fail when trying to actually process (no valid PDF/LLM)
+            # but we can verify it parsed the file correctly by checking the file count
+            result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
+            # Should show "2 file(s)" (parsed correctly, skipping comments)
+            assert "2" in result.output and "file" in result.output
+
+
 class TestConfigIntegration:
     """Tests for config file integration with CLI."""
 

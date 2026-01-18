@@ -59,7 +59,7 @@ pdfalive/
 **CLI Commands:**
 - `generate-toc` - Main command for TOC generation (with optional automatic OCR)
 - `extract-text` - OCR-only command for text extraction from scanned PDFs
-- `rename` - Intelligent file renaming using LLM inference
+- `rename` - Intelligent file renaming using LLM inference. Supports reading paths from a file via `-f`/`--input-file` option for handling many files or long filenames.
 
 **Processor Classes:**
 - `TOCGenerator` - Extracts font/text features from PDF pages, sends to LLM for TOC inference, writes bookmarks back to PDF. Supports multiprocessing, intelligent batching for large documents, and retry logic with exponential backoff.

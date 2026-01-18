@@ -146,6 +146,20 @@ Specify exact formatting including special characters — the LLM respects brack
 pdfalive rename -q "[Author Last Name] - Title (Year).pdf" paper1.pdf paper2.pdf
 ```
 
+**Reading paths from a file:**
+
+When dealing with many files or long filenames that exceed command-line limits, use the `-f`/`--input-file` option to read paths from a text file (one per line):
+
+```bash
+# Generate a list of files to rename
+find /path/to/docs -name "*.pdf" > files.txt
+
+# Rename using the file list
+pdfalive rename -q "Standardize filenames" -f files.txt
+```
+
+The input file supports comments (lines starting with `#`) and blank lines are ignored.
+
 **Workflow:**
 
 1. The tool analyzes each filename and generates rename suggestions
@@ -163,6 +177,7 @@ pdfalive rename -q "Add sequential numbering prefix" -y *.pdf
 
 | Option | Description |
 |--------|-------------|
+| `-f, --input-file` | Read input file paths from a text file (one per line) |
 | `--model-identifier` | Choose which LLM to use (default: `gpt-5.1`) |
 | `-y, --yes` | Automatically apply renames without confirmation |
 | `--show-token-usage` | Display token usage statistics (default: enabled) |
