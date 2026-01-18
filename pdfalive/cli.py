@@ -96,7 +96,7 @@ def cli(ctx: click.Context) -> None:
 @cli.command("generate-toc")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.argument("output_file", type=click.Path(), required=False)
-@click.option("--model-identifier", type=str, default="gpt-5.1", help="LLM model to use.")
+@click.option("--model-identifier", type=str, default="gpt-5.2", help="LLM model to use.")
 @click.option("--force", is_flag=True, default=False, help="Force overwrite existing TOC if present.")
 @click.option("--show-token-usage", is_flag=True, default=True, help="Display token usage statistics.")
 @click.option(
@@ -362,7 +362,7 @@ def extract_text(
     default=None,
     help="Read input file paths from a text file (one path per line). Mutually exclusive with INPUT_FILES argument.",
 )
-@click.option("--model-identifier", type=str, default="gpt-5.1", help="LLM model to use.")
+@click.option("--model-identifier", type=str, default="gpt-5.2", help="LLM model to use.")
 @click.option(
     "-y",
     "--yes",
