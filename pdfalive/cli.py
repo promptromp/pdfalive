@@ -508,15 +508,17 @@ def rename(
 
     # Apply renames
     console.print("[cyan]Applying renames...[/cyan]")
-    try:
-        processor.apply_renames(resolved)
-    except (FileNotFoundError, FileExistsError) as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
-        if show_token_usage:
-            usage.print_summary(console)
-        raise SystemExit(1) from e
+    apply_result = processor.apply_renames(resolved)
 
-    console.print(f"[bold green]Successfully renamed {len(resolved)} file(s).[/bold green]")
+    # Report any failures
+    for error in apply_result.failed:
+        console.print(f"[bold red]Error:[/bold red] {error.error}")
+
+    # Report summary
+    if apply_result.success_count > 0:
+        console.print(f"[bold green]Successfully renamed {apply_result.success_count} file(s).[/bold green]")
+    if apply_result.failure_count > 0:
+        console.print(f"[bold yellow]Failed to rename {apply_result.failure_count} file(s).[/bold yellow]")
 
     if show_token_usage:
         usage.print_summary(console)

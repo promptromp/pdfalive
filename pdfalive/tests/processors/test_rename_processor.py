@@ -219,6 +219,31 @@ class TestRenameProcessor:
 
         assert len(resolved) == 0
 
+    def test_resolve_full_paths_filters_noop_renames(self, mock_llm):
+        """Test that no-op renames (same source and target) are filtered out."""
+        processor = RenameProcessor(llm=mock_llm)
+        paths = [Path("/docs/keep_same.pdf"), Path("/docs/will_rename.pdf")]
+        operations = [
+            RenameOp(
+                input_filename="keep_same.pdf",
+                output_filename="keep_same.pdf",  # Same as input - no-op
+                confidence=1.0,
+                reasoning="Keep original name",
+            ),
+            RenameOp(
+                input_filename="will_rename.pdf",
+                output_filename="renamed.pdf",
+                confidence=0.9,
+                reasoning="Renamed",
+            ),
+        ]
+
+        resolved = processor._resolve_full_paths(operations, paths)
+
+        # Only the actual rename should be included
+        assert len(resolved) == 1
+        assert resolved[0] == (Path("/docs/will_rename.pdf"), Path("/docs/renamed.pdf"))
+
     def test_apply_renames_creates_files(self, mock_llm, tmp_path):
         """Test that apply_renames actually renames files."""
         # Create test files
@@ -253,16 +278,23 @@ class TestRenameProcessor:
         assert (tmp_path / "renamed1.pdf").exists()
         assert (tmp_path / "renamed2.pdf").exists()
 
-    def test_apply_renames_raises_on_missing_source(self, mock_llm, tmp_path):
-        """Test that apply_renames raises error for missing source file."""
+    def test_apply_renames_reports_missing_source(self, mock_llm, tmp_path):
+        """Test that apply_renames reports error for missing source file."""
         processor = RenameProcessor(llm=mock_llm)
-        renames = [(tmp_path / "nonexistent.pdf", tmp_path / "new.pdf")]
+        source = tmp_path / "nonexistent.pdf"
+        target = tmp_path / "new.pdf"
+        renames = [(source, target)]
 
-        with pytest.raises(FileNotFoundError):
-            processor.apply_renames(renames)
+        result = processor.apply_renames(renames)
 
-    def test_apply_renames_raises_on_existing_target(self, mock_llm, tmp_path):
-        """Test that apply_renames raises error if target already exists."""
+        assert result.failure_count == 1
+        assert result.success_count == 0
+        assert result.failed[0].source == source
+        assert result.failed[0].target == target
+        assert "Source file not found" in result.failed[0].error
+
+    def test_apply_renames_reports_existing_target(self, mock_llm, tmp_path):
+        """Test that apply_renames reports error if target already exists."""
         source = tmp_path / "source.pdf"
         target = tmp_path / "target.pdf"
         source.touch()
@@ -271,8 +303,37 @@ class TestRenameProcessor:
         processor = RenameProcessor(llm=mock_llm)
         renames = [(source, target)]
 
-        with pytest.raises(FileExistsError):
-            processor.apply_renames(renames)
+        result = processor.apply_renames(renames)
+
+        assert result.failure_count == 1
+        assert result.success_count == 0
+        assert result.failed[0].source == source
+        assert result.failed[0].target == target
+        assert "Target file already exists" in result.failed[0].error
+        # Error should include both source and target paths
+        assert str(source) in result.failed[0].error
+        assert str(target) in result.failed[0].error
+
+    def test_apply_renames_continues_after_error(self, mock_llm, tmp_path):
+        """Test that apply_renames continues with remaining files after an error."""
+        source1 = tmp_path / "source1.pdf"
+        target1 = tmp_path / "target1.pdf"
+        source2 = tmp_path / "source2.pdf"
+        target2 = tmp_path / "target2.pdf"
+        # Only create source2, not source1 - so source1 rename will fail
+        source2.touch()
+
+        processor = RenameProcessor(llm=mock_llm)
+        renames = [(source1, target1), (source2, target2)]
+
+        result = processor.apply_renames(renames)
+
+        # First rename should fail, second should succeed
+        assert result.failure_count == 1
+        assert result.success_count == 1
+        assert not source1.exists()  # Never existed
+        assert not source2.exists()  # Renamed
+        assert target2.exists()  # New name
 
 
 class TestRenameProcessorBatching:

@@ -220,3 +220,6 @@ __marimo__/
 
 # VSCode
 .vscode/
+
+# pdfalive config file
+pdfalive.toml

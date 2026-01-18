@@ -15,7 +15,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from pdfalive.models.rename import RenameOp, RenameResult
+from pdfalive.models.rename import ApplyRenamesResult, RenameError, RenameOp, RenameResult
 from pdfalive.prompts import RENAME_CONTINUATION_SYSTEM_PROMPT, RENAME_SYSTEM_PROMPT
 from pdfalive.tokens import TokenUsage, estimate_tokens
 
@@ -329,7 +329,8 @@ class RenameProcessor:
             original_paths: Original list of input paths.
 
         Returns:
-            List of (source_path, target_path) tuples.
+            List of (source_path, target_path) tuples. No-op renames (where
+            source equals target) are filtered out.
         """
         path_mapping = self._build_path_mapping(original_paths)
         resolved: list[tuple[Path, Path]] = []
@@ -341,27 +342,61 @@ class RenameProcessor:
 
             source_path = path_mapping[op.input_filename]
             target_path = source_path.parent / op.output_filename
+
+            # Skip no-op renames where source and target are the same
+            if source_path == target_path:
+                continue
+
             resolved.append((source_path, target_path))
 
         return resolved
 
-    def apply_renames(self, renames: list[tuple[Path, Path]]) -> None:
+    def apply_renames(self, renames: list[tuple[Path, Path]]) -> ApplyRenamesResult:
         """Apply rename operations to files.
+
+        This method is resilient: it attempts all renames and continues even if
+        some fail. Errors are collected and returned in the result.
 
         Args:
             renames: List of (source_path, target_path) tuples.
 
-        Raises:
-            FileNotFoundError: If source file doesn't exist.
-            FileExistsError: If target file already exists.
+        Returns:
+            ApplyRenamesResult containing successful and failed operations.
         """
-        # First validate all operations
-        for source, target in renames:
-            if not source.exists():
-                raise FileNotFoundError(f"Source file not found: {source}")
-            if target.exists():
-                raise FileExistsError(f"Target file already exists: {target}")
+        result = ApplyRenamesResult()
 
-        # Apply renames
         for source, target in renames:
-            source.rename(target)
+            # Validate and apply each rename individually
+            if not source.exists():
+                result.failed.append(
+                    RenameError(
+                        source=source,
+                        target=target,
+                        error=f"Source file not found: {source}",
+                    )
+                )
+                continue
+
+            if target.exists():
+                result.failed.append(
+                    RenameError(
+                        source=source,
+                        target=target,
+                        error=f"Target file already exists: {source} -> {target}",
+                    )
+                )
+                continue
+
+            try:
+                source.rename(target)
+                result.successful.append((source, target))
+            except OSError as e:
+                result.failed.append(
+                    RenameError(
+                        source=source,
+                        target=target,
+                        error=f"Failed to rename {source} -> {target}: {e}",
+                    )
+                )
+
+        return result
