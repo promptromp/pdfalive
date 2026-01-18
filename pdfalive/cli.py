@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import click
 import pymupdf
@@ -12,6 +13,7 @@ from langsmith import traceable
 from rich.console import Console
 from rich.table import Table
 
+from pdfalive.config import load_config_as_default_map
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
 from pdfalive.processors.rename_processor import RenameProcessor
@@ -42,16 +44,59 @@ def _save_inplace(temp_file: str, target_file: str) -> None:
 console = Console()
 
 
+def _load_config_callback(ctx: click.Context, param: click.Parameter, value: str | None) -> None:
+    """Eager callback to load config file and set default_map on the context.
+
+    Args:
+        ctx: Click context.
+        param: The parameter that triggered this callback (--config).
+        value: The config file path provided by the user, or None.
+    """
+    # Convert string path to Path if provided
+    config_path = Path(value) if value else None
+
+    try:
+        default_map = load_config_as_default_map(config_path)
+    except FileNotFoundError:
+        raise click.BadParameter(f"Config file not found: {value}", param=param) from None
+    except Exception as e:
+        raise click.BadParameter(f"Error loading config file: {e}", param=param) from None
+
+    if default_map:
+        # Merge with existing default_map (if any), config takes lower precedence
+        existing_map: dict[str, Any] = dict(ctx.default_map) if ctx.default_map else {}
+        for cmd_name, cmd_defaults in default_map.items():
+            if cmd_name in existing_map:
+                # Existing defaults take precedence
+                merged = dict(cmd_defaults)
+                merged.update(existing_map[cmd_name])
+                existing_map[cmd_name] = merged
+            else:
+                existing_map[cmd_name] = cmd_defaults
+        ctx.default_map = existing_map
+
+
 @click.group(context_settings=dict(show_default=True))
-def cli() -> None:
+@click.option(
+    "-c",
+    "--config",
+    type=click.Path(dir_okay=False),
+    default=None,
+    callback=_load_config_callback,
+    is_eager=True,
+    expose_value=False,
+    help="Path to TOML config file. Auto-detected from pdfalive.toml if not specified.",
+)
+@click.pass_context
+def cli(ctx: click.Context) -> None:
     """pdfalive - Bring PDF files alive with the magic of LLMs."""
-    pass
+    ctx.ensure_object(dict)
 
 
 @cli.command("generate-toc")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.argument("output_file", type=click.Path(), required=False)
-@click.option("--model-identifier", type=str, default="gpt-5.1", help="LLM model to use.")
+@click.option("--model-identifier", type=str, default="gpt-5.2", help="LLM model to use.")
 @click.option("--force", is_flag=True, default=False, help="Force overwrite existing TOC if present.")
 @click.option("--show-token-usage", is_flag=True, default=True, help="Display token usage statistics.")
 @click.option(
@@ -301,7 +346,7 @@ def extract_text(
 
 
 @cli.command("rename")
-@click.argument("input_files", type=click.Path(exists=True), nargs=-1, required=True)
+@click.argument("input_files", type=click.Path(exists=True), nargs=-1, required=False)
 @click.option(
     "-q",
     "--query",
@@ -309,7 +354,15 @@ def extract_text(
     required=True,
     help="Renaming instruction query describing how to rename the files.",
 )
-@click.option("--model-identifier", type=str, default="gpt-5.1", help="LLM model to use.")
+@click.option(
+    "-f",
+    "--input-file",
+    "input_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Read input file paths from a text file (one path per line). Mutually exclusive with INPUT_FILES argument.",
+)
+@click.option("--model-identifier", type=str, default="gpt-5.2", help="LLM model to use.")
 @click.option(
     "-y",
     "--yes",
@@ -322,6 +375,7 @@ def extract_text(
 def rename(
     input_files: tuple[str, ...],
     query: str,
+    input_file: str | None,
     model_identifier: str,
     yes: bool,
     show_token_usage: bool,
@@ -331,21 +385,55 @@ def rename(
     Provide one or more input files and a renaming instruction query.
     The LLM will suggest new names based on your instruction.
 
+    Input files can be provided either as arguments or via --input-file (-f) option
+    which reads paths from a text file (one per line). This is useful when dealing
+    with many files or long filenames that would exceed command-line limits.
+
     Examples:
 
         pdfalive rename --query "Add 'REVIEWED_' prefix" *.pdf
 
         pdfalive rename -q "Rename to '[Author] - [Title] (Year).pdf'" paper1.pdf paper2.pdf
+
+        # Read paths from a file (useful with find/xargs):
+        find . -name "*.pdf" > files.txt
+        pdfalive rename -q "Standardize filenames" -f files.txt
     """
+    # Validate mutual exclusivity and resolve input files
+    if input_files and input_file:
+        raise click.UsageError("Cannot specify both INPUT_FILES arguments and --input-file option.")
+    if not input_files and not input_file:
+        raise click.UsageError("Either INPUT_FILES arguments or --input-file option must be provided.")
+
+    # Resolve the final list of file paths
+    if input_file:
+        # Read paths from the input file
+        input_file_path = Path(input_file)
+        file_paths: list[str] = []
+        with input_file_path.open() as f:
+            for line_num, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                file_path = Path(line)
+                if not file_path.exists():
+                    raise click.UsageError(f"File not found: '{line}' (line {line_num} in {input_file})")
+                file_paths.append(line)
+        if not file_paths:
+            raise click.UsageError(f"No valid file paths found in {input_file}")
+        resolved_input_files: tuple[str, ...] = tuple(file_paths)
+    else:
+        resolved_input_files = input_files
+
     console.print(
-        f"Renaming [bold cyan]{len(input_files)}[/bold cyan] file(s) "
+        f"Renaming [bold cyan]{len(resolved_input_files)}[/bold cyan] file(s) "
         f"using model [bold magenta]{model_identifier}[/bold magenta]..."
     )
     console.print(f"Query: [italic]{query}[/italic]")
     console.print()
 
     # Convert to Path objects
-    paths = [Path(f) for f in input_files]
+    paths = [Path(f) for f in resolved_input_files]
 
     # Initialize LLM and processor
     llm = init_chat_model(model=model_identifier)
@@ -420,15 +508,17 @@ def rename(
 
     # Apply renames
     console.print("[cyan]Applying renames...[/cyan]")
-    try:
-        processor.apply_renames(resolved)
-    except (FileNotFoundError, FileExistsError) as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
-        if show_token_usage:
-            usage.print_summary(console)
-        raise SystemExit(1) from e
+    apply_result = processor.apply_renames(resolved)
 
-    console.print(f"[bold green]Successfully renamed {len(resolved)} file(s).[/bold green]")
+    # Report any failures
+    for error in apply_result.failed:
+        console.print(f"[bold red]Error:[/bold red] {error.error}")
+
+    # Report summary
+    if apply_result.success_count > 0:
+        console.print(f"[bold green]Successfully renamed {apply_result.success_count} file(s).[/bold green]")
+    if apply_result.failure_count > 0:
+        console.print(f"[bold yellow]Failed to rename {apply_result.failure_count} file(s).[/bold yellow]")
 
     if show_token_usage:
         usage.print_summary(console)

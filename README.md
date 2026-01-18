@@ -146,6 +146,20 @@ Specify exact formatting including special characters — the LLM respects brack
 pdfalive rename -q "[Author Last Name] - Title (Year).pdf" paper1.pdf paper2.pdf
 ```
 
+**Reading paths from a file:**
+
+When dealing with many files or long filenames that exceed command-line limits, use the `-f`/`--input-file` option to read paths from a text file (one per line):
+
+```bash
+# Generate a list of files to rename
+find /path/to/docs -name "*.pdf" > files.txt
+
+# Rename using the file list
+pdfalive rename -q "Standardize filenames" -f files.txt
+```
+
+The input file supports comments (lines starting with `#`) and blank lines are ignored.
+
 **Workflow:**
 
 1. The tool analyzes each filename and generates rename suggestions
@@ -163,9 +177,61 @@ pdfalive rename -q "Add sequential numbering prefix" -y *.pdf
 
 | Option | Description |
 |--------|-------------|
-| `--model-identifier` | Choose which LLM to use (default: `gpt-5.1`) |
+| `-f, --input-file` | Read input file paths from a text file (one per line) |
+| `--model-identifier` | Choose which LLM to use (default: `gpt-5.2`) |
 | `-y, --yes` | Automatically apply renames without confirmation |
 | `--show-token-usage` | Display token usage statistics (default: enabled) |
+
+## Configuration
+
+pdfalive supports TOML configuration files for setting default options. This is useful for frequently-used settings like the `--query` argument for rename.
+
+**Config file locations** (searched in order):
+1. `pdfalive.toml` or `.pdfalive.toml` in the current directory
+2. `pdfalive.toml` or `.pdfalive.toml` in your home directory
+3. `~/.config/pdfalive/pdfalive.toml`
+
+**Example `pdfalive.toml`:**
+
+```toml
+# Global settings (shared across commands)
+[global]
+model-identifier = "gpt-5.2"
+show-token-usage = true
+
+# Settings for generate-toc command
+[generate-toc]
+force = false
+request-delay = 10.0
+ocr = true
+ocr-language = "eng"
+ocr-dpi = 300
+postprocess = false
+
+# Settings for extract-text command
+[extract-text]
+ocr-language = "eng"
+ocr-dpi = 300
+force = false
+
+# Settings for rename command
+[rename]
+query = "Rename to \"[Author Last Name] Book Title, Edition (Year).pdf\""
+yes = false
+```
+
+**Using a specific config file:**
+
+```bash
+pdfalive --config /path/to/config.toml rename document.pdf
+```
+
+**Override hierarchy:**
+1. Code defaults (lowest priority)
+2. Config file values
+3. CLI arguments (highest priority)
+
+CLI arguments always override config file settings.
 
 ## Development
 

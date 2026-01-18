@@ -1,6 +1,41 @@
 """Rename operation data models."""
 
+from dataclasses import dataclass, field
+from pathlib import Path
+
 from pydantic import BaseModel, Field
+
+
+@dataclass
+class RenameError:
+    """Represents a failed rename operation."""
+
+    source: Path
+    target: Path
+    error: str
+
+
+@dataclass
+class ApplyRenamesResult:
+    """Result of applying rename operations."""
+
+    successful: list[tuple[Path, Path]] = field(default_factory=list)
+    failed: list[RenameError] = field(default_factory=list)
+
+    @property
+    def success_count(self) -> int:
+        """Number of successful renames."""
+        return len(self.successful)
+
+    @property
+    def failure_count(self) -> int:
+        """Number of failed renames."""
+        return len(self.failed)
+
+    @property
+    def all_succeeded(self) -> bool:
+        """True if all renames succeeded."""
+        return len(self.failed) == 0
 
 
 class RenameOp(BaseModel):
