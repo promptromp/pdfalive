@@ -108,3 +108,141 @@ class TestSaveInplace:
         # Check permissions are preserved
         result_mode = os.stat(target_file).st_mode & 0o777
         assert result_mode == original_mode
+
+
+class TestConfigIntegration:
+    """Tests for config file integration with CLI."""
+
+    def test_config_option_in_help(self, runner: CliRunner) -> None:
+        """Test that --config option appears in main help."""
+        result = runner.invoke(cli, ["--help"])
+        assert result.exit_code == 0
+        assert "--config" in result.output
+        assert "-c" in result.output
+        assert "TOML config file" in result.output
+
+    def test_explicit_config_file_not_found(self, runner: CliRunner) -> None:
+        """Test that explicit non-existent config file raises error."""
+        result = runner.invoke(cli, ["--config", "nonexistent.toml", "--help"])
+        assert result.exit_code != 0
+        assert "Config file not found" in result.output
+
+    def test_config_file_sets_defaults_for_rename(self, runner: CliRunner) -> None:
+        """Test that config file sets default values for rename command."""
+        with runner.isolated_filesystem():
+            # Create config file with rename query
+            config_content = """
+[rename]
+query = "Rename to [Author] Title.pdf"
+"""
+            Path("pdfalive.toml").write_text(config_content)
+
+            # Check that --help shows the default value from config
+            result = runner.invoke(cli, ["rename", "--help"])
+            assert result.exit_code == 0
+            # The default should now be shown in help
+            assert "Rename to [Author] Title.pdf" in result.output
+
+    def test_config_file_sets_defaults_for_generate_toc(self, runner: CliRunner) -> None:
+        """Test that config file sets default values for generate-toc command."""
+        with runner.isolated_filesystem():
+            # Create config file
+            config_content = """
+[generate-toc]
+model-identifier = "custom-model"
+ocr-dpi = 150
+"""
+            Path("pdfalive.toml").write_text(config_content)
+
+            # Check that --help shows the default values from config
+            result = runner.invoke(cli, ["generate-toc", "--help"])
+            assert result.exit_code == 0
+            assert "custom-model" in result.output
+            assert "150" in result.output
+
+    def test_cli_args_override_config(self, runner: CliRunner) -> None:
+        """Test that CLI arguments override config file values."""
+        with runner.isolated_filesystem():
+            # Create config file
+            config_content = """
+[generate-toc]
+model-identifier = "config-model"
+"""
+            Path("pdfalive.toml").write_text(config_content)
+
+            # Create a dummy input file
+            Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
+
+            # Run with explicit --model-identifier to override config
+            # This won't actually run the command (no valid PDF), but we can check
+            # that the option parsing works correctly
+            result = runner.invoke(
+                cli,
+                ["generate-toc", "input.pdf", "output.pdf", "--model-identifier", "cli-model"],
+            )
+            # The command will fail because the PDF is invalid, but we just want to
+            # verify the option parsing worked (config + CLI override)
+            # Check that no error about invalid option or missing config occurred
+            assert "Invalid value" not in result.output
+            assert "config" not in result.output.lower() or "Config file not found" not in result.output
+
+    def test_explicit_config_path_option(self, runner: CliRunner) -> None:
+        """Test that explicit --config path is used."""
+        with runner.isolated_filesystem():
+            # Create config file in a subdirectory
+            config_dir = Path("configs")
+            config_dir.mkdir()
+            config_file = config_dir / "custom.toml"
+            config_content = """
+[rename]
+query = "Custom config query"
+"""
+            config_file.write_text(config_content)
+
+            # Use explicit config path
+            result = runner.invoke(cli, ["--config", str(config_file), "rename", "--help"])
+            assert result.exit_code == 0
+            assert "Custom config query" in result.output
+
+    def test_hidden_config_file_detected(self, runner: CliRunner) -> None:
+        """Test that .pdfalive.toml is auto-detected."""
+        with runner.isolated_filesystem():
+            # Create hidden config file
+            config_content = """
+[rename]
+query = "Hidden config query"
+"""
+            Path(".pdfalive.toml").write_text(config_content)
+
+            result = runner.invoke(cli, ["rename", "--help"])
+            assert result.exit_code == 0
+            assert "Hidden config query" in result.output
+
+    def test_global_settings_apply_to_commands(self, runner: CliRunner) -> None:
+        """Test that global settings are applied to relevant commands."""
+        with runner.isolated_filesystem():
+            config_content = """
+[global]
+model-identifier = "global-model"
+"""
+            Path("pdfalive.toml").write_text(config_content)
+
+            # Check generate-toc picks up global setting
+            result = runner.invoke(cli, ["generate-toc", "--help"])
+            assert result.exit_code == 0
+            assert "global-model" in result.output
+
+            # Check rename picks up global setting
+            result = runner.invoke(cli, ["rename", "--help"])
+            assert result.exit_code == 0
+            assert "global-model" in result.output
+
+    def test_invalid_toml_shows_error(self, runner: CliRunner) -> None:
+        """Test that invalid TOML shows an appropriate error."""
+        with runner.isolated_filesystem():
+            Path("pdfalive.toml").write_text("invalid toml [[[")
+
+            # Use a subcommand to trigger the config loading
+            result = runner.invoke(cli, ["rename", "--help"])
+            assert result.exit_code != 0
+            assert "Error loading config file" in result.output

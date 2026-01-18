@@ -40,6 +40,10 @@ pdfalive/
 ├── cli.py                 # Click-based CLI entry point
 ├── tokens.py              # Token counting utilities
 ├── prompts.py             # LLM system prompts
+├── config/
+│   ├── __init__.py        # Config module exports
+│   ├── models.py          # Pydantic models for config validation
+│   └── loader.py          # TOML loading, path resolution, default_map conversion
 ├── models/
 │   ├── toc.py             # TOC, TOCEntry, TOCFeature models
 │   ├── page_content.py    # PageContent model
@@ -81,6 +85,13 @@ The `TOCGenerator._extract_features()` method extracts font metadata (name, size
 
 **OCR Integration:**
 When `--ocr` is enabled (default), `generate-toc` automatically detects if a PDF needs OCR by checking for extractable text, performs OCR if needed, then proceeds with TOC generation on the text layer.
+
+**Configuration System:**
+The CLI supports TOML configuration files (`pdfalive.toml` or `.pdfalive.toml`) for setting default option values. The config module (`pdfalive/config/`) handles:
+- `models.py` - Pydantic models for validating config structure with kebab-case alias support
+- `loader.py` - File discovery (cwd > home > ~/.config/pdfalive/), TOML parsing, and conversion to Click's `default_map` format
+
+The config is loaded via an eager callback on the `--config` option in `cli.py`. Global settings apply to all LLM-using commands, and command-specific settings override globals. CLI arguments always take precedence over config file values.
 
 ## Development Guidelines
 

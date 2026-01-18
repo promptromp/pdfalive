@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import click
 import pymupdf
@@ -12,6 +13,7 @@ from langsmith import traceable
 from rich.console import Console
 from rich.table import Table
 
+from pdfalive.config import load_config_as_default_map
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
 from pdfalive.processors.rename_processor import RenameProcessor
@@ -42,10 +44,53 @@ def _save_inplace(temp_file: str, target_file: str) -> None:
 console = Console()
 
 
+def _load_config_callback(ctx: click.Context, param: click.Parameter, value: str | None) -> None:
+    """Eager callback to load config file and set default_map on the context.
+
+    Args:
+        ctx: Click context.
+        param: The parameter that triggered this callback (--config).
+        value: The config file path provided by the user, or None.
+    """
+    # Convert string path to Path if provided
+    config_path = Path(value) if value else None
+
+    try:
+        default_map = load_config_as_default_map(config_path)
+    except FileNotFoundError:
+        raise click.BadParameter(f"Config file not found: {value}", param=param) from None
+    except Exception as e:
+        raise click.BadParameter(f"Error loading config file: {e}", param=param) from None
+
+    if default_map:
+        # Merge with existing default_map (if any), config takes lower precedence
+        existing_map: dict[str, Any] = dict(ctx.default_map) if ctx.default_map else {}
+        for cmd_name, cmd_defaults in default_map.items():
+            if cmd_name in existing_map:
+                # Existing defaults take precedence
+                merged = dict(cmd_defaults)
+                merged.update(existing_map[cmd_name])
+                existing_map[cmd_name] = merged
+            else:
+                existing_map[cmd_name] = cmd_defaults
+        ctx.default_map = existing_map
+
+
 @click.group(context_settings=dict(show_default=True))
-def cli() -> None:
+@click.option(
+    "-c",
+    "--config",
+    type=click.Path(dir_okay=False),
+    default=None,
+    callback=_load_config_callback,
+    is_eager=True,
+    expose_value=False,
+    help="Path to TOML config file. Auto-detected from pdfalive.toml if not specified.",
+)
+@click.pass_context
+def cli(ctx: click.Context) -> None:
     """pdfalive - Bring PDF files alive with the magic of LLMs."""
-    pass
+    ctx.ensure_object(dict)
 
 
 @cli.command("generate-toc")
