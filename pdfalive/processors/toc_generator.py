@@ -75,8 +75,25 @@ _FRONT_MATTER_TITLES = frozenset(
     }
 )
 
+# Compiled pattern to match front matter titles, optionally followed by qualifying
+# phrases like "to the ...", "for the ...", "of the ...", "of volume ...".
+# This prevents "Introduction to Ito-Calculus" from being classified as front matter
+# while still matching "Introduction to the Second Edition".
+_FRONT_MATTER_TITLE_PATTERN = re.compile(
+    r"^(?:" + "|".join(re.escape(t) for t in sorted(_FRONT_MATTER_TITLES)) + r")"
+    r"(?:\s+(?:to the|for the|of the|of volume)\b.*)?$"
+)
+
 # Minimum font size ratio vs body text to be considered a heading candidate
 _HEADING_FONT_SIZE_RATIO = 1.15
+
+# Fuzzy match: minimum length of the shorter string for substring matching
+_FUZZY_MIN_SUBSTRING_LEN = 8
+
+# Fuzzy match: minimum ratio of shorter/longer string lengths for a substring
+# match to be accepted.  Blocks e.g. "introduction" (12) matching
+# "2 introduction to itocalculus" (29) since 12/29 = 0.41 < 0.5.
+_FUZZY_MIN_COVERAGE_RATIO = 0.5
 
 
 def apply_toc_to_document(doc: pymupdf.Document, toc: list, output_file: str) -> None:
@@ -341,6 +358,7 @@ class TOCGenerator:
         if postprocess:
             toc, postprocess_usage = self._postprocess_toc(toc, features)
             usage = usage + postprocess_usage
+            toc = toc.sort_by_page()
 
         toc = toc.sanitize_hierarchy()
         self.doc.set_toc(toc.to_list())
@@ -994,7 +1012,7 @@ must be PDF page numbers (not printed page numbers).
             if entry.level == 1 and entry.page_number > 5:
                 title_clean = re.sub(r"[^\w\s]", "", entry.title.strip().lower())
                 title_clean = re.sub(r"\s+", " ", title_clean)
-                if not any(title_clean == fm or title_clean.startswith(fm + " ") for fm in _FRONT_MATTER_TITLES):
+                if not _FRONT_MATTER_TITLE_PATTERN.match(title_clean):
                     return entry.page_number - 1
         return 0
 
@@ -1097,22 +1115,34 @@ must be PDF page numbers (not printed page numbers).
             Returns the original page number if matched, or None.
             Strategies (in order):
             1. Exact normalized match
-            2. Substring containment (min 8 chars for shorter string, same level only)
+            2. Best substring containment (same level, min length and coverage ratio)
             """
             # Strategy 1: exact match (any level — the LLM may change levels)
             if key in original_map:
                 return original_map[key][0]
 
-            # Strategy 2: substring containment (same level only to avoid
-            # matching e.g. "1. Introduction" (level 2) to "Introduction" (level 1))
+            # Strategy 2: collect ALL substring matches at the same level,
+            # then pick the best one (highest coverage ratio = shorter/longer).
+            best_page: int | None = None
+            best_ratio: float = 0.0
+
             for orig_key, (orig_page, orig_level) in original_map.items():
                 if orig_level != level:
                     continue
-                shorter = min(len(key), len(orig_key))
-                if shorter >= 8 and (orig_key in key or key in orig_key):
-                    return orig_page
+                shorter_len = min(len(key), len(orig_key))
+                longer_len = max(len(key), len(orig_key))
+                if shorter_len < _FUZZY_MIN_SUBSTRING_LEN:
+                    continue
+                if not (orig_key in key or key in orig_key):
+                    continue
+                ratio = shorter_len / longer_len
+                if ratio < _FUZZY_MIN_COVERAGE_RATIO:
+                    continue
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_page = orig_page
 
-            return None
+            return best_page
 
         corrected = []
         restored_count = 0

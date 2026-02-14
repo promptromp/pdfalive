@@ -71,6 +71,21 @@ class TOC(BaseModel):
 
         return TOC(entries=sanitized)
 
+    def sort_by_page(self) -> "TOC":
+        """Sort TOC entries by page number to enforce monotonicity.
+
+        Entries are sorted by (page_number, level) so that page numbers are
+        non-decreasing.  Ties on the same page are broken by level so that
+        parent entries come before their children.
+
+        Returns:
+            A new TOC with entries sorted by page number.
+        """
+        if not self.entries:
+            return self
+        sorted_entries = sorted(self.entries, key=lambda e: (e.page_number, e.level))
+        return TOC(entries=sorted_entries)
+
     def merge(self, other: "TOC") -> "TOC":
         """Merge another TOC into this one, handling duplicates.
 

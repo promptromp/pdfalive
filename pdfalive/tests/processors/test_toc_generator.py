@@ -7,6 +7,7 @@ import pytest
 
 from pdfalive.models.toc import TOC, TOCEntry, TOCFeature
 from pdfalive.processors.toc_generator import (
+    _FRONT_MATTER_TITLE_PATTERN,
     _FRONT_MATTER_TITLES,
     _LETTERSPACED_PATTERN,
     _SECTION_NUMBER_PATTERN,
@@ -2141,15 +2142,36 @@ class TestCorrectPostprocessedPageNumbers:
         assert result.entries[0].page_number == 16
         assert result.entries[1].page_number == 22
 
-    def test_fuzzy_match_substring_containment(self, generator):
-        """Refined title that is a superstring of original title matches via substring."""
+    def test_fuzzy_match_substring_containment_high_ratio(self, generator):
+        """Refined title that is a modestly expanded superstring of original matches
+        via substring when coverage ratio >= 0.5."""
+        original = self._make_toc(
+            [
+                ("The Exponential Densities", 100, 1),
+                ("Chapter I", 22, 1),
+            ]
+        )
+        # Postprocessor expanded the title with a modest suffix (high coverage ratio)
+        refined = self._make_toc(
+            [
+                ("The Exponential Densities: Extended", 85, 1),
+                ("Chapter I", 7, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 100  # matched via substring (high ratio)
+        assert result.entries[1].page_number == 22
+
+    def test_fuzzy_match_rejects_low_coverage_substring(self, generator):
+        """Refined title that is much longer than the original is NOT matched
+        via substring when the coverage ratio is below 0.5."""
         original = self._make_toc(
             [
                 ("INTRODUCTION", 16, 1),
                 ("Chapter I", 22, 1),
             ]
         )
-        # Postprocessor expanded the title with a subtitle
+        # Postprocessor expanded "Introduction" to a much longer title (ratio ≈ 0.27)
         refined = self._make_toc(
             [
                 ("Introduction: The Nature of Probability Theory", 1, 1),
@@ -2157,8 +2179,10 @@ class TestCorrectPostprocessedPageNumbers:
             ]
         )
         result = generator._correct_postprocessed_page_numbers(original, refined)
-        assert result.entries[0].page_number == 16  # matched via substring
-        assert result.entries[1].page_number == 22
+        # "introduction" (12) vs "introduction the nature of probability theory" (45)
+        # coverage ratio 0.27 < 0.5, so NOT matched — treated as new entry
+        assert result.entries[0].page_number == 1  # not matched, kept as-is
+        assert result.entries[1].page_number == 22  # exact match, restored
 
     def test_fuzzy_match_original_substring_of_refined(self, generator):
         """Original title that is a substring of refined title matches."""
@@ -2231,3 +2255,137 @@ class TestCorrectPostprocessedPageNumbers:
         result = generator._correct_postprocessed_page_numbers(original, refined)
         assert result.entries[0].page_number == 16
         assert result.entries[1].page_number == 22
+
+
+class TestFuzzyMatchBestMatch:
+    """Tests for _fuzzy_match best-match selection with coverage ratio."""
+
+    @pytest.fixture
+    def mock_doc_with_pages(self):
+        """Create a mock document with configurable page text."""
+        doc = MagicMock()
+        doc.page_count = 600
+        doc.get_toc.return_value = []
+        doc.name = None
+
+        page_texts: dict[int, str] = {}
+
+        def get_page(idx):
+            page = MagicMock()
+            text = page_texts.get(idx, "")
+            page.get_text.return_value = text
+            return page
+
+        doc.__getitem__ = lambda self, idx: get_page(idx)
+        doc._page_texts = page_texts
+        return doc
+
+    @pytest.fixture
+    def mock_llm(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def generator(self, mock_doc_with_pages, mock_llm):
+        return TOCGenerator(doc=mock_doc_with_pages, llm=mock_llm)
+
+    def _make_toc(self, entries_data: list[tuple[str, int, int]]) -> TOC:
+        return TOC(entries=[TOCEntry(title=t, page_number=p, level=lvl, confidence=0.9) for t, p, lvl in entries_data])
+
+    def test_fuzzy_match_prefers_best_match_over_first_match(self, generator):
+        """When 'Introduction' (page 10) and '2 Introduction to Ito-Calculus' (page 24)
+        both exist in original, refined '2 Introduction to Ito-Calculus' should match
+        the latter (best coverage ratio) rather than the former (first found)."""
+        original = self._make_toc(
+            [
+                ("Introduction", 10, 1),
+                ("2 Introduction to Ito-Calculus", 24, 1),
+            ]
+        )
+        # Postprocessor returns the entry with the wrong page
+        refined = self._make_toc(
+            [
+                ("Introduction", 10, 1),
+                ("2 Introduction to Ito-Calculus", 10, 1),  # wrong page
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 10  # exact match
+        assert result.entries[1].page_number == 24  # best match, not first match
+
+    def test_fuzzy_match_rejects_low_coverage_ratio(self, generator):
+        """Short substring with low coverage ratio is rejected.
+        'introduction' (12 chars) vs '2 introduction to itocalculus' (29+ chars) → ratio < 0.5."""
+        original = self._make_toc(
+            [
+                ("Introduction", 10, 1),
+            ]
+        )
+        # Refined entry has a much longer title — should NOT match via substring
+        refined = self._make_toc(
+            [
+                ("2 Introduction to Ito-Calculus", 5, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        # No match due to low coverage ratio; kept as-is (no offset since page ≤ 5)
+        assert result.entries[0].page_number == 5
+
+    @pytest.mark.parametrize(
+        "orig_title,refined_title,should_match",
+        [
+            # High ratio: "the sample space" (16) vs "the sample space extended" (25) → 0.64
+            ("The Sample Space", "The Sample Space Extended", True),
+            # Low ratio: "introduction" (12) vs "2 introduction to itocalculus" (30) → 0.40
+            ("Introduction", "2 Introduction to Ito-Calculus", False),
+            # Exact match → ratio 1.0
+            ("Chapter One Title", "Chapter One Title", True),
+        ],
+    )
+    def test_coverage_ratio_acceptance_rejection(self, generator, orig_title, refined_title, should_match):
+        """Parametrized test for coverage ratio acceptance/rejection."""
+        original = self._make_toc([(orig_title, 50, 1)])
+        refined = self._make_toc([(refined_title, 99, 1)])
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        if should_match:
+            assert result.entries[0].page_number == 50
+        else:
+            assert result.entries[0].page_number == 99
+
+
+class TestFrontMatterTitlePattern:
+    """Tests for _FRONT_MATTER_TITLE_PATTERN regex matching."""
+
+    @pytest.mark.parametrize(
+        "title,is_front_matter",
+        [
+            # Exact front matter titles
+            ("introduction", True),
+            ("preface", True),
+            ("foreword", True),
+            ("contents", True),
+            ("table of contents", True),
+            ("acknowledgements", True),
+            ("acknowledgments", True),
+            # Front matter with qualifying phrases
+            ("introduction to the second edition", True),
+            ("foreword to the revised edition", True),
+            ("preface to the third edition", True),
+            ("acknowledgments for the english edition", True),
+            ("contents of volume ii", True),
+            ("contents of the second edition", True),
+            # NOT front matter — "to <subject>" without "the"
+            ("introduction to itocalculus", False),
+            ("introduction to probability", False),
+            ("introduction to algorithms", False),
+            ("introduction to stochastic processes", False),
+            # NOT front matter — random titles
+            ("chapter 1", False),
+            ("2 introduction to itocalculus", False),
+            ("the exponential and the uniform densities", False),
+        ],
+    )
+    def test_front_matter_classification(self, title, is_front_matter):
+        """Test that _FRONT_MATTER_TITLE_PATTERN correctly classifies front matter."""
+        assert bool(_FRONT_MATTER_TITLE_PATTERN.match(title)) == is_front_matter, (
+            f"Title '{title}' expected is_front_matter={is_front_matter}"
+        )

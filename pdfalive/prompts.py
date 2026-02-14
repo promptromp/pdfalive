@@ -173,6 +173,7 @@ Return a refined TOC as a list of entries, where each entry includes:
 5. **Use the document features** to verify that headings actually exist at the claimed PDF pages
 6. **Maintain the original structure** when possible - don't reorganize unless clearly wrong
 7. **Set high confidence (0.9+)** for entries verified against a printed TOC, lower confidence for entries you're less certain about
+8. **Page number ordering**: Output entries with non-decreasing page numbers. If you notice a later entry has a smaller page number than an earlier entry, re-check and correct the page numbers so the sequence is monotonically non-decreasing
 
 """
 
