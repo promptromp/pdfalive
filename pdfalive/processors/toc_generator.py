@@ -29,6 +29,14 @@ from pdfalive.prompts import (
 from pdfalive.tokens import TokenUsage, estimate_tokens
 
 
+# Suppress PydanticSerializationUnexpectedValue warnings emitted by LangChain's
+# with_structured_output() wrapper. The parsed output is correct; the warning is a
+# known LangChain + Pydantic compatibility issue (the union serializer for the
+# response type warns "Expected `none`" even though the value is valid).
+# A context-manager approach (warnings.catch_warnings) doesn't work here because
+# pydantic-core emits the warning from Rust, bypassing Python-level scoped filters.
+warnings.filterwarnings("ignore", message="Expected `none`", category=UserWarning, module="pydantic")
+
 # Regex pattern for section numbering (e.g. "1.", "1.2", "Chapter 1", "Appendix A")
 _SECTION_NUMBER_PATTERN = re.compile(r"^\s*(\d+\.|\d+\.\d+|Chapter\s|Section\s|Part\s|Appendix\s)", re.IGNORECASE)
 
@@ -707,13 +715,7 @@ class TOCGenerator:
         console.print(f"  [dim]Invoking LLM for {batch_description} (~{input_tokens:,} input tokens)...[/dim]")
         start_time = time.time()
 
-        # Suppress PydanticSerializationUnexpectedValue warnings emitted by LangChain's
-        # with_structured_output() wrapper. The parsed output is correct; the warning is a
-        # known LangChain + Pydantic compatibility issue (the union serializer for the
-        # response type warns "Expected `none`" even though the value is valid).
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="Expected `none`", category=UserWarning)
-            response = _invoke()
+        response = _invoke()
 
         elapsed = time.time() - start_time
         console.print(f"  [green]Completed {batch_description} in {elapsed:.1f}s[/green]")
