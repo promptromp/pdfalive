@@ -187,6 +187,131 @@ class TestTOC:
         assert merged.entries[1].level == 2
 
 
+class TestTOCSanitizeHierarchy:
+    """Tests for TOC.sanitize_hierarchy() — ensures PyMuPDF set_toc() compatibility."""
+
+    def _entry(self, title: str, page: int, level: int) -> TOCEntry:
+        return TOCEntry(title=title, page_number=page, level=level, confidence=0.9)
+
+    def test_empty_toc(self):
+        """Empty TOC is returned unchanged."""
+        toc = TOC(entries=[])
+        assert toc.sanitize_hierarchy().entries == []
+
+    def test_valid_hierarchy_unchanged(self):
+        """A valid hierarchy passes through without modification."""
+        toc = TOC(
+            entries=[
+                self._entry("Ch 1", 1, 1),
+                self._entry("Sec 1.1", 2, 2),
+                self._entry("Ch 2", 10, 1),
+                self._entry("Sec 2.1", 11, 2),
+                self._entry("Sub 2.1.1", 12, 3),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        levels = [e.level for e in result.entries]
+        assert levels == [1, 2, 1, 2, 3]
+
+    def test_first_entry_promoted_to_level_1(self):
+        """First entry with level > 1 is promoted to level 1."""
+        toc = TOC(
+            entries=[
+                self._entry("Sec 1.1", 1, 2),
+                self._entry("Ch 2", 10, 1),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        assert result.entries[0].level == 1
+        assert result.entries[1].level == 1
+
+    def test_level_jump_clamped(self):
+        """A jump from level 1 to level 3 is clamped to level 2."""
+        toc = TOC(
+            entries=[
+                self._entry("Ch 1", 1, 1),
+                self._entry("Deep sub", 2, 3),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        assert result.entries[0].level == 1
+        assert result.entries[1].level == 2
+
+    def test_multiple_jumps_cascaded(self):
+        """Multiple consecutive jumps are each clamped relative to previous."""
+        toc = TOC(
+            entries=[
+                self._entry("Ch 1", 1, 1),
+                self._entry("Sub 1", 2, 4),
+                self._entry("Sub 2", 3, 5),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        levels = [e.level for e in result.entries]
+        assert levels == [1, 2, 3]
+
+    def test_level_decrease_preserved(self):
+        """Decreasing levels (e.g., level 3 -> level 1) are not clamped."""
+        toc = TOC(
+            entries=[
+                self._entry("Ch 1", 1, 1),
+                self._entry("Sec 1.1", 2, 2),
+                self._entry("Sub 1.1.1", 3, 3),
+                self._entry("Ch 2", 10, 1),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        levels = [e.level for e in result.entries]
+        assert levels == [1, 2, 3, 1]
+
+    def test_all_level_2_entries(self):
+        """All entries at level 2 — first gets promoted, rest clamped to max prev+1."""
+        toc = TOC(
+            entries=[
+                self._entry("A", 1, 2),
+                self._entry("B", 5, 2),
+                self._entry("C", 10, 2),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        levels = [e.level for e in result.entries]
+        assert levels == [1, 2, 2]
+
+    def test_preserves_other_fields(self):
+        """Sanitization only changes level, not title/page/confidence."""
+        entry = TOCEntry(title="My Section", page_number=42, level=3, confidence=0.75)
+        toc = TOC(entries=[entry])
+        result = toc.sanitize_hierarchy()
+        sanitized = result.entries[0]
+        assert sanitized.level == 1  # changed
+        assert sanitized.title == "My Section"  # preserved
+        assert sanitized.page_number == 42  # preserved
+        assert sanitized.confidence == 0.75  # preserved
+
+    @pytest.mark.parametrize(
+        "input_levels,expected_levels",
+        [
+            ([1], [1]),
+            ([2], [1]),
+            ([3], [1]),
+            ([1, 2], [1, 2]),
+            ([1, 3], [1, 2]),
+            ([2, 3], [1, 2]),
+            ([1, 1, 1], [1, 1, 1]),
+            ([1, 2, 3, 4], [1, 2, 3, 4]),
+            ([1, 4, 2, 5], [1, 2, 2, 3]),
+            ([3, 5, 1, 4], [1, 2, 1, 2]),
+        ],
+    )
+    def test_parametrized_level_sequences(self, input_levels, expected_levels):
+        """Parametrized tests for various level sequences."""
+        entries = [self._entry(f"Entry {i}", i + 1, lvl) for i, lvl in enumerate(input_levels)]
+        toc = TOC(entries=entries)
+        result = toc.sanitize_hierarchy()
+        actual = [e.level for e in result.entries]
+        assert actual == expected_levels
+
+
 class TestRenameOp:
     """Tests for RenameOp model."""
 

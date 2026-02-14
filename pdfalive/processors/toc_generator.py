@@ -328,6 +328,7 @@ class TOCGenerator:
             toc, postprocess_usage = self._postprocess_toc(toc, features)
             usage = usage + postprocess_usage
 
+        toc = toc.sanitize_hierarchy()
         self.doc.set_toc(toc.to_list())
         self.doc.save(output_file)
 
