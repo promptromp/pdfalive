@@ -47,7 +47,7 @@ When you encounter a feature which you believe signifies a chapter or section he
 Each TOC entry should include:
 - Title: The text snippet of the feature.
 - Level: An integer representing the hierarchical level of the entry (1 for top-level chapters, 2 for sections, etc.). The user will instruct you on the maximum depth (level) to include.
-- Page Number: The page number where the feature is located (1-indexed).
+- Page Number: The PDF page number where the feature is located (1-indexed from the first physical page of the PDF file). Use this exact page number in your output — do not substitute printed page numbers visible in the text.
 - Confidence: A float between 0 and 1 indicating your confidence that this feature represents a TOC entry.
 
 Return the TOC as a list of entries, where each entry is represented as a dictionary with keys "title", "level", and "page_number".
@@ -100,7 +100,7 @@ When you encounter a feature which you believe signifies a chapter or section he
 Each TOC entry should include:
 - Title: The text snippet of the feature.
 - Level: An integer representing the hierarchical level of the entry (1 for top-level chapters, 2 for sections, etc.). The user will instruct you on the maximum depth (level) to include.
-- Page Number: The page number where the feature is located (1-indexed).
+- Page Number: The PDF page number where the feature is located (1-indexed from the first physical page of the PDF file). Use this exact page number in your output — do not substitute printed page numbers visible in the text.
 - Confidence: A float between 0 and 1 indicating your confidence that this feature represents a TOC entry.
 
 Return the TOC as a list of entries, where each entry is represented as a dictionary with keys "title", "level", and "page_number".

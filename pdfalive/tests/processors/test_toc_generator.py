@@ -1735,13 +1735,223 @@ class TestDetectPageOffsetNote:
         assert "PDF page 22" in note
 
 
+class TestDetectFrontMatterOffset:
+    """Tests for _detect_front_matter_offset."""
+
+    @pytest.fixture
+    def generator(self, mock_doc, mock_llm):
+        return TOCGenerator(doc=mock_doc, llm=mock_llm)
+
+    def _make_toc(self, entries_data: list[tuple[str, int, int]]) -> TOC:
+        """Helper: create TOC from (title, page, level) tuples."""
+        return TOC(entries=[TOCEntry(title=t, page_number=p, level=lvl, confidence=0.9) for t, p, lvl in entries_data])
+
+    def test_empty_toc_returns_zero(self, generator):
+        """Empty TOC yields no offset."""
+        assert generator._detect_front_matter_offset(TOC(entries=[])) == 0
+
+    def test_no_level1_past_page_5_returns_zero(self, generator):
+        """Level-1 entries only in first 5 pages means no significant front matter."""
+        toc = self._make_toc([("Preface", 3, 1)])
+        assert generator._detect_front_matter_offset(toc) == 0
+
+    def test_first_level1_past_page_5_returns_offset(self, generator):
+        """First level-1 entry past page 5 determines the offset."""
+        toc = self._make_toc(
+            [
+                ("Table of Contents", 3, 1),
+                ("Introduction", 16, 1),
+                ("Chapter II", 41, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 15  # 16 - 1
+
+    def test_skips_level2_entries(self, generator):
+        """Level-2 entries are ignored for offset detection."""
+        toc = self._make_toc(
+            [
+                ("Subsection 1.1", 20, 2),
+                ("Chapter I", 30, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 29  # 30 - 1
+
+    @pytest.mark.parametrize(
+        "page_number,expected_offset",
+        [
+            (6, 5),
+            (10, 9),
+            (22, 21),
+        ],
+    )
+    def test_offset_equals_page_minus_one(self, generator, page_number, expected_offset):
+        """Offset is always first qualifying page_number - 1."""
+        toc = self._make_toc([("Chapter I", page_number, 1)])
+        assert generator._detect_front_matter_offset(toc) == expected_offset
+
+
+class TestPageContainsHeading:
+    """Tests for _page_contains_heading."""
+
+    @pytest.fixture
+    def mock_doc_with_pages(self):
+        """Create a mock document with configurable page text."""
+        doc = MagicMock()
+        doc.page_count = 100
+        doc.get_toc.return_value = []
+        doc.name = None
+
+        # Default page text - can be customized per test
+        page_texts = {}
+
+        def get_page(idx):
+            page = MagicMock()
+            text = page_texts.get(idx, f"Page {idx + 1} body text content")
+            page.get_text.return_value = text
+            return page
+
+        doc.__getitem__ = lambda self, idx: get_page(idx)
+        doc._page_texts = page_texts  # Expose for test configuration
+        return doc
+
+    @pytest.fixture
+    def generator(self, mock_doc_with_pages, mock_llm):
+        return TOCGenerator(doc=mock_doc_with_pages, llm=mock_llm)
+
+    def test_finds_exact_heading_on_page(self, generator):
+        """Heading text found on the exact page returns True."""
+        generator.doc._page_texts[15] = "Some text\nIntroduction to Probability\nMore text"
+        assert generator._page_contains_heading(16, "Introduction to Probability") is True
+
+    def test_case_insensitive_match(self, generator):
+        """Matching is case-insensitive."""
+        generator.doc._page_texts[15] = "CHAPTER I: THE SAMPLE SPACE"
+        assert generator._page_contains_heading(16, "Chapter I: The Sample Space") is True
+
+    def test_whitespace_normalized(self, generator):
+        """Extra whitespace in page text or title is collapsed."""
+        generator.doc._page_texts[15] = "Chapter  I:  The   Sample Space"
+        assert generator._page_contains_heading(16, "Chapter I: The Sample Space") is True
+
+    def test_returns_false_for_missing_heading(self, generator):
+        """Returns False when heading text is not on the page or neighbors."""
+        generator.doc._page_texts[15] = "Completely unrelated text about nothing"
+        generator.doc._page_texts[14] = "Also unrelated"
+        generator.doc._page_texts[16] = "Still unrelated"
+        assert generator._page_contains_heading(16, "Introduction to Probability") is False
+
+    def test_returns_false_for_short_search_text(self, generator):
+        """Titles shorter than 3 chars after normalization are rejected."""
+        generator.doc._page_texts[0] = "AB is here"
+        assert generator._page_contains_heading(1, "AB") is False
+
+    def test_strips_number_prefix(self, generator):
+        """Section number prefixes like '1. ' are stripped before searching."""
+        generator.doc._page_texts[15] = "The Empirical Background of probability"
+        assert generator._page_contains_heading(16, "1. The Empirical Background") is True
+
+    def test_searches_within_window(self, generator):
+        """Heading on an adjacent page (within window) is found."""
+        generator.doc._page_texts[16] = "Introduction to Methods"
+        assert generator._page_contains_heading(16, "Introduction to Methods", window=1) is True
+
+    def test_clamps_to_document_bounds(self, generator):
+        """Search window is clamped to valid page range."""
+        generator.doc._page_texts[0] = "Preface to the Book"
+        # page_number=1, window=1 → search pages 0..1 (clamped, not -1..1)
+        assert generator._page_contains_heading(1, "Preface to the Book") is True
+
+
+class TestResolvePageNumber:
+    """Tests for _resolve_page_number."""
+
+    @pytest.fixture
+    def mock_doc_with_pages(self):
+        """Create a mock document with configurable page text."""
+        doc = MagicMock()
+        doc.page_count = 600
+        doc.get_toc.return_value = []
+        doc.name = None
+
+        page_texts = {}
+
+        def get_page(idx):
+            page = MagicMock()
+            text = page_texts.get(idx, "")
+            page.get_text.return_value = text
+            return page
+
+        doc.__getitem__ = lambda self, idx: get_page(idx)
+        doc._page_texts = page_texts
+        return doc
+
+    @pytest.fixture
+    def generator(self, mock_doc_with_pages, mock_llm):
+        return TOCGenerator(doc=mock_doc_with_pages, llm=mock_llm)
+
+    def test_returns_corrected_page_when_heading_found_at_corrected(self, generator):
+        """When heading is found at offset-corrected page, returns corrected page."""
+        offset = 15
+        # Heading "Methods" at printed page 10 → should be PDF page 25
+        generator.doc._page_texts[24] = "Methods and Materials"
+        result = generator._resolve_page_number("Methods", 10, offset)
+        assert result == 25  # 10 + 15
+
+    def test_returns_original_page_when_heading_found_at_original(self, generator):
+        """When heading only found at original page (already correct PDF page), keeps it."""
+        offset = 15
+        # Heading at original page 30 (already a PDF page number)
+        generator.doc._page_texts[29] = "Results and Discussion"
+        result = generator._resolve_page_number("Results", 30, offset)
+        assert result == 30
+
+    def test_defaults_to_corrected_when_not_found_anywhere(self, generator):
+        """When heading not found at either page, defaults to offset-corrected."""
+        offset = 15
+        result = generator._resolve_page_number("Unknown Chapter", 10, offset)
+        assert result == 25  # 10 + 15 (default)
+
+    def test_keeps_original_when_corrected_out_of_range(self, generator):
+        """When corrected page exceeds document length, keeps original."""
+        generator.doc.page_count = 100
+        result = generator._resolve_page_number("Appendix", 90, 15)
+        assert result == 90  # 90 + 15 = 105 > 100
+
+    def test_prefers_corrected_over_original_when_both_match(self, generator):
+        """When heading found at both pages, prefers corrected (checked first)."""
+        offset = 15
+        generator.doc._page_texts[24] = "Methods in Science"
+        generator.doc._page_texts[9] = "Methods in Science"
+        result = generator._resolve_page_number("Methods", 10, offset)
+        assert result == 25  # corrected is checked first
+
+
 class TestCorrectPostprocessedPageNumbers:
     """Tests for _correct_postprocessed_page_numbers."""
 
     @pytest.fixture
-    def generator(self, mock_doc, mock_llm):
-        mock_doc.page_count = 600
-        return TOCGenerator(doc=mock_doc, llm=mock_llm)
+    def mock_doc_with_pages(self):
+        """Create a mock document with configurable page text for verification."""
+        doc = MagicMock()
+        doc.page_count = 600
+        doc.get_toc.return_value = []
+        doc.name = None
+
+        page_texts = {}
+
+        def get_page(idx):
+            page = MagicMock()
+            text = page_texts.get(idx, "")
+            page.get_text.return_value = text
+            return page
+
+        doc.__getitem__ = lambda self, idx: get_page(idx)
+        doc._page_texts = page_texts
+        return doc
+
+    @pytest.fixture
+    def generator(self, mock_doc_with_pages, mock_llm):
+        return TOCGenerator(doc=mock_doc_with_pages, llm=mock_llm)
 
     def _make_toc(self, entries_data: list[tuple[str, int, int]]) -> TOC:
         """Helper: create TOC from (title, page, level) tuples."""
@@ -1767,32 +1977,8 @@ class TestCorrectPostprocessedPageNumbers:
         for orig, res in zip(original.entries, result.entries, strict=True):
             assert orig.page_number == res.page_number
 
-    def test_corrects_systematic_offset(self, generator):
-        """Detects and corrects a systematic offset (e.g., printed page numbers used)."""
-        offset = 15
-        original = self._make_toc(
-            [
-                ("Introduction", 16, 1),
-                ("Chapter I", 22, 1),
-                ("Chapter II", 41, 1),
-                ("Chapter III", 65, 1),
-            ]
-        )
-        # Postprocessor shifted all pages by -15 (used printed page numbers)
-        refined = self._make_toc(
-            [
-                ("Introduction", 16 - offset, 1),
-                ("Chapter I", 22 - offset, 1),
-                ("Chapter II", 41 - offset, 1),
-                ("Chapter III", 65 - offset, 1),
-            ]
-        )
-        result = generator._correct_postprocessed_page_numbers(original, refined)
-        for orig, res in zip(original.entries, result.entries, strict=True):
-            assert orig.page_number == res.page_number
-
-    def test_corrects_new_entries_added_by_postprocessor(self, generator):
-        """New entries added by the postprocessor also get the offset correction."""
+    def test_restores_original_pages_for_matched_entries(self, generator):
+        """Matched entries get their original PDF page numbers restored."""
         original = self._make_toc(
             [
                 ("Introduction", 16, 1),
@@ -1800,72 +1986,114 @@ class TestCorrectPostprocessedPageNumbers:
                 ("Chapter II", 41, 1),
             ]
         )
-        # Postprocessor shifted existing entries and added a new one (Chapter 1.5)
+        # Postprocessor changed page numbers for existing entries
         refined = self._make_toc(
             [
-                ("Introduction", 1, 1),  # shifted
-                ("Chapter I", 7, 1),  # shifted
-                ("Subsection 1.1", 10, 2),  # new entry, also uses printed page number
-                ("Chapter II", 26, 1),  # shifted
+                ("Introduction", 1, 1),
+                ("Chapter I", 7, 1),
+                ("Chapter II", 26, 1),
             ]
         )
         result = generator._correct_postprocessed_page_numbers(original, refined)
-        assert result.entries[0].page_number == 16  # corrected
-        assert result.entries[1].page_number == 22  # corrected
-        assert result.entries[2].page_number == 25  # new entry also corrected (10 + 15)
-        assert result.entries[3].page_number == 41  # corrected
+        assert result.entries[0].page_number == 16
+        assert result.entries[1].page_number == 22
+        assert result.entries[2].page_number == 41
 
-    def test_no_correction_when_empty_tocs(self, generator):
-        """Empty TOCs are returned unchanged."""
+    def test_applies_offset_to_new_entries(self, generator):
+        """New entries from the postprocessor get the front matter offset applied."""
+        # Set up page text so _resolve_page_number finds headings at corrected pages
+        generator.doc._page_texts[24] = "Subsection 1.1 content"  # PDF page 25
+        generator.doc._page_texts[34] = "Subsection 1.2 content"  # PDF page 35
+
+        original = self._make_toc(
+            [
+                ("Introduction", 16, 1),
+                ("Chapter I", 22, 1),
+                ("Chapter II", 41, 1),
+            ]
+        )
+        # Postprocessor keeps existing entries and adds new ones with printed page numbers
+        refined = self._make_toc(
+            [
+                ("Introduction", 16, 1),
+                ("Chapter I", 22, 1),
+                ("Subsection 1.1", 10, 2),  # printed page → needs +15
+                ("Subsection 1.2", 20, 2),  # printed page → needs +15
+                ("Chapter II", 41, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 16  # matched, restored
+        assert result.entries[1].page_number == 22  # matched, restored
+        assert result.entries[2].page_number == 25  # new, offset applied (10 + 15)
+        assert result.entries[3].page_number == 35  # new, offset applied (20 + 15)
+        assert result.entries[4].page_number == 41  # matched, restored
+
+    def test_empty_refined_toc_returned_as_is(self, generator):
+        """Empty refined TOC is returned unchanged."""
         empty = TOC(entries=[])
         original = self._make_toc([("Chapter I", 22, 1)])
 
-        assert generator._correct_postprocessed_page_numbers(empty, empty) == empty
         assert generator._correct_postprocessed_page_numbers(original, empty) == empty
-        assert generator._correct_postprocessed_page_numbers(empty, original) == original
 
-    def test_no_correction_for_random_differences(self, generator):
-        """Non-systematic page number differences are not corrected."""
+    def test_empty_original_with_nonempty_refined(self, generator):
+        """When original is empty, refined entries are kept (no offset detected)."""
+        empty = TOC(entries=[])
+        refined = self._make_toc([("Chapter I", 22, 1)])
+
+        result = generator._correct_postprocessed_page_numbers(empty, refined)
+        assert result.entries[0].page_number == 22  # no offset, kept as-is
+
+    def test_no_offset_applied_when_front_matter_small(self, generator):
+        """New entries are kept as-is when front matter offset < 3."""
+        original = self._make_toc(
+            [
+                ("Chapter 1", 4, 1),  # offset = 4 - 1 = 3... but page <= 5, so skipped
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Chapter 1", 4, 1),
+                ("Section 1.1", 10, 2),  # new entry
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        # offset = 0 (no level-1 entry past page 5), so new entry kept as-is
+        assert result.entries[1].page_number == 10
+
+    def test_new_entry_keeps_original_when_already_correct_pdf_page(self, generator):
+        """New entry with correct PDF page number is verified and kept."""
+        # Set heading text at PDF page 30 (the original page), not at corrected page 45
+        generator.doc._page_texts[29] = "Special Section content here"
+
+        original = self._make_toc(
+            [
+                ("Chapter I", 16, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Chapter I", 16, 1),
+                ("Special Section", 30, 2),  # already a correct PDF page
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[1].page_number == 30  # kept, found at original page
+
+    def test_title_matching_is_case_insensitive(self, generator):
+        """Title matching between original and refined is case-insensitive."""
         original = self._make_toc(
             [
                 ("Introduction", 16, 1),
-                ("Chapter I", 22, 1),
-                ("Chapter II", 41, 1),
-                ("Chapter III", 65, 1),
+                ("CHAPTER I", 22, 1),
             ]
         )
-        # Postprocessor made random changes — no consistent offset
         refined = self._make_toc(
             [
-                ("Introduction", 15, 1),
-                ("Chapter I", 22, 1),
-                ("Chapter II", 43, 1),
-                ("Chapter III", 60, 1),
+                ("introduction", 1, 1),
+                ("Chapter I", 7, 1),
             ]
         )
         result = generator._correct_postprocessed_page_numbers(original, refined)
-        # Should be unchanged since offsets are inconsistent
-        for ref, res in zip(refined.entries, result.entries, strict=True):
-            assert ref.page_number == res.page_number
-
-    def test_correction_clamps_to_valid_range(self, generator):
-        """Corrected page numbers that exceed doc page count are left uncorrected."""
-        generator.doc.page_count = 100
-        original = self._make_toc(
-            [
-                ("Chapter I", 50, 1),
-                ("Chapter II", 80, 1),
-            ]
-        )
-        # Postprocessor shifted by -40
-        refined = self._make_toc(
-            [
-                ("Chapter I", 10, 1),
-                ("Chapter II", 40, 1),
-                ("Appendix", 70, 1),  # new entry; 70 + 40 = 110 > page_count
-            ]
-        )
-        result = generator._correct_postprocessed_page_numbers(original, refined)
-        assert result.entries[0].page_number == 50  # corrected
-        assert result.entries[1].page_number == 80  # corrected
-        assert result.entries[2].page_number == 70  # kept as-is (110 > 100)
+        assert result.entries[0].page_number == 16
+        assert result.entries[1].page_number == 22

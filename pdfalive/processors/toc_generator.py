@@ -963,6 +963,23 @@ numbers seem most appropriate — page numbers will be verified and corrected do
 
         return refined_toc, usage
 
+    def _detect_front_matter_offset(self, toc: TOC) -> int:
+        """Detect the number of front matter pages from Phase 1 TOC data.
+
+        Finds the first level-1 entry past page 5 and assumes it corresponds
+        to the start of the main content (approximately printed page 1).
+
+        Args:
+            toc: The generated TOC with correct PDF page numbers.
+
+        Returns:
+            Estimated front matter offset (0 if no significant front matter detected).
+        """
+        for entry in toc.entries:
+            if entry.level == 1 and entry.page_number > 5:
+                return entry.page_number - 1
+        return 0
+
     def _detect_page_offset_note(self, toc: TOC, reference_text: str) -> str:
         """Detect the offset between PDF page numbers and printed page numbers.
 
@@ -977,25 +994,12 @@ numbers seem most appropriate — page numbers will be verified and corrected do
             A warning string to include in the postprocessor prompt, or empty string
             if no offset is detected.
         """
-        if not toc.entries:
-            return ""
-
-        # Find the first chapter-level (level 1) entry that's past the front matter
-        # (i.e., not a "Table of Contents" or "Preface" entry in the first few pages)
-        first_chapter_page = None
-        for entry in toc.entries:
-            if entry.level == 1 and entry.page_number > 5:
-                first_chapter_page = entry.page_number
-                break
-
-        if first_chapter_page is None:
-            return ""
-
-        # The offset is the number of front matter pages before content "page 1"
-        estimated_offset = first_chapter_page - 1
+        estimated_offset = self._detect_front_matter_offset(toc)
 
         if estimated_offset < 3:
             return ""
+
+        first_chapter_page = estimated_offset + 1
 
         return (
             f"**Note**: This document has approximately {estimated_offset} pages of front matter. "
@@ -1004,13 +1008,75 @@ numbers seem most appropriate — page numbers will be verified and corrected do
             f"For existing entries, keep their PDF page numbers. For new entries, use your best estimate."
         )
 
-    def _correct_postprocessed_page_numbers(self, original_toc: TOC, refined_toc: TOC) -> TOC:
-        """Correct page numbers if the postprocessor shifted them to printed page numbers.
+    def _page_contains_heading(self, page_number: int, title: str, window: int = 1) -> bool:
+        """Check if a heading's text appears on or near the given page.
 
-        Compares the refined TOC against the original to detect a systematic page
-        number offset. If the postprocessor replaced PDF page numbers with printed
-        page numbers (which differ by a front matter offset), this method detects
-        and reverses the shift.
+        Args:
+            page_number: 1-indexed PDF page number to check.
+            title: The heading title to search for.
+            window: Number of pages before/after to also check.
+
+        Returns:
+            True if the title text is found on or near the page.
+        """
+        # Normalize: strip common prefixes, lowercase, collapse whitespace
+        search_text = re.sub(r"^\d+\.\s*", "", title)  # Strip "1. " prefixes
+        search_text = re.sub(r"\s+", " ", search_text.strip().lower())
+
+        if len(search_text) < 3:
+            return False  # Too short to match reliably
+
+        start = max(0, page_number - 1 - window)
+        end = min(self.doc.page_count, page_number + window)
+
+        for page_idx in range(start, end):
+            page_text = self.doc[page_idx].get_text("text")
+            page_text_normalized = re.sub(r"\s+", " ", page_text.lower())
+            if search_text in page_text_normalized:
+                return True
+
+        return False
+
+    def _resolve_page_number(self, title: str, page_number: int, offset: int) -> int:
+        """Determine the correct PDF page number for a new postprocessed entry.
+
+        Checks whether the entry's page number is a printed page number (needs offset)
+        or already a correct PDF page number by searching the actual PDF text.
+
+        Args:
+            title: The TOC entry title to search for.
+            page_number: The page number from the postprocessor output.
+            offset: The detected front matter offset.
+
+        Returns:
+            The corrected PDF page number.
+        """
+        corrected_page = page_number + offset
+
+        # Validate corrected page is in range
+        if corrected_page < 1 or corrected_page > self.doc.page_count:
+            return page_number  # Can't apply offset, keep original
+
+        # Check if heading text appears at the offset-corrected page (±1 page window)
+        if self._page_contains_heading(corrected_page, title):
+            return corrected_page
+
+        # Check if heading text appears at the original page
+        if 1 <= page_number <= self.doc.page_count and self._page_contains_heading(page_number, title):
+            return page_number
+
+        # Neither matched — default to offset-corrected (most common case for printed TOC entries)
+        return corrected_page
+
+    def _correct_postprocessed_page_numbers(self, original_toc: TOC, refined_toc: TOC) -> TOC:
+        """Correct page numbers for entries added or modified by the postprocessor.
+
+        Uses a deterministic strategy:
+        1. Detect the front matter offset from Phase 1 data.
+        2. For matched entries (exist in both original and refined): restore the
+           original PDF page number.
+        3. For new entries (only in refined) with significant front matter: verify
+           and apply the offset by checking the actual PDF text.
 
         Args:
             original_toc: The pre-postprocessing TOC with correct PDF page numbers.
@@ -1019,10 +1085,13 @@ numbers seem most appropriate — page numbers will be verified and corrected do
         Returns:
             The corrected TOC with PDF page numbers restored.
         """
-        if not original_toc.entries or not refined_toc.entries:
+        if not refined_toc.entries:
             return refined_toc
 
-        # Build a map of normalized title -> page_number from the original TOC
+        # Step 1: Detect front matter offset from Phase 1 data
+        offset = self._detect_front_matter_offset(original_toc)
+
+        # Step 2: Build map of original entries (normalized title -> page_number)
         def normalize(title: str) -> str:
             return re.sub(r"\s+", " ", title.strip().lower())
 
@@ -1030,38 +1099,40 @@ numbers seem most appropriate — page numbers will be verified and corrected do
         for entry in original_toc.entries:
             original_map[normalize(entry.title)] = entry.page_number
 
-        # Match refined entries to original entries and compute page offsets
-        offsets: list[int] = []
+        corrected = []
+        restored_count = 0
+        offset_applied_count = 0
+
         for entry in refined_toc.entries:
             key = normalize(entry.title)
+
             if key in original_map:
-                offsets.append(original_map[key] - entry.page_number)
+                # MATCHED: restore original PDF page number
+                orig_page = original_map[key]
+                if entry.page_number != orig_page:
+                    restored_count += 1
+                corrected.append(entry.model_copy(update={"page_number": orig_page}))
 
-        if not offsets:
-            return refined_toc
+            elif offset >= 3:
+                # NEW entry with significant front matter — verify and apply offset
+                corrected_page = self._resolve_page_number(entry.title, entry.page_number, offset)
+                if corrected_page != entry.page_number:
+                    offset_applied_count += 1
+                corrected.append(entry.model_copy(update={"page_number": corrected_page}))
 
-        # Check if there's a consistent non-zero offset
-        offset_counter = Counter(offsets)
-        most_common_offset, count = offset_counter.most_common(1)[0]
+            else:
+                # No significant front matter — keep as-is
+                corrected.append(entry)
 
-        # If majority of matched entries are shifted by the same amount, correct all entries
-        if most_common_offset != 0 and count >= len(offsets) * 0.5:
+        # Log corrections
+        if restored_count > 0:
+            console.print(f"  [yellow]Restored page numbers for {restored_count} existing entries[/yellow]")
+        if offset_applied_count > 0:
             console.print(
-                f"  [yellow]Detected page number offset of {most_common_offset} in postprocessed TOC "
-                f"({count}/{len(offsets)} entries shifted). Correcting...[/yellow]"
+                f"  [yellow]Applied front matter offset (+{offset}) to {offset_applied_count} new entries[/yellow]"
             )
-            corrected_entries = []
-            for entry in refined_toc.entries:
-                corrected_page = entry.page_number + most_common_offset
-                # Only apply correction if the result is within valid range
-                if 1 <= corrected_page <= self.doc.page_count:
-                    corrected_entries.append(entry.model_copy(update={"page_number": corrected_page}))
-                else:
-                    corrected_entries.append(entry)
 
-            return TOC(entries=corrected_entries)
-
-        return refined_toc
+        return TOC(entries=corrected)
 
     def _summarize_features_for_postprocessing(self, features: list, max_entries: int = 150) -> str:
         """Create a compact summary of features for postprocessing context.
