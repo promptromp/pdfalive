@@ -1,5 +1,6 @@
 """Unit tests for OCR processor."""
 
+import atexit
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -464,3 +465,118 @@ class TestOCRProcessorParallelIntegration:
         # Cleanup
         result_doc.close()
         Path(result_doc.name).unlink()
+
+    def test_process_parallel_registers_atexit_cleanup(self, tmp_path, monkeypatch):
+        """Test that _process_parallel registers an atexit handler for the temp file."""
+        input_pdf = tmp_path / "input.pdf"
+        doc = pymupdf.open()
+        for _ in range(4):
+            doc.new_page()
+        doc.save(str(input_pdf))
+        doc.close()
+
+        def fake_ocr_page_range(args):
+            process_idx, total_processes, input_path, output_dir, language, dpi = args
+            part_path = Path(output_dir) / f"ocr_part_{process_idx}.pdf"
+            part_doc = pymupdf.open()
+            part_doc.new_page()
+            part_doc.save(str(part_path))
+            part_doc.close()
+            return process_idx, process_idx + 1, str(part_path)
+
+        monkeypatch.setattr("pdfalive.processors.ocr_processor._ocr_page_range", fake_ocr_page_range)
+
+        class FakePool:
+            def __init__(self, processes=None):
+                pass
+
+            def imap_unordered(self, func, args_list):
+                for args in args_list:
+                    yield func(args)
+
+            def map(self, func, args_list):
+                return [func(a) for a in args_list]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr("pdfalive.processors.ocr_processor.Pool", FakePool)
+
+        # Track atexit registrations
+        registered_funcs: list = []
+        monkeypatch.setattr(atexit, "register", lambda f: registered_funcs.append(f))
+
+        ocr = OCRProcessor(num_processes=2)
+        result_doc = ocr._process_parallel(str(input_pdf), num_processes=2, show_progress=False)
+        tmp_path_str = result_doc.name
+
+        # An atexit handler should have been registered
+        assert len(registered_funcs) == 1, "Expected exactly one atexit handler to be registered"
+
+        # The temp file should exist before cleanup
+        assert Path(tmp_path_str).exists()
+
+        # Run the registered cleanup
+        result_doc.close()
+        registered_funcs[0]()
+
+        # After cleanup the temp file should be gone
+        assert not Path(tmp_path_str).exists()
+
+    def test_process_parallel_atexit_handler_tolerates_missing_file(self, tmp_path, monkeypatch):
+        """Test that the atexit handler does not raise if the file is already deleted."""
+        input_pdf = tmp_path / "input.pdf"
+        doc = pymupdf.open()
+        for _ in range(4):
+            doc.new_page()
+        doc.save(str(input_pdf))
+        doc.close()
+
+        def fake_ocr_page_range(args):
+            process_idx, total_processes, input_path, output_dir, language, dpi = args
+            part_path = Path(output_dir) / f"ocr_part_{process_idx}.pdf"
+            part_doc = pymupdf.open()
+            part_doc.new_page()
+            part_doc.save(str(part_path))
+            part_doc.close()
+            return process_idx, process_idx + 1, str(part_path)
+
+        monkeypatch.setattr("pdfalive.processors.ocr_processor._ocr_page_range", fake_ocr_page_range)
+
+        class FakePool:
+            def __init__(self, processes=None):
+                pass
+
+            def imap_unordered(self, func, args_list):
+                for args in args_list:
+                    yield func(args)
+
+            def map(self, func, args_list):
+                return [func(a) for a in args_list]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr("pdfalive.processors.ocr_processor.Pool", FakePool)
+
+        registered_funcs: list = []
+        monkeypatch.setattr(atexit, "register", lambda f: registered_funcs.append(f))
+
+        ocr = OCRProcessor(num_processes=2)
+        result_doc = ocr._process_parallel(str(input_pdf), num_processes=2, show_progress=False)
+        tmp_path_str = result_doc.name
+
+        result_doc.close()
+
+        # Delete the file manually before running the atexit handler
+        Path(tmp_path_str).unlink()
+        assert not Path(tmp_path_str).exists()
+
+        # The atexit handler should not raise
+        registered_funcs[0]()

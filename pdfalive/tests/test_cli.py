@@ -5,6 +5,7 @@ import stat
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pymupdf
 import pytest
 from click.testing import CliRunner
 
@@ -330,3 +331,234 @@ model-identifier = "global-model"
             result = runner.invoke(cli, ["rename", "--help"])
             assert result.exit_code != 0
             assert "Error loading config file" in result.output
+
+
+def _create_valid_pdf(path: Path) -> None:
+    """Create a minimal valid PDF file at the given path."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Test content")
+    doc.save(str(path))
+    doc.close()
+
+
+class TestGenerateTocTempFileCleanup:
+    """Tests for temp file cleanup in generate-toc --inplace mode.
+
+    These tests verify that:
+    - On failure, inplace temp files are cleaned up (no leaked files)
+    - On failure, the original input file is NEVER deleted
+    - In non-inplace mode, user-specified output paths are NEVER deleted on failure
+    """
+
+    @pytest.fixture
+    def runner(self) -> CliRunner:
+        return CliRunner()
+
+    @patch("pdfalive.cli.TOCGenerator")
+    @patch("pdfalive.cli.init_chat_model")
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_inplace_failure_cleans_up_temp_file(
+        self,
+        mock_ocr_cls: MagicMock,
+        mock_init_chat_model: MagicMock,
+        mock_toc_cls: MagicMock,
+        runner: CliRunner,
+        tmp_path: Path,
+    ) -> None:
+        """On inplace failure, the temp file must be removed."""
+        input_pdf = tmp_path / "input.pdf"
+        _create_valid_pdf(input_pdf)
+
+        # Make OCR say no OCR is needed, then TOCGenerator.run raises
+        mock_ocr_cls.return_value.needs_ocr.return_value = False
+        mock_toc_cls.return_value.run.side_effect = RuntimeError("LLM exploded")
+
+        result = runner.invoke(cli, ["generate-toc", "--inplace", str(input_pdf)])
+        assert result.exit_code != 0
+
+        # The only file in the directory should be the original input
+        remaining_files = list(tmp_path.iterdir())
+        assert remaining_files == [input_pdf], (
+            f"Expected only input file, but found: {[f.name for f in remaining_files]}"
+        )
+
+    @patch("pdfalive.cli.TOCGenerator")
+    @patch("pdfalive.cli.init_chat_model")
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_inplace_failure_preserves_original_input(
+        self,
+        mock_ocr_cls: MagicMock,
+        mock_init_chat_model: MagicMock,
+        mock_toc_cls: MagicMock,
+        runner: CliRunner,
+        tmp_path: Path,
+    ) -> None:
+        """On inplace failure, the original input file must be untouched."""
+        input_pdf = tmp_path / "input.pdf"
+        _create_valid_pdf(input_pdf)
+        original_content = input_pdf.read_bytes()
+
+        mock_ocr_cls.return_value.needs_ocr.return_value = False
+        mock_toc_cls.return_value.run.side_effect = RuntimeError("LLM exploded")
+
+        result = runner.invoke(cli, ["generate-toc", "--inplace", str(input_pdf)])
+        assert result.exit_code != 0
+
+        # Original file must still exist with identical content
+        assert input_pdf.exists()
+        assert input_pdf.read_bytes() == original_content
+
+    @patch("pdfalive.cli.TOCGenerator")
+    @patch("pdfalive.cli.init_chat_model")
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_non_inplace_failure_does_not_delete_output_path(
+        self,
+        mock_ocr_cls: MagicMock,
+        mock_init_chat_model: MagicMock,
+        mock_toc_cls: MagicMock,
+        runner: CliRunner,
+        tmp_path: Path,
+    ) -> None:
+        """In non-inplace mode, a failure must NOT delete the user-specified output path."""
+        input_pdf = tmp_path / "input.pdf"
+        output_pdf = tmp_path / "output.pdf"
+        _create_valid_pdf(input_pdf)
+        # Pre-create output file to simulate overwriting an existing file
+        output_pdf.write_bytes(b"pre-existing output content")
+
+        mock_ocr_cls.return_value.needs_ocr.return_value = False
+        mock_toc_cls.return_value.run.side_effect = RuntimeError("LLM exploded")
+
+        result = runner.invoke(cli, ["generate-toc", str(input_pdf), str(output_pdf)])
+        assert result.exit_code != 0
+
+        # The pre-existing output file must NOT have been deleted
+        assert output_pdf.exists()
+        assert output_pdf.read_bytes() == b"pre-existing output content"
+
+    @patch("pdfalive.cli.TOCGenerator")
+    @patch("pdfalive.cli.init_chat_model")
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_inplace_ocr_failure_cleans_up_temp_file(
+        self,
+        mock_ocr_cls: MagicMock,
+        mock_init_chat_model: MagicMock,
+        mock_toc_cls: MagicMock,
+        runner: CliRunner,
+        tmp_path: Path,
+    ) -> None:
+        """If OCR processing fails in inplace mode, temp file must be cleaned up."""
+        input_pdf = tmp_path / "input.pdf"
+        _create_valid_pdf(input_pdf)
+
+        # OCR says it's needed, then process_in_memory raises
+        mock_ocr_cls.return_value.needs_ocr.return_value = True
+        mock_ocr_cls.return_value.process_in_memory.side_effect = RuntimeError("OCR failed")
+
+        result = runner.invoke(cli, ["generate-toc", "--inplace", str(input_pdf)])
+        assert result.exit_code != 0
+
+        # Only the original input should remain
+        remaining_files = list(tmp_path.iterdir())
+        assert remaining_files == [input_pdf]
+        assert input_pdf.exists()
+
+
+class TestExtractTextTempFileCleanup:
+    """Tests for temp file cleanup in extract-text --inplace mode.
+
+    These tests verify that:
+    - On failure, inplace temp files are cleaned up
+    - On failure, the original input file is NEVER deleted
+    - In non-inplace mode, user-specified output paths are NEVER deleted on failure
+    - When no OCR is needed in inplace mode, temp file is still cleaned up
+    """
+
+    @pytest.fixture
+    def runner(self) -> CliRunner:
+        return CliRunner()
+
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_inplace_failure_cleans_up_temp_file(
+        self,
+        mock_ocr_cls: MagicMock,
+        runner: CliRunner,
+        tmp_path: Path,
+    ) -> None:
+        """On inplace failure, the temp file must be removed."""
+        input_pdf = tmp_path / "input.pdf"
+        _create_valid_pdf(input_pdf)
+
+        # OCR needed, but process_in_memory raises
+        mock_ocr_cls.return_value.needs_ocr.return_value = True
+        mock_ocr_cls.return_value.process_in_memory.side_effect = RuntimeError("OCR failed")
+
+        result = runner.invoke(cli, ["extract-text", "--inplace", str(input_pdf)])
+        assert result.exit_code != 0
+
+        remaining_files = list(tmp_path.iterdir())
+        assert remaining_files == [input_pdf]
+
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_inplace_failure_preserves_original_input(
+        self,
+        mock_ocr_cls: MagicMock,
+        runner: CliRunner,
+        tmp_path: Path,
+    ) -> None:
+        """On inplace failure, the original input file must be untouched."""
+        input_pdf = tmp_path / "input.pdf"
+        _create_valid_pdf(input_pdf)
+        original_content = input_pdf.read_bytes()
+
+        mock_ocr_cls.return_value.needs_ocr.return_value = True
+        mock_ocr_cls.return_value.process_in_memory.side_effect = RuntimeError("OCR failed")
+
+        result = runner.invoke(cli, ["extract-text", "--inplace", str(input_pdf)])
+        assert result.exit_code != 0
+
+        assert input_pdf.exists()
+        assert input_pdf.read_bytes() == original_content
+
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_non_inplace_failure_does_not_delete_output_path(
+        self,
+        mock_ocr_cls: MagicMock,
+        runner: CliRunner,
+        tmp_path: Path,
+    ) -> None:
+        """In non-inplace mode, a failure must NOT delete the user-specified output path."""
+        input_pdf = tmp_path / "input.pdf"
+        output_pdf = tmp_path / "output.pdf"
+        _create_valid_pdf(input_pdf)
+        output_pdf.write_bytes(b"pre-existing output content")
+
+        mock_ocr_cls.return_value.needs_ocr.return_value = True
+        mock_ocr_cls.return_value.process_in_memory.side_effect = RuntimeError("OCR failed")
+
+        result = runner.invoke(cli, ["extract-text", str(input_pdf), str(output_pdf)])
+        assert result.exit_code != 0
+
+        assert output_pdf.exists()
+        assert output_pdf.read_bytes() == b"pre-existing output content"
+
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_inplace_no_ocr_needed_cleans_up_temp_file(
+        self,
+        mock_ocr_cls: MagicMock,
+        runner: CliRunner,
+        tmp_path: Path,
+    ) -> None:
+        """When no OCR is needed in inplace mode, the temp file must still be cleaned up."""
+        input_pdf = tmp_path / "input.pdf"
+        _create_valid_pdf(input_pdf)
+
+        mock_ocr_cls.return_value.needs_ocr.return_value = False
+
+        result = runner.invoke(cli, ["extract-text", "--inplace", str(input_pdf)])
+        assert result.exit_code == 0
+
+        # Only the original input should remain (temp file cleaned up)
+        remaining_files = list(tmp_path.iterdir())
+        assert remaining_files == [input_pdf]
