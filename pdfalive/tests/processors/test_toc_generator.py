@@ -1717,10 +1717,9 @@ class TestDetectPageOffsetNote:
             ]
         )
         note = generator._detect_page_offset_note(toc, "some text")
-        assert "WARNING" in note
+        assert "Note" in note
         assert "15" in note  # estimated offset
         assert "PDF page 16" in note
-        assert "DO NOT" in note
 
     def test_skips_early_level1_entries(self, generator):
         """Entries in first 5 pages (like preface/TOC) are skipped for offset detection."""
@@ -1731,7 +1730,7 @@ class TestDetectPageOffsetNote:
             ]
         )
         note = generator._detect_page_offset_note(toc, "some text")
-        assert "WARNING" in note
+        assert "Note" in note
         assert "21" in note  # offset = 22 - 1
         assert "PDF page 22" in note
 

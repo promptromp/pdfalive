@@ -910,7 +910,7 @@ Please review and refine the following automatically generated Table of Contents
 ## Generated TOC (to be refined)
 
 The page numbers below are **PDF page numbers** (physical position in the PDF file).
-Do NOT change them to match any printed page numbers in the reference text.
+For existing entries, prefer keeping these page numbers unchanged.
 
 {toc_entries_str if toc_entries_str else "(No entries were generated)"}
 
@@ -924,8 +924,9 @@ Do NOT change them to match any printed page numbers in the reference text.
 
 {features_summary}
 
-Please return a cleaned and improved TOC based on the guidelines in your instructions.
-Remember: output page numbers must be PDF page numbers, NOT printed page numbers.
+Please return a cleaned and improved TOC. It is very important that you add any missing \
+sections or chapters visible in the printed TOC above. For new entries, use whatever page \
+numbers seem most appropriate — page numbers will be verified and corrected downstream.
 """
 
         messages = [
@@ -997,10 +998,10 @@ Remember: output page numbers must be PDF page numbers, NOT printed page numbers
             return ""
 
         return (
-            f"**WARNING**: This document has approximately {estimated_offset} pages of front matter. "
+            f"**Note**: This document has approximately {estimated_offset} pages of front matter. "
             f"The printed page numbers below (if any) start counting AFTER the front matter, "
             f'so printed page "1" corresponds to approximately PDF page {first_chapter_page}. '
-            f"DO NOT use printed page numbers in your output — use PDF page numbers from the Generated TOC above."
+            f"For existing entries, keep their PDF page numbers. For new entries, use your best estimate."
         )
 
     def _correct_postprocessed_page_numbers(self, original_toc: TOC, refined_toc: TOC) -> TOC:

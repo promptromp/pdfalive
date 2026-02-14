@@ -135,16 +135,14 @@ Your job is to produce a cleaned, verified, and improved TOC by:
 - **Removing false positives**: Remove entries that don't appear to be actual chapter/section headings (e.g., running headers, page numbers, etc.)
 - **Fixing hierarchy levels**: Ensure level assignments are consistent (level 1 for chapters, level 2 for sections, etc.)
 
-### CRITICAL: Page Numbering Rules
+### Page Numbering Note
 
-The page numbers in the **Generated TOC** are **PDF page numbers** — they refer to the physical page position in the PDF file (1-indexed from the very first page of the file). These are CORRECT and should be preserved as-is.
+The page numbers in the **Generated TOC** are **PDF page numbers** (1-indexed from the very first physical page of the file). These should be preserved as-is for existing entries.
 
-The **printed TOC** in the reference text uses the **book's own page numbering**, which typically starts AFTER front matter (title page, copyright, preface, table of contents pages, etc.). This means printed page "1" may correspond to PDF page 15, 20, or higher.
+The **printed TOC** in the reference text may use the **book's own page numbering**, which can differ from PDF page numbers when front matter is present (title page, copyright, preface, etc.). For example, printed page "1" might correspond to PDF page 16.
 
-**DO NOT replace PDF page numbers with printed page numbers.** Doing so will cause bookmarks to point to the wrong pages. Specifically:
-- **Keep page numbers from the Generated TOC unchanged** unless you find evidence in the Document Features that a heading actually appears on a different PDF page
-- **For new entries** you add from the printed TOC, estimate the PDF page number using the Document Features or by interpolating from nearby entries in the Generated TOC. Do NOT use the printed page number directly
-- **Use the printed TOC only for**: verifying which sections exist, their names, their ordering, and their hierarchy levels
+- **For existing entries**: keep their page numbers unchanged — they are already correct PDF page numbers
+- **For new entries** you add from the printed TOC: use whatever page number seems most appropriate (printed page numbers are acceptable — a downstream correction step will adjust them if needed). The most important thing is to **add all missing sections** rather than omit them due to page number uncertainty
 
 ## Input Format
 
@@ -165,7 +163,7 @@ Return a refined TOC as a list of entries, where each entry includes:
 
 1. **Trust the printed TOC for section names** if one exists - it's authoritative for what sections exist
 2. **Preserve section numbering**: If the extracted heading includes a section number prefix (e.g., "4.1 Some Text", "Chapter 3: Title"), ALWAYS keep the numbering in the title even if the printed TOC omits it. Section numbers are valuable navigational aids in bookmarks.
-3. **Be very cautious with printed page numbers** - the printed TOC's page numbers often have a different base than our PDF page numbers due to front matter (see CRITICAL section above). Prefer the PDF page numbers from the Generated TOC or Document Features. Only use printed page numbers if you are confident there is no front matter offset (i.e., the document's first physical page is also its printed page 1).
+3. **Prefer PDF page numbers when available** - for existing entries, keep their page numbers. For new entries, use the best estimate you have (printed page numbers are fine as a fallback — page numbers will be verified downstream).
 4. **Preserve entries you're unsure about** rather than removing them - it's better to have extra entries than miss important ones
 5. **Use the document features** to verify that headings actually exist at the claimed PDF pages
 6. **Maintain the original structure** when possible - don't reorganize unless clearly wrong
