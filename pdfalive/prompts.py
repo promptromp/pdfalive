@@ -154,11 +154,12 @@ Return a refined TOC as a list of entries, where each entry includes:
 ## Important Guidelines
 
 1. **Trust the printed TOC for section names** if one exists - it's authoritative for what sections exist
-2. **Be careful with page number adjustments** - only change them if you have strong evidence from the printed TOC
-3. **Preserve entries you're unsure about** rather than removing them - it's better to have extra entries than miss important ones
-4. **Use the document features** to verify that headings actually exist at the claimed page numbers
-5. **Maintain the original structure** when possible - don't reorganize unless clearly wrong
-6. **Set high confidence (0.9+)** for entries verified against a printed TOC, lower confidence for entries you're less certain about
+2. **Preserve section numbering**: If the extracted heading includes a section number prefix (e.g., "4.1 Some Text", "Chapter 3: Title"), ALWAYS keep the numbering in the title even if the printed TOC omits it. Section numbers are valuable navigational aids in bookmarks.
+3. **Be careful with page number adjustments** - only change them if you have strong evidence from the printed TOC
+4. **Preserve entries you're unsure about** rather than removing them - it's better to have extra entries than miss important ones
+5. **Use the document features** to verify that headings actually exist at the claimed page numbers
+6. **Maintain the original structure** when possible - don't reorganize unless clearly wrong
+7. **Set high confidence (0.9+)** for entries verified against a printed TOC, lower confidence for entries you're less certain about
 
 """
 
