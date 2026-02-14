@@ -180,66 +180,72 @@ def generate_toc(
             f"using model [bold magenta]{model_identifier}[/bold magenta]..."
         )
 
-    doc = pymupdf.open(input_file)
-    original_doc = None  # Keep reference to original if we need to discard OCR
-    performed_ocr = False
+    try:
+        doc = pymupdf.open(input_file)
+        original_doc = None  # Keep reference to original if we need to discard OCR
+        performed_ocr = False
 
-    # Check if OCR is needed and perform it if enabled
-    if ocr:
-        console.print("[cyan]Checking if document needs OCR...[/cyan]")
-        ocr_processor = OCRProcessor(
-            detection_strategy=NoTextDetectionStrategy(),
-            language=ocr_language,
-            dpi=ocr_dpi,
+        # Check if OCR is needed and perform it if enabled
+        if ocr:
+            console.print("[cyan]Checking if document needs OCR...[/cyan]")
+            ocr_processor = OCRProcessor(
+                detection_strategy=NoTextDetectionStrategy(),
+                language=ocr_language,
+                dpi=ocr_dpi,
+            )
+
+            needs_ocr = ocr_processor.needs_ocr(doc)
+            if needs_ocr:
+                console.print("[yellow]Insufficient text detected in PDF. Performing OCR to extract text...[/yellow]")
+
+                # If --ocr-output is not set, keep the original document for final output
+                if not ocr_output:
+                    console.print("[dim]  OCR text used for TOC generation only (use --ocr-output to include)[/dim]")
+                    original_doc = doc
+                    doc = pymupdf.open(input_file)  # Reopen for OCR processing
+
+                # process_in_memory returns a NEW document with OCR text layer
+                ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True)
+                if ocr_output:
+                    doc.close()
+                doc = ocr_doc
+                performed_ocr = True
+                console.print("[green]OCR completed.[/green]")
+
+        llm = init_chat_model(model=model_identifier)
+        processor = TOCGenerator(doc=doc, llm=llm)
+
+        usage = processor.run(
+            output_file=actual_output_file, force=force, request_delay=request_delay, postprocess=postprocess
         )
 
-        needs_ocr = ocr_processor.needs_ocr(doc)
-        if needs_ocr:
-            console.print("[yellow]Insufficient text detected in PDF. Performing OCR to extract text...[/yellow]")
-
-            # If --ocr-output is not set, keep the original document for final output
-            if not ocr_output:
-                console.print("[dim]  OCR text used for TOC generation only (use --ocr-output to include)[/dim]")
-                original_doc = doc
-                doc = pymupdf.open(input_file)  # Reopen for OCR processing
-
-            # process_in_memory returns a NEW document with OCR text layer
-            ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True)
-            if ocr_output:
-                doc.close()
-            doc = ocr_doc
-            performed_ocr = True
-            console.print("[green]OCR completed.[/green]")
-
-    llm = init_chat_model(model=model_identifier)
-    processor = TOCGenerator(doc=doc, llm=llm)
-
-    usage = processor.run(
-        output_file=actual_output_file, force=force, request_delay=request_delay, postprocess=postprocess
-    )
-
-    # If --ocr-output is not set and we performed OCR, apply TOC to original and save that instead
-    if not ocr_output and performed_ocr and original_doc is not None:
-        console.print("[cyan]Applying TOC to original document (discarding OCR text layer)...[/cyan]")
-        toc = doc.get_toc()
-        apply_toc_to_document(original_doc, toc, actual_output_file)
-        original_doc.close()
-        doc.close()
-    else:
-        if original_doc is not None:
+        # If --ocr-output is not set and we performed OCR, apply TOC to original and save that instead
+        if not ocr_output and performed_ocr and original_doc is not None:
+            console.print("[cyan]Applying TOC to original document (discarding OCR text layer)...[/cyan]")
+            toc = doc.get_toc()
+            apply_toc_to_document(original_doc, toc, actual_output_file)
             original_doc.close()
+            doc.close()
+        else:
+            if original_doc is not None:
+                original_doc.close()
 
-    # For inplace mode, replace the original file with the temp file
-    if inplace:
-        _save_inplace(actual_output_file, input_file)
-        console.print(f"[bold green]All done.[/bold green] Modified [bold cyan]{input_file}[/bold cyan] in place.")
-    else:
-        console.print(
-            f"[bold green]All done.[/bold green] Saved modified PDF to [bold cyan]{actual_output_file}[/bold cyan]."
-        )
+        # For inplace mode, replace the original file with the temp file
+        if inplace:
+            _save_inplace(actual_output_file, input_file)
+            console.print(f"[bold green]All done.[/bold green] Modified [bold cyan]{input_file}[/bold cyan] in place.")
+        else:
+            console.print(
+                f"[bold green]All done.[/bold green] Saved modified PDF to [bold cyan]{actual_output_file}[/bold cyan]."
+            )
 
-    if show_token_usage:
-        usage.print_summary(console)
+        if show_token_usage:
+            usage.print_summary(console)
+    except Exception:
+        # Clean up temp file on failure to avoid leaking it in the input file's directory
+        if inplace and os.path.exists(actual_output_file):
+            os.unlink(actual_output_file)
+        raise
 
 
 @cli.command("extract-text")
@@ -304,45 +310,55 @@ def extract_text(
         f"  Language: [cyan]{ocr_language}[/cyan], DPI: [cyan]{ocr_dpi}[/cyan], Force OCR: [cyan]{force}[/cyan]"
     )
 
-    doc = pymupdf.open(input_file)
+    try:
+        doc = pymupdf.open(input_file)
 
-    ocr_processor = OCRProcessor(
-        detection_strategy=NoTextDetectionStrategy(),
-        language=ocr_language,
-        dpi=ocr_dpi,
-    )
+        ocr_processor = OCRProcessor(
+            detection_strategy=NoTextDetectionStrategy(),
+            language=ocr_language,
+            dpi=ocr_dpi,
+        )
 
-    needs_ocr = ocr_processor.needs_ocr(doc)
-    console.print(f"  OCR detection: document {'needs' if needs_ocr else 'does not need'} OCR")
+        needs_ocr = ocr_processor.needs_ocr(doc)
+        console.print(f"  OCR detection: document {'needs' if needs_ocr else 'does not need'} OCR")
 
-    if needs_ocr or force:
-        if needs_ocr:
-            console.print("[yellow]Insufficient text detected in PDF. Performing OCR...[/yellow]")
+        if needs_ocr or force:
+            if needs_ocr:
+                console.print("[yellow]Insufficient text detected in PDF. Performing OCR...[/yellow]")
+            else:
+                console.print("[yellow]Force OCR enabled. Performing OCR...[/yellow]")
+
+            # process_in_memory returns a NEW document with OCR text layer
+            ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True)
+            doc.close()
+            console.print("[green]OCR completed.[/green]")
+
+            # Save the document with OCR text layer
+            ocr_doc.save(actual_output_file)
+            ocr_doc.close()
+
+            # For inplace mode, replace the original file with the temp file
+            if inplace:
+                _save_inplace(actual_output_file, input_file)
+                console.print(
+                    f"[bold green]All Done.[/bold green] Modified [bold cyan]{input_file}[/bold cyan] in place."
+                )
+            else:
+                console.print(
+                    f"[bold green]All Done.[/bold green] Saved to [bold cyan]{actual_output_file}[/bold cyan]."
+                )
         else:
-            console.print("[yellow]Force OCR enabled. Performing OCR...[/yellow]")
-
-        # process_in_memory returns a NEW document with OCR text layer
-        ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True)
-        doc.close()
-        console.print("[green]OCR completed.[/green]")
-
-        # Save the document with OCR text layer
-        ocr_doc.save(actual_output_file)
-        ocr_doc.close()
-
-        # For inplace mode, replace the original file with the temp file
-        if inplace:
-            _save_inplace(actual_output_file, input_file)
-            console.print(f"[bold green]All Done.[/bold green] Modified [bold cyan]{input_file}[/bold cyan] in place.")
-        else:
-            console.print(f"[bold green]All Done.[/bold green] Saved to [bold cyan]{actual_output_file}[/bold cyan].")
-    else:
-        doc.close()
-        # Clean up temp file if it was created but not used
-        if inplace:
+            doc.close()
+            # Clean up temp file if it was created but not used
+            if inplace:
+                os.unlink(actual_output_file)
+            console.print("[green]Document already has sufficient extractable text. No OCR needed.[/green]")
+            console.print("Use --force to process anyway.")
+    except Exception:
+        # Clean up temp file on failure to avoid leaking it in the input file's directory
+        if inplace and os.path.exists(actual_output_file):
             os.unlink(actual_output_file)
-        console.print("[green]Document already has sufficient extractable text. No OCR needed.[/green]")
-        console.print("Use --force to process anyway.")
+        raise
 
 
 @cli.command("rename")
