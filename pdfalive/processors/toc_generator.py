@@ -1,6 +1,9 @@
 """Table of Contents generator."""
 
+import re
 import time
+import warnings
+from collections import Counter
 from collections.abc import Iterator
 from multiprocessing import Pool, cpu_count
 from typing import cast
@@ -24,6 +27,27 @@ from pdfalive.prompts import (
     TOC_POSTPROCESSOR_SYSTEM_PROMPT,
 )
 from pdfalive.tokens import TokenUsage, estimate_tokens
+
+
+# Suppress PydanticSerializationUnexpectedValue warnings emitted by LangChain's
+# with_structured_output() wrapper. The parsed output is correct; the warning is a
+# known LangChain + Pydantic compatibility issue (the union serializer for the
+# response type warns "Expected `none`" even though the value is valid).
+# A context-manager approach (warnings.catch_warnings) doesn't work here because
+# pydantic-core emits the warning from Rust, bypassing Python-level scoped filters.
+warnings.filterwarnings(
+    "ignore", message="Pydantic serializer warnings", category=UserWarning, module=r"pydantic\.main"
+)
+
+# Regex pattern for section numbering (e.g. "1.", "1.2", "Chapter 1", "Appendix A")
+_SECTION_NUMBER_PATTERN = re.compile(r"^\s*(\d+\.|\d+\.\d+|Chapter\s|Section\s|Part\s|Appendix\s)", re.IGNORECASE)
+
+# Minimum/maximum text length for heading candidates
+_HEADING_MIN_LENGTH = 3
+_HEADING_MAX_LENGTH = 200
+
+# Minimum font size ratio vs body text to be considered a heading candidate
+_HEADING_FONT_SIZE_RATIO = 1.15
 
 
 def apply_toc_to_document(doc: pymupdf.Document, toc: list, output_file: str) -> None:
@@ -71,7 +95,86 @@ RETRY_MIN_WAIT_SECONDS = 10  # Minimum wait time between retries
 RETRY_MAX_WAIT_SECONDS = 120  # Maximum wait time between retries
 
 
-def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list]:
+def _is_bold_font(span: dict) -> bool:
+    """Check if a span uses a bold font.
+
+    Uses both the PyMuPDF flags bitmask (bit 4 = bold) and font name heuristics.
+
+    Args:
+        span: A PyMuPDF span dict with 'flags' and 'font' keys.
+
+    Returns:
+        True if the span is bold.
+    """
+    flags = span.get("flags", 0)
+    font_name = span.get("font", "")
+    return bool(flags & 16) or "bold" in font_name.lower()
+
+
+def _compute_body_font_profile(features: list) -> tuple[str, float]:
+    """Determine the most common (font_name, font_size) pair across all features.
+
+    This represents the "body text" baseline used to identify heading candidates.
+
+    Args:
+        features: Nested list of TOCFeature objects (blocks > lines > spans).
+
+    Returns:
+        Tuple of (font_name, font_size) for the most common pair.
+        Falls back to ("", 0.0) if no features are found.
+    """
+    counter: Counter[tuple[str, float]] = Counter()
+    for block in features:
+        for line in block:
+            for span in line:
+                if isinstance(span, TOCFeature):
+                    counter[(span.font_name, span.font_size)] += 1
+
+    if not counter:
+        return ("", 0.0)
+
+    return counter.most_common(1)[0][0]
+
+
+def _is_heading_candidate(span: dict, body_font_name: str, body_font_size: float) -> bool:
+    """Determine if a span is likely a heading based on font characteristics.
+
+    A span is a heading candidate if:
+    - Font size >= 1.15x body font size (15% larger), OR
+    - Bold font AND font size >= body font size, OR
+    - Text matches section numbering pattern (e.g. "1.", "Chapter", "Section")
+    AND text length is between 3-200 chars.
+
+    Args:
+        span: A PyMuPDF span dict.
+        body_font_name: The most common font name (body text baseline).
+        body_font_size: The most common font size (body text baseline).
+
+    Returns:
+        True if the span looks like a heading.
+    """
+    text = span.get("text", "").strip()
+    text_len = len(text)
+
+    if text_len < _HEADING_MIN_LENGTH or text_len > _HEADING_MAX_LENGTH:
+        return False
+
+    font_size = span.get("size", 0.0)
+    is_bold = _is_bold_font(span)
+
+    # Size-based: significantly larger than body text
+    if body_font_size > 0 and font_size >= body_font_size * _HEADING_FONT_SIZE_RATIO:
+        return True
+
+    # Bold + at least body size
+    if is_bold and body_font_size > 0 and font_size >= body_font_size:
+        return True
+
+    # Section numbering pattern
+    return bool(_SECTION_NUMBER_PATTERN.match(text))
+
+
+def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list]:
     """Worker function to extract features from a range of pages.
 
     This function is designed to be called in a separate process.
@@ -82,7 +185,10 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list]:
                        max_blocks_per_page, max_lines_per_block, text_snippet_length)
 
     Returns:
-        Tuple of (start_page, end_page, features_list) for the processed range.
+        Tuple of (start_page, end_page, features_list, remaining_spans_buffer)
+        for the processed range. remaining_spans_buffer contains
+        (page_number, page_height, insert_index, spans) tuples for blocks beyond
+        the max_blocks_per_page limit.
     """
     (
         process_idx,
@@ -102,15 +208,22 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list]:
     end_page = start_page + pages_per_process if process_idx < total_processes - 1 else page_count
 
     features: list[list] = []
+    remaining_spans_buffer: list[tuple[int, float, int, list[dict]]] = []
 
     for page_idx in range(start_page, end_page):
         page = doc[page_idx]
         page_number = page_idx + 1  # 1-indexed
         page_dict = page.get_text("dict")
+        page_height = page_dict.get("height", page.rect.height) if hasattr(page, "rect") else 1.0
 
         for block_ix, block in enumerate(page_dict["blocks"]):
             if block_ix >= max_blocks_per_page:
-                break
+                # Buffer remaining blocks for heading candidate scanning
+                if block["type"] == 0:
+                    for line in block.get("lines", []):
+                        for span in line.get("spans", []):
+                            remaining_spans_buffer.append((page_number, page_height, len(features), [span]))
+                continue
 
             features.append([])
             if block["type"] == 0:
@@ -122,6 +235,8 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list]:
                     features[-1].append([])
 
                     for span in line["spans"]:
+                        bbox = span.get("bbox", None)
+                        y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
                         features[-1][-1].append(
                             TOCFeature(
                                 page_number=page_number,
@@ -129,11 +244,13 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list]:
                                 font_size=span["size"],
                                 text_length=len(span["text"]),
                                 text_snippet=span["text"][:text_snippet_length],
+                                y_position=y_pos,
+                                is_bold=_is_bold_font(span),
                             )
                         )
 
     doc.close()
-    return start_page, end_page, features
+    return start_page, end_page, features, remaining_spans_buffer
 
 
 class TOCGenerator:
@@ -261,7 +378,12 @@ class TOCGenerator:
         text_snippet_length: int = 25,
         show_progress: bool = True,
     ) -> list:
-        """Extract features sequentially (single process).
+        """Extract features sequentially (single process) using a two-phase approach.
+
+        Phase 1: Extract first N blocks per page (enriched with y_position and is_bold),
+        and buffer raw span data from remaining blocks.
+        Phase 2: Compute body font profile, filter buffered spans for heading candidates,
+        and insert them in page order.
 
         Args:
             doc: PyMuPDF Document object.
@@ -277,6 +399,46 @@ class TOCGenerator:
         features: list[list] = []
         page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
 
+        # Buffer for remaining-block spans: list of (page_number, page_height, insert_index, spans)
+        remaining_spans_buffer: list[tuple[int, float, int, list[dict]]] = []
+
+        def _process_page(page, page_number: int) -> None:
+            page_dict = page.get_text("dict")
+            page_height = page_dict.get("height", page.rect.height) if hasattr(page, "rect") else 1.0
+
+            for block_ix, block in enumerate(page_dict["blocks"]):
+                if block_ix >= max_blocks_per_page:
+                    # Buffer remaining blocks for heading candidate scanning
+                    if block["type"] == 0:
+                        for line in block.get("lines", []):
+                            for span in line.get("spans", []):
+                                remaining_spans_buffer.append((page_number, page_height, len(features), [span]))
+                    continue
+
+                features.append([])
+                if block["type"] == 0:
+                    # text block
+                    for line_ix, line in enumerate(block["lines"]):
+                        if line_ix >= max_lines_per_block:
+                            break
+
+                        features[-1].append([])
+
+                        for span in line["spans"]:
+                            bbox = span.get("bbox", None)
+                            y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+                            features[-1][-1].append(
+                                TOCFeature(
+                                    page_number=page_number,
+                                    font_name=span["font"],
+                                    font_size=span["size"],
+                                    text_length=len(span["text"]),
+                                    text_snippet=span["text"][:text_snippet_length],
+                                    y_position=y_pos,
+                                    is_bold=_is_bold_font(span),
+                                )
+                            )
+
         if show_progress:
             console.print(f"[cyan]Extracting features from {page_count} page(s)...[/cyan]")
             with Progress(
@@ -291,65 +453,43 @@ class TOCGenerator:
                 for ix, page in enumerate(doc):
                     if max_pages is not None and ix >= max_pages:
                         break
-
-                    page_number = ix + 1  # 1-indexed
-                    page_dict = page.get_text("dict")
-
-                    for block_ix, block in enumerate(page_dict["blocks"]):
-                        if block_ix >= max_blocks_per_page:
-                            break
-
-                        features.append([])
-                        if block["type"] == 0:
-                            # text block
-                            for line_ix, line in enumerate(block["lines"]):
-                                if line_ix >= max_lines_per_block:
-                                    break
-
-                                features[-1].append([])
-
-                                for span in line["spans"]:
-                                    features[-1][-1].append(
-                                        TOCFeature(
-                                            page_number=page_number,
-                                            font_name=span["font"],
-                                            font_size=span["size"],
-                                            text_length=len(span["text"]),
-                                            text_snippet=span["text"][:text_snippet_length],
-                                        )
-                                    )
-
+                    _process_page(page, ix + 1)
                     progress.advance(task)
         else:
             for ix, page in enumerate(doc):
                 if max_pages is not None and ix >= max_pages:
                     break
+                _process_page(page, ix + 1)
 
-                page_number = ix + 1
-                page_dict = page.get_text("dict")
+        # Phase 2: Compute body font profile and scan remaining blocks for heading candidates
+        if remaining_spans_buffer:
+            body_font_name, body_font_size = _compute_body_font_profile(features)
 
-                for block_ix, block in enumerate(page_dict["blocks"]):
-                    if block_ix >= max_blocks_per_page:
-                        break
+            # Group heading candidates by their insert_index for in-order insertion
+            # Process in reverse order so insert indices remain valid
+            candidates_by_index: dict[int, list[list]] = {}
+            for page_number, page_height, insert_idx, spans in remaining_spans_buffer:
+                for span in spans:
+                    if _is_heading_candidate(span, body_font_name, body_font_size):
+                        bbox = span.get("bbox", None)
+                        y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+                        feature = TOCFeature(
+                            page_number=page_number,
+                            font_name=span["font"],
+                            font_size=span["size"],
+                            text_length=len(span["text"]),
+                            text_snippet=span["text"][:text_snippet_length],
+                            y_position=y_pos,
+                            is_bold=_is_bold_font(span),
+                        )
+                        if insert_idx not in candidates_by_index:
+                            candidates_by_index[insert_idx] = []
+                        candidates_by_index[insert_idx].append([[feature]])
 
-                    features.append([])
-                    if block["type"] == 0:
-                        for line_ix, line in enumerate(block["lines"]):
-                            if line_ix >= max_lines_per_block:
-                                break
-
-                            features[-1].append([])
-
-                            for span in line["spans"]:
-                                features[-1][-1].append(
-                                    TOCFeature(
-                                        page_number=page_number,
-                                        font_name=span["font"],
-                                        font_size=span["size"],
-                                        text_length=len(span["text"]),
-                                        text_snippet=span["text"][:text_snippet_length],
-                                    )
-                                )
+            # Insert heading candidate blocks at the right positions (reverse order to preserve indices)
+            for idx in sorted(candidates_by_index.keys(), reverse=True):
+                for block in reversed(candidates_by_index[idx]):
+                    features.insert(idx, block)
 
         return features
 
@@ -411,13 +551,47 @@ class TOCGenerator:
         # Sort results by start page to maintain order
         results = sorted(results, key=lambda x: x[0])
 
-        # Merge features from all processes
+        # Merge features and remaining spans buffers from all processes
         if show_progress:
             console.print("[cyan]Merging extracted features...[/cyan]")
 
         all_features: list = []
-        for _, _, features in results:
+        all_remaining_spans: list[tuple[int, float, int, list[dict]]] = []
+        feature_offset = 0
+
+        for _, _, features, remaining_spans in results:
             all_features.extend(features)
+            # Adjust insert indices by the cumulative feature offset
+            for page_number, page_height, insert_idx, spans in remaining_spans:
+                all_remaining_spans.append((page_number, page_height, insert_idx + feature_offset, spans))
+            feature_offset += len(features)
+
+        # Phase 2: Compute body font profile and scan for heading candidates
+        if all_remaining_spans:
+            body_font_name, body_font_size = _compute_body_font_profile(all_features)
+
+            candidates_by_index: dict[int, list[list]] = {}
+            for page_number, page_height, insert_idx, spans in all_remaining_spans:
+                for span in spans:
+                    if _is_heading_candidate(span, body_font_name, body_font_size):
+                        bbox = span.get("bbox", None)
+                        y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+                        feature = TOCFeature(
+                            page_number=page_number,
+                            font_name=span["font"],
+                            font_size=span["size"],
+                            text_length=len(span["text"]),
+                            text_snippet=span["text"][:text_snippet_length],
+                            y_position=y_pos,
+                            is_bold=_is_bold_font(span),
+                        )
+                        if insert_idx not in candidates_by_index:
+                            candidates_by_index[insert_idx] = []
+                        candidates_by_index[insert_idx].append([[feature]])
+
+            for idx in sorted(candidates_by_index.keys(), reverse=True):
+                for block in reversed(candidates_by_index[idx]):
+                    all_features.insert(idx, block)
 
         return all_features
 
@@ -779,9 +953,14 @@ Please return a cleaned and improved TOC based on the guidelines in your instruc
                     if entry_count >= max_entries:
                         break
                     if isinstance(span, TOCFeature):
-                        summary_lines.append(
-                            f'Page {span.page_number}: {span.font_name} {span.font_size}pt - "{span.text_snippet}"'
-                        )
+                        parts = [f"Page {span.page_number}"]
+                        if span.y_position is not None:
+                            parts[0] += f" @y={span.y_position}"
+                        parts.append(f"{span.font_name} {span.font_size}pt")
+                        if span.is_bold:
+                            parts.append("[bold]")
+                        parts.append(f'- "{span.text_snippet}"')
+                        summary_lines.append(" ".join(parts))
                         entry_count += 1
 
         if not summary_lines:

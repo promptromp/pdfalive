@@ -11,11 +11,15 @@ A Python library and CLI toolkit that brings PDF files alive with the power of L
 
 ## Highlights
 
-- 📑 **Automatic TOC Generation** — Generate clickable Table of Contents (PDF bookmarks) using LLM inference. Supports arbitrarily large documents with intelligent batching.
-- 🔍 **Smart OCR Detection** — Automatically detects scanned PDFs and performs OCR via [Tesseract](https://github.com/tesseract-ocr/tesseract) when needed.
-- 📝 **Intelligent File Renaming** — Batch rename files using natural language instructions with LLM-powered inference.
-- 🤖 **Multi-Provider LLM Support** — Use any LLM provider via [LangChain](https://github.com/langchain-ai/langchain): OpenAI, Anthropic, local models via [Ollama](https://ollama.ai/), and more.
-- 🔄 **Built-in Resilience** — Automatic retry logic with exponential backoff for handling API rate limits.
+| Feature | Details |
+|---------|---------|
+| **Automatic TOC generation** | Generate clickable Table of Contents (PDF bookmarks) using LLM inference with intelligent batching for arbitrarily large documents |
+| **Smart OCR detection** | Automatically detects scanned PDFs and performs OCR via [Tesseract](https://github.com/tesseract-ocr/tesseract) when needed |
+| **Intelligent file renaming** | Batch rename files using natural language instructions with LLM-powered inference and confidence scoring |
+| **Multi-provider LLM support** | Use any LLM provider via [LangChain](https://github.com/langchain-ai/langchain): OpenAI, Anthropic, local models via [Ollama](https://ollama.ai/), and more |
+| **TOC postprocessing** | Optional second LLM pass cross-references against printed TOC pages to fix typos, remove duplicates, and correct hierarchy |
+| **TOML configuration** | Set persistent defaults for any CLI option via `pdfalive.toml` config files with per-command sections |
+| **Built-in resilience** | Automatic retry logic with exponential backoff for handling API rate limits |
 
 ## Installation
 
@@ -106,7 +110,7 @@ Postprocessing uses an additional LLM call to:
 | `--inplace` | Modify the input file in place instead of creating a new output file |
 | `--force` | Overwrite existing TOC if the PDF already has bookmarks |
 | `--ocr-language` | Set OCR language (default: `eng`). Use [Tesseract language codes](https://tesseract-ocr.github.io/tessdoc/Data-Files-in-different-versions.html) |
-| `--request-delay` | Delay between LLM calls for rate limiting (default: 2s) |
+| `--request-delay` | Delay between LLM calls for rate limiting (default: 10s) |
 
 ### extract-text
 

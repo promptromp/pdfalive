@@ -1,5 +1,7 @@
 """OCR processor for extracting text from scanned PDFs."""
 
+import atexit
+import os
 import tempfile
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
@@ -302,6 +304,13 @@ class OCRProcessor:
             # can use multiprocessing for later processing (e.g., feature extraction).
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                 tmp_path = tmp_file.name
+
+            # Register cleanup so the temp file is removed when the process exits
+            def _cleanup_temp(path: str = tmp_path) -> None:
+                if os.path.exists(path):
+                    os.unlink(path)
+
+            atexit.register(_cleanup_temp)
 
             merged_doc.save(tmp_path)
             merged_doc.close()

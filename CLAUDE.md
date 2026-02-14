@@ -4,9 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-pdfalive is a Python library and CLI tool that uses LLMs to enhance PDF files. It provides:
-- **Automatic Table of Contents (bookmarks) generation** for PDFs using LLM inference
+pdfalive is a Python (3.13) library and CLI tool that uses LLMs to enhance PDF files. It provides:
+- **Automatic Table of Contents (bookmarks) generation** for PDFs using LLM inference, with optional postprocessing refinement
 - **OCR processing** for scanned PDFs using Tesseract integration
+- **Intelligent file renaming** using LLM inference for batch renaming with confidence scoring
 
 ## Development Commands
 
@@ -19,6 +20,9 @@ uv run pdfalive generate-toc examples/example.pdf output.pdf --force
 
 # Run the CLI - OCR text extraction
 uv run pdfalive extract-text input.pdf output.pdf
+
+# Run the CLI - Intelligent file renaming
+uv run pdfalive rename -q "Rename to '[Author] - [Title].pdf'" *.pdf
 
 # Linting
 uv run ruff check .
@@ -47,7 +51,7 @@ pdfalive/
 ├── models/
 │   ├── toc.py             # TOC, TOCEntry, TOCFeature models
 │   ├── page_content.py    # PageContent model
-│   └── rename.py          # RenameOp, RenameResult models
+│   └── rename.py          # RenameOp, RenameResult, ApplyRenamesResult models
 ├── processors/
 │   ├── toc_generator.py   # TOCGenerator processor
 │   ├── ocr_processor.py   # OCRProcessor for text extraction
@@ -57,12 +61,12 @@ pdfalive/
 ```
 
 **CLI Commands:**
-- `generate-toc` - Main command for TOC generation (with optional automatic OCR)
-- `extract-text` - OCR-only command for text extraction from scanned PDFs
-- `rename` - Intelligent file renaming using LLM inference. Supports reading paths from a file via `-f`/`--input-file` option for handling many files or long filenames.
+- `generate-toc` - Main command for TOC generation (with optional automatic OCR). Supports `--inplace` for modifying the input file directly, `--postprocess` for LLM-based TOC refinement, and `--ocr-output` to include the OCR text layer in the output PDF.
+- `extract-text` - OCR-only command for text extraction from scanned PDFs. Supports `--inplace` for modifying the input file directly.
+- `rename` - Intelligent file renaming using LLM inference. Supports reading paths from a file via `-f`/`--input-file` option for handling many files or long filenames. Use `-y`/`--yes` to skip the confirmation prompt.
 
 **Processor Classes:**
-- `TOCGenerator` - Extracts font/text features from PDF pages, sends to LLM for TOC inference, writes bookmarks back to PDF. Supports multiprocessing, intelligent batching for large documents, and retry logic with exponential backoff.
+- `TOCGenerator` - Extracts font/text features from PDF pages, sends to LLM for TOC inference, writes bookmarks back to PDF. Supports multiprocessing, intelligent batching for large documents, retry logic with exponential backoff, and optional postprocessing to refine the TOC using reference text from the document's first pages.
 - `OCRProcessor` - Performs OCR on scanned PDFs using PyMuPDF's Tesseract integration. Supports multiprocessing for parallel page processing.
 - `OCRDetectionStrategy` / `NoTextDetectionStrategy` - Strategy pattern for determining if a document needs OCR.
 - `RenameProcessor` - Uses LLM to generate intelligent file rename suggestions based on user instructions. Supports batch renaming with confirmation preview.
@@ -72,19 +76,24 @@ pdfalive/
 - `TOCFeature` - Compact representation of page features sent to the LLM
 - `PageContent` - Data model for page representation
 - `RenameOp` / `RenameResult` - Pydantic models for file rename operations with confidence scores and reasoning
+- `ApplyRenamesResult` / `RenameError` - Dataclasses tracking successful and failed rename operations
 
 **Key Integration Points:**
 - PyMuPDF (`pymupdf`) for PDF reading/writing and OCR via Tesseract
 - LangChain for LLM abstraction with `init_chat_model()` and `with_structured_output()` for typed responses
+- LangSmith for observability/tracing via `@traceable` decorator on CLI commands
 - Tenacity for retry logic with exponential backoff
-- Rich for terminal progress indicators
+- Rich for terminal progress indicators and table output
 - Default model: `gpt-5.2` (configurable via `--model-identifier`)
 
 **TOC Generation Strategy:**
-The `TOCGenerator._extract_features()` method extracts font metadata (name, size) and text snippets from the first few blocks/lines of each page. This condensed representation is sent to the LLM which identifies chapter/section headings based on font patterns and returns structured `TOCEntry` objects with confidence scores. For large documents, features are batched with overlap for context continuity.
+The `TOCGenerator._extract_features()` method extracts font metadata (name, size) and text snippets from the first few blocks/lines of each page. This condensed representation is sent to the LLM which identifies chapter/section headings based on font patterns and returns structured `TOCEntry` objects with confidence scores. For large documents, features are batched with overlap for context continuity. When `--postprocess` is enabled, a second LLM pass refines the TOC by cross-referencing against any printed table of contents found in the document's first pages, removing duplicates, fixing typos, and adjusting hierarchy levels.
+
+**In-place Editing:**
+Both `generate-toc` and `extract-text` support `--inplace` mode which modifies the input file directly. This uses a temporary file strategy (write to temp, then replace original) to work around PyMuPDF's limitation of not being able to save to the same file it has open. Original file permissions are preserved.
 
 **OCR Integration:**
-When `--ocr` is enabled (default), `generate-toc` automatically detects if a PDF needs OCR by checking for extractable text, performs OCR if needed, then proceeds with TOC generation on the text layer.
+When `--ocr` is enabled (default), `generate-toc` automatically detects if a PDF needs OCR by checking for extractable text (using configurable `min_text_coverage` threshold, default 25%), performs OCR if needed, then proceeds with TOC generation on the text layer. By default the OCR text layer is discarded from the final output (used only for TOC inference); use `--ocr-output` to include it.
 
 **Configuration System:**
 The CLI supports TOML configuration files (`pdfalive.toml` or `.pdfalive.toml`) for setting default option values. The config module (`pdfalive/config/`) handles:
@@ -92,6 +101,11 @@ The CLI supports TOML configuration files (`pdfalive.toml` or `.pdfalive.toml`) 
 - `loader.py` - File discovery (cwd > home > ~/.config/pdfalive/), TOML parsing, and conversion to Click's `default_map` format
 
 The config is loaded via an eager callback on the `--config` option in `cli.py`. Global settings apply to all LLM-using commands, and command-specific settings override globals. CLI arguments always take precedence over config file values.
+
+## Special Instructions
+
+- After making major changes to functionality, CLI options, or project architecture, always review and update all documentation to stay in sync: `README.md`, `docs/usage.md`, and `CLAUDE.md`. Docs should accurately reflect current defaults, option names, and feature descriptions.
+- When adding or removing CLI configuration options, also update the example `pdfalive.toml` snippets in `README.md` and `docs/usage.md`, as well as the config models in `pdfalive/config/models.py`.
 
 ## Development Guidelines
 

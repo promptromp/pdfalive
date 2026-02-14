@@ -13,24 +13,28 @@ The data structure corresponds to the hierarchy of pages, blocks, lines, and spa
 
 Each feature (corresponding to a single span of text) is represented as a tuple of the form:
 
-     (page_number, font name, font size, text length, text_snippet).
+     (page_number, font_name, font_size, text_length, text_snippet[, y=<pos>, bold=<bool>])
+
+The optional trailing fields are:
+- `y=<pos>`: Normalized vertical position on the page (0.0 = top of page, 1.0 = bottom of page). When present, use this to distinguish running headers (y near 0.0, typically < 0.05) from actual section headings that appear further down the page.
+- `bold=<bool>`: Whether the text span uses a bold font.
 
 Example of how the features are structured:
 [
     [  # Page 1
         [  # Block 1
             [  # Line 1
-                (1, "Times-Bold", 16, 45, "Chapter 1: Introduction"),
-                (1, "Times-Roman", 12, 120, "This is the first paragraph of the introduction...")
+                (1, "Times-Bold", 16, 45, "Chapter 1: Introduction", y=0.12, bold=True),
+                (1, "Times-Roman", 12, 120, "This is the first paragraph of the introduction...", y=0.15, bold=False)
             ],
             [  # Line 2
-                ("Times-Roman", 12, 98, "This is the second paragraph of the introduction...")
+                ("Times-Roman", 12, 98, "This is the second paragraph of the introduction...", y=0.20, bold=False)
             ]
         ],
         [  # Block 2
             [  # Line 1
-                ("Times-Bold", 14, 30, "Section 1.1: Background"),
-                ("Times-Roman", 12, 110, "Background information goes here...")
+                ("Times-Bold", 14, 30, "Section 1.1: Background", y=0.45, bold=True),
+                ("Times-Roman", 12, 110, "Background information goes here...", y=0.48, bold=False)
             ]
         ]
     ],
@@ -55,13 +59,14 @@ Example output:
     {"title": "Chapter 2: Some Other Title", "level": 1, "page_number": 9, "confidence": 0.99},
 ]
 
-## Imporant instructions
+## Important instructions
 
 - Documents (such as books) often include a table of contents in the first few pages. While this technically counts as a TOC, DO NOT parse individual line items from a TOC directly in your output.
   We're only interested in finding the *pages corresponding to the actual chapters / sections themselves*, not their entries in the document's printed Table of Contents!
   A sanity check for this would be that you shouldn't normally mark multiple table of contents items at level 1 coming from the same page!
 - *Do* include an entry for the Table of Contents itself if it exists in the document, as well as for preamble such as Preface, Introduction, Acknowledgements, etc.
 - *Do* use any existing table of contents in the document to help guide your decisions about what constitutes a chapter / section heading.
+- **Running headers vs actual headings**: When y-position is provided, use it to distinguish running headers (y near 0.0, typically < 0.05) from actual section headings. Running headers are repeated at the top of each page and should NOT be used as TOC entries. If the same heading text appears at the top of one page (low y) and mid-page on a previous page (higher y), prefer the mid-page occurrence as the actual section start.
 
 """
 
@@ -80,7 +85,11 @@ You are processing a batch of features from a large PDF document. Earlier batche
 
 Each feature (corresponding to a single span of text) is represented as a tuple of the form:
 
-     (page_number, font name, font size, text length, text_snippet).
+     (page_number, font_name, font_size, text_length, text_snippet[, y=<pos>, bold=<bool>])
+
+The optional trailing fields are:
+- `y=<pos>`: Normalized vertical position on the page (0.0 = top of page, 1.0 = bottom of page). When present, use this to distinguish running headers (y near 0.0, typically < 0.05) from actual section headings.
+- `bold=<bool>`: Whether the text span uses a bold font.
 
 The features are structured hierarchically by pages, blocks, lines, and spans.
 
@@ -102,6 +111,7 @@ Return the TOC as a list of entries, where each entry is represented as a dictio
 - If this batch includes features that look like they might be continuations of entries from previous batches (e.g., second part of a chapter title), include them if they appear to be headings on their own.
 - Documents (such as books) often include a table of contents in the first few pages. DO NOT parse individual line items from a printed TOC in the document itself - we only want actual chapter/section pages.
 - Maintain consistent level assignments: use level 1 for main chapters, level 2 for sections, etc.
+- **Running headers vs actual headings**: When y-position is provided, use it to distinguish running headers (y near 0.0, typically < 0.05) from actual section headings. If the same heading appears at the top of one page and mid-page on a previous page, prefer the mid-page occurrence as the actual section start.
 
 """
 
@@ -131,7 +141,7 @@ Your job is to produce a cleaned, verified, and improved TOC by:
 You will receive:
 - **Generated TOC**: The automatically extracted TOC entries with titles, page numbers, levels, and confidence scores
 - **Reference Text**: Text extracted from the first few pages that may contain a printed table of contents
-- **Document Features**: The font/text features used for extraction (for context)
+- **Document Features**: The font/text features used for extraction (for context). Features may include y-position (vertical position on page) and bold indicators which can help verify that headings are assigned to the correct pages (e.g. a heading at y=0.02 is likely a running header, not the actual section start)
 
 ## Output Format
 
@@ -144,11 +154,12 @@ Return a refined TOC as a list of entries, where each entry includes:
 ## Important Guidelines
 
 1. **Trust the printed TOC for section names** if one exists - it's authoritative for what sections exist
-2. **Be careful with page number adjustments** - only change them if you have strong evidence from the printed TOC
-3. **Preserve entries you're unsure about** rather than removing them - it's better to have extra entries than miss important ones
-4. **Use the document features** to verify that headings actually exist at the claimed page numbers
-5. **Maintain the original structure** when possible - don't reorganize unless clearly wrong
-6. **Set high confidence (0.9+)** for entries verified against a printed TOC, lower confidence for entries you're less certain about
+2. **Preserve section numbering**: If the extracted heading includes a section number prefix (e.g., "4.1 Some Text", "Chapter 3: Title"), ALWAYS keep the numbering in the title even if the printed TOC omits it. Section numbers are valuable navigational aids in bookmarks.
+3. **Be careful with page number adjustments** - only change them if you have strong evidence from the printed TOC
+4. **Preserve entries you're unsure about** rather than removing them - it's better to have extra entries than miss important ones
+5. **Use the document features** to verify that headings actually exist at the claimed page numbers
+6. **Maintain the original structure** when possible - don't reorganize unless clearly wrong
+7. **Set high confidence (0.9+)** for entries verified against a printed TOC, lower confidence for entries you're less certain about
 
 """
 

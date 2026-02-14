@@ -6,7 +6,13 @@ import pymupdf
 import pytest
 
 from pdfalive.models.toc import TOC, TOCEntry, TOCFeature
-from pdfalive.processors.toc_generator import TOCGenerator, _extract_features_from_page_range
+from pdfalive.processors.toc_generator import (
+    TOCGenerator,
+    _compute_body_font_profile,
+    _extract_features_from_page_range,
+    _is_bold_font,
+    _is_heading_candidate,
+)
 from pdfalive.tokens import TokenUsage
 
 
@@ -19,36 +25,54 @@ def mock_doc():
     # Set name to None to force sequential processing (mocks can't be pickled for multiprocessing)
     doc.name = None
 
+    page_height = 800.0
+
     # Mock page iteration
     page1 = MagicMock()
+    page1.rect.height = page_height
     page1.get_text.return_value = {
+        "height": page_height,
         "blocks": [
             {
                 "type": 0,
                 "lines": [
                     {
                         "spans": [
-                            {"font": "Times-Bold", "size": 16, "text": "Chapter 1: Introduction"},
+                            {
+                                "font": "Times-Bold",
+                                "size": 16,
+                                "text": "Chapter 1: Introduction",
+                                "bbox": (50, 100, 400, 120),
+                                "flags": 16,
+                            },
                         ]
                     }
                 ],
             }
-        ]
+        ],
     }
     page2 = MagicMock()
+    page2.rect.height = page_height
     page2.get_text.return_value = {
+        "height": page_height,
         "blocks": [
             {
                 "type": 0,
                 "lines": [
                     {
                         "spans": [
-                            {"font": "Times-Bold", "size": 16, "text": "Chapter 2: Methods"},
+                            {
+                                "font": "Times-Bold",
+                                "size": 16,
+                                "text": "Chapter 2: Methods",
+                                "bbox": (50, 100, 400, 120),
+                                "flags": 16,
+                            },
                         ]
                     }
                 ],
             }
-        ]
+        ],
     }
     doc.__iter__ = lambda self: iter([page1, page2])
 
@@ -401,6 +425,7 @@ class TestFeatureExtractionMultiprocessing:
         """Test worker function with a single process handling all pages."""
         # Create mock document data
         mock_page_data = {
+            "height": 800,
             "blocks": [
                 {
                     "type": 0,
@@ -409,7 +434,7 @@ class TestFeatureExtractionMultiprocessing:
                         {"spans": [{"font": "Times-Roman", "size": 12, "text": "Body text"}]},
                     ],
                 }
-            ]
+            ],
         }
 
         with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
@@ -428,7 +453,7 @@ class TestFeatureExtractionMultiprocessing:
 
             # Single process handling all 3 pages
             args = (0, 1, "/fake/path.pdf", 3, 5, 25)
-            start, end, features = _extract_features_from_page_range(args)
+            start, end, features, _ = _extract_features_from_page_range(args)
 
             assert start == 0
             assert end == 3
@@ -444,7 +469,8 @@ class TestFeatureExtractionMultiprocessing:
     def test_extract_features_from_page_range_calculates_correct_ranges(self):
         """Test that page ranges are calculated correctly for multiple processes."""
         mock_page_data = {
-            "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Arial", "size": 12, "text": "Test"}]}]}]
+            "height": 800,
+            "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Arial", "size": 12, "text": "Test"}]}]}],
         }
 
         with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
@@ -458,22 +484,22 @@ class TestFeatureExtractionMultiprocessing:
 
             # Test with 4 processes on 12 pages
             # Process 0: pages 0-2 (3 pages)
-            start0, end0, _ = _extract_features_from_page_range((0, 4, "/fake/path.pdf", 3, 5, 25))
+            start0, end0, _, _ = _extract_features_from_page_range((0, 4, "/fake/path.pdf", 3, 5, 25))
             assert start0 == 0
             assert end0 == 3
 
             # Process 1: pages 3-5 (3 pages)
-            start1, end1, _ = _extract_features_from_page_range((1, 4, "/fake/path.pdf", 3, 5, 25))
+            start1, end1, _, _ = _extract_features_from_page_range((1, 4, "/fake/path.pdf", 3, 5, 25))
             assert start1 == 3
             assert end1 == 6
 
             # Process 2: pages 6-8 (3 pages)
-            start2, end2, _ = _extract_features_from_page_range((2, 4, "/fake/path.pdf", 3, 5, 25))
+            start2, end2, _, _ = _extract_features_from_page_range((2, 4, "/fake/path.pdf", 3, 5, 25))
             assert start2 == 6
             assert end2 == 9
 
             # Process 3 (last): pages 9-11 (gets remainder)
-            start3, end3, _ = _extract_features_from_page_range((3, 4, "/fake/path.pdf", 3, 5, 25))
+            start3, end3, _, _ = _extract_features_from_page_range((3, 4, "/fake/path.pdf", 3, 5, 25))
             assert start3 == 9
             assert end3 == 12
 
@@ -489,7 +515,10 @@ class TestFeatureExtractionMultiprocessing:
     )
     def test_page_range_distribution(self, num_pages, num_processes, expected_ranges):
         """Test that pages are distributed correctly across processes."""
-        mock_page_data = {"blocks": [{"type": 0, "lines": [{"spans": [{"font": "Arial", "size": 12, "text": "X"}]}]}]}
+        mock_page_data = {
+            "height": 800,
+            "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Arial", "size": 12, "text": "X"}]}]}],
+        }
 
         with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
             mock_doc = MagicMock()
@@ -502,7 +531,8 @@ class TestFeatureExtractionMultiprocessing:
 
             actual_ranges = []
             for proc_idx in range(num_processes):
-                start, end, _ = _extract_features_from_page_range((proc_idx, num_processes, "/fake/path.pdf", 3, 5, 25))
+                args = (proc_idx, num_processes, "/fake/path.pdf", 3, 5, 25)
+                start, end, _, _ = _extract_features_from_page_range(args)
                 actual_ranges.append((start, end))
 
             assert actual_ranges == expected_ranges
@@ -516,12 +546,13 @@ class TestFeatureExtractionMultiprocessing:
             # Create pages with distinct content per page
             def create_page_data(page_idx):
                 return {
+                    "height": 800,
                     "blocks": [
                         {
                             "type": 0,
                             "lines": [{"spans": [{"font": "Bold", "size": 16, "text": f"Page {page_idx + 1} Title"}]}],
                         }
-                    ]
+                    ],
                 }
 
             mock_pages = [MagicMock() for _ in range(9)]
@@ -534,7 +565,7 @@ class TestFeatureExtractionMultiprocessing:
             # Simulate 3 processes
             results = []
             for proc_idx in range(3):
-                start, end, features = _extract_features_from_page_range((proc_idx, 3, "/fake/path.pdf", 3, 5, 25))
+                start, end, features, _ = _extract_features_from_page_range((proc_idx, 3, "/fake/path.pdf", 3, 5, 25))
                 results.append((start, end, features))
 
             # Sort by start page (simulating what _extract_features_parallel does)
@@ -561,6 +592,7 @@ class TestFeatureExtractionMultiprocessing:
 
             def create_multi_block_page(page_idx):
                 return {
+                    "height": 800,
                     "blocks": [
                         {
                             "type": 0,
@@ -570,7 +602,7 @@ class TestFeatureExtractionMultiprocessing:
                             "type": 0,
                             "lines": [{"spans": [{"font": "Regular", "size": 12, "text": f"P{page_idx + 1} Block2"}]}],
                         },
-                    ]
+                    ],
                 }
 
             mock_pages = [MagicMock() for _ in range(4)]
@@ -583,7 +615,7 @@ class TestFeatureExtractionMultiprocessing:
             # Simulate 2 processes
             results = []
             for proc_idx in range(2):
-                start, end, features = _extract_features_from_page_range((proc_idx, 2, "/fake/path.pdf", 3, 5, 25))
+                start, end, features, _ = _extract_features_from_page_range((proc_idx, 2, "/fake/path.pdf", 3, 5, 25))
                 results.append((start, end, features))
 
             results = sorted(results, key=lambda x: x[0])
@@ -620,10 +652,11 @@ class TestFeatureExtractionMultiprocessing:
 
             # Page with 5 blocks
             page_data = {
+                "height": 800,
                 "blocks": [
                     {"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 12, "text": f"Block {i}"}]}]}
                     for i in range(5)
-                ]
+                ],
             }
 
             mock_page = MagicMock()
@@ -632,11 +665,13 @@ class TestFeatureExtractionMultiprocessing:
             mock_pymupdf.open.return_value = mock_doc
 
             # Limit to 2 blocks per page
-            _, _, features = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 2, 5, 25))
+            _, _, features, remaining = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 2, 5, 25))
 
             assert len(features) == 2
             assert "Block 0" in features[0][0][0].text_snippet
             assert "Block 1" in features[1][0][0].text_snippet
+            # Remaining blocks should be buffered
+            assert len(remaining) > 0
 
     def test_extract_features_respects_max_lines_per_block(self):
         """Test that max_lines_per_block limit is respected."""
@@ -646,12 +681,13 @@ class TestFeatureExtractionMultiprocessing:
 
             # Block with 5 lines
             page_data = {
+                "height": 800,
                 "blocks": [
                     {
                         "type": 0,
                         "lines": [{"spans": [{"font": "Bold", "size": 12, "text": f"Line {i}"}]} for i in range(5)],
                     }
-                ]
+                ],
             }
 
             mock_page = MagicMock()
@@ -660,7 +696,7 @@ class TestFeatureExtractionMultiprocessing:
             mock_pymupdf.open.return_value = mock_doc
 
             # Limit to 3 lines per block
-            _, _, features = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 3, 25))
+            _, _, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 3, 25))
 
             assert len(features) == 1  # 1 block
             assert len(features[0]) == 3  # 3 lines
@@ -675,7 +711,8 @@ class TestFeatureExtractionMultiprocessing:
 
             long_text = "This is a very long text that should be truncated"
             page_data = {
-                "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 12, "text": long_text}]}]}]
+                "height": 800,
+                "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 12, "text": long_text}]}]}],
             }
 
             mock_page = MagicMock()
@@ -684,7 +721,7 @@ class TestFeatureExtractionMultiprocessing:
             mock_pymupdf.open.return_value = mock_doc
 
             # Limit snippet to 10 characters
-            _, _, features = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 5, 10))
+            _, _, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 5, 10))
 
             assert len(features[0][0][0].text_snippet) == 10
             assert features[0][0][0].text_snippet == "This is a "
@@ -698,11 +735,12 @@ class TestFeatureExtractionMultiprocessing:
             mock_doc.page_count = 1
 
             page_data = {
+                "height": 800,
                 "blocks": [
                     {"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 12, "text": "Text block"}]}]},
                     {"type": 1, "image": "some_image_data"},  # Image block
                     {"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 12, "text": "Another text"}]}]},
-                ]
+                ],
             }
 
             mock_page = MagicMock()
@@ -710,7 +748,7 @@ class TestFeatureExtractionMultiprocessing:
             mock_doc.__getitem__ = lambda self, idx: mock_page
             mock_pymupdf.open.return_value = mock_doc
 
-            _, _, features = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 10, 5, 25))
+            _, _, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 10, 5, 25))
 
             # Should have 3 blocks in features list, but image block will have empty lines
             assert len(features) == 3
@@ -731,6 +769,7 @@ class TestFeatureExtractionMultiprocessing:
             def create_page(page_idx):
                 mock_page = MagicMock()
                 mock_page.get_text.return_value = {
+                    "height": 800,
                     "blocks": [
                         {
                             "type": 0,
@@ -739,7 +778,7 @@ class TestFeatureExtractionMultiprocessing:
                                 {"spans": [{"font": "Regular", "size": 12, "text": f"Page {page_idx + 1}"}]},
                             ],
                         }
-                    ]
+                    ],
                 }
                 return mock_page
 
@@ -750,7 +789,7 @@ class TestFeatureExtractionMultiprocessing:
             # Collect results from all "processes"
             results = []
             for proc_idx in range(num_processes):
-                start, end, features = _extract_features_from_page_range(
+                start, end, features, _ = _extract_features_from_page_range(
                     (proc_idx, num_processes, "/fake/path.pdf", 3, 5, 25)
                 )
                 results.append((start, end, features))
@@ -846,9 +885,7 @@ class TestTOCPostprocessing:
                     "Table of Contents\n1. Introduction............1\n"
                     "2. Methods................15\n3. Results.................30"
                 )
-                page.get_text.side_effect = lambda arg, _i=i, _text=toc_text: (
-                    _text if arg == "text" else {"blocks": []}
-                )
+                page.get_text.side_effect = lambda arg, _i=i, _text=toc_text: _text if arg == "text" else {"blocks": []}
             else:
                 page.get_text.side_effect = lambda arg, _i=i: (
                     f"Page {_i + 1} content" if arg == "text" else {"blocks": []}
@@ -1074,3 +1111,304 @@ class TestTOCPostprocessing:
 
         # Should still return valid result
         assert isinstance(result, TOC)
+
+
+class TestIsBoldFont:
+    """Tests for _is_bold_font helper."""
+
+    @pytest.mark.parametrize(
+        "span,expected",
+        [
+            ({"font": "Times-Bold", "flags": 0}, True),  # bold in font name
+            ({"font": "Times-Roman", "flags": 16}, True),  # bold via flags bit 4
+            ({"font": "ArialBold", "flags": 16}, True),  # both
+            ({"font": "Times-Roman", "flags": 0}, False),  # neither
+            ({"font": "Helvetica", "flags": 4}, False),  # italic only
+            ({}, False),  # missing keys
+        ],
+    )
+    def test_is_bold_font(self, span, expected):
+        """Test bold font detection from flags and font name."""
+        assert _is_bold_font(span) == expected
+
+
+class TestComputeBodyFontProfile:
+    """Tests for _compute_body_font_profile helper."""
+
+    def test_returns_most_common_font(self):
+        """Test that the most frequently occurring font pair is returned."""
+        body = TOCFeature(
+            page_number=1,
+            font_name="Times-Roman",
+            font_size=12,
+            text_length=100,
+            text_snippet="body",
+        )
+        body2 = TOCFeature(
+            page_number=1,
+            font_name="Times-Roman",
+            font_size=12,
+            text_length=80,
+            text_snippet="more",
+        )
+        heading = TOCFeature(
+            page_number=2,
+            font_name="Times-Bold",
+            font_size=16,
+            text_length=20,
+            text_snippet="head",
+        )
+        body3 = TOCFeature(
+            page_number=2,
+            font_name="Times-Roman",
+            font_size=12,
+            text_length=90,
+            text_snippet="text",
+        )
+        features = [
+            [[body, body2]],
+            [[heading, body3]],
+        ]
+        font_name, font_size = _compute_body_font_profile(features)
+        assert font_name == "Times-Roman"
+        assert font_size == 12
+
+    def test_empty_features(self):
+        """Test fallback for empty features."""
+        font_name, font_size = _compute_body_font_profile([])
+        assert font_name == ""
+        assert font_size == 0.0
+
+
+class TestIsHeadingCandidate:
+    """Tests for _is_heading_candidate helper."""
+
+    @pytest.fixture
+    def body_font_name(self):
+        return "Times-Roman"
+
+    @pytest.fixture
+    def body_font_size(self):
+        return 12.0
+
+    @pytest.mark.parametrize(
+        "span,expected,description",
+        [
+            # Font size significantly larger than body
+            (
+                {"font": "Times-Bold", "size": 16, "text": "Chapter 1: Introduction", "flags": 16},
+                True,
+                "large bold heading",
+            ),
+            # Bold + same size as body
+            (
+                {"font": "Times-Bold", "size": 12, "text": "Section heading text", "flags": 16},
+                True,
+                "bold same-size heading",
+            ),
+            # Section numbering pattern
+            (
+                {"font": "Times-Roman", "size": 10, "text": "1.2 Subsection Title", "flags": 0},
+                True,
+                "section numbering",
+            ),
+            (
+                {"font": "Times-Roman", "size": 10, "text": "Chapter 3 Overview", "flags": 0},
+                True,
+                "chapter numbering",
+            ),
+            (
+                {"font": "Times-Roman", "size": 10, "text": "Appendix A Details", "flags": 0},
+                True,
+                "appendix numbering",
+            ),
+            # Body text - not a heading
+            (
+                {"font": "Times-Roman", "size": 12, "text": "This is regular body text content.", "flags": 0},
+                False,
+                "body text",
+            ),
+            # Too short
+            ({"font": "Times-Bold", "size": 16, "text": "Ab", "flags": 16}, False, "too short"),
+            # Too long (>200 chars)
+            ({"font": "Times-Bold", "size": 16, "text": "x" * 201, "flags": 16}, False, "too long"),
+            # Empty text
+            ({"font": "Times-Bold", "size": 16, "text": "", "flags": 16}, False, "empty text"),
+            # Small non-bold non-patterned text
+            (
+                {"font": "Times-Roman", "size": 10, "text": "Some random text", "flags": 0},
+                False,
+                "small regular text",
+            ),
+        ],
+    )
+    def test_heading_candidate_detection(self, span, expected, description, body_font_name, body_font_size):
+        """Test heading candidate detection with various scenarios."""
+        result = _is_heading_candidate(span, body_font_name, body_font_size)
+        assert result == expected, f"Failed for: {description}"
+
+
+class TestTOCFeatureStrFormat:
+    """Tests for TOCFeature.__str__ format with new fields."""
+
+    def test_str_without_new_fields(self):
+        """Test backward compatibility: old format when new fields are None."""
+        feature = TOCFeature(
+            page_number=1, font_name="Times-Bold", font_size=16, text_length=45, text_snippet="Chapter 1"
+        )
+        result = str(feature)
+        assert result == "(1, 'Times-Bold', 16.0, 45, 'Chapter 1')"
+
+    def test_str_with_y_position_only(self):
+        """Test format with y_position set."""
+        feature = TOCFeature(
+            page_number=1,
+            font_name="Times-Bold",
+            font_size=16,
+            text_length=45,
+            text_snippet="Chapter 1",
+            y_position=0.12,
+        )
+        result = str(feature)
+        assert result == "(1, 'Times-Bold', 16.0, 45, 'Chapter 1', y=0.12)"
+
+    def test_str_with_both_fields(self):
+        """Test format with both y_position and is_bold set."""
+        feature = TOCFeature(
+            page_number=1,
+            font_name="Times-Bold",
+            font_size=16,
+            text_length=45,
+            text_snippet="Chapter 1",
+            y_position=0.45,
+            is_bold=True,
+        )
+        result = str(feature)
+        assert result == "(1, 'Times-Bold', 16.0, 45, 'Chapter 1', y=0.45, bold=True)"
+
+    def test_str_with_is_bold_only(self):
+        """Test format with only is_bold set."""
+        feature = TOCFeature(
+            page_number=1,
+            font_name="Times-Bold",
+            font_size=16,
+            text_length=45,
+            text_snippet="Chapter 1",
+            is_bold=False,
+        )
+        result = str(feature)
+        assert result == "(1, 'Times-Bold', 16.0, 45, 'Chapter 1', bold=False)"
+
+
+class TestHeadingCandidateIntegration:
+    """Integration test: heading candidate scanning picks up mid-page headings."""
+
+    def test_mid_page_heading_found_in_features(self):
+        """Test that a heading in block 4+ is detected and included in features."""
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.name = None
+
+        page_height = 800.0
+        page = MagicMock()
+        page.rect.height = page_height
+
+        body_span_1 = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "Body paragraph one",
+            "bbox": (50, 50, 400, 65),
+            "flags": 0,
+        }
+        body_span_2 = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "Body paragraph two",
+            "bbox": (50, 100, 400, 115),
+            "flags": 0,
+        }
+        body_span_3 = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "Body paragraph three",
+            "bbox": (50, 200, 400, 215),
+            "flags": 0,
+        }
+        heading_span = {
+            "font": "Times-Bold",
+            "size": 16,
+            "text": "5.2 Convexity of Functions",
+            "bbox": (50, 400, 400, 420),
+            "flags": 16,
+        }
+        body_span_4 = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "More body text here",
+            "bbox": (50, 450, 400, 465),
+            "flags": 0,
+        }
+
+        page.get_text.return_value = {
+            "height": page_height,
+            "blocks": [
+                {"type": 0, "lines": [{"spans": [body_span_1]}]},
+                {"type": 0, "lines": [{"spans": [body_span_2]}]},
+                {"type": 0, "lines": [{"spans": [body_span_3]}]},
+                {"type": 0, "lines": [{"spans": [heading_span]}]},
+                {"type": 0, "lines": [{"spans": [body_span_4]}]},
+            ],
+        }
+        doc.__iter__ = lambda self: iter([page])
+
+        mock_llm = MagicMock()
+        generator = TOCGenerator(doc=doc, llm=mock_llm)
+
+        features = generator._extract_features_sequential(doc, max_blocks_per_page=3, show_progress=False)
+
+        # Collect all text snippets from features
+        all_snippets = []
+        for block in features:
+            for line in block:
+                for span in line:
+                    if isinstance(span, TOCFeature):
+                        all_snippets.append(span.text_snippet)
+
+        # The mid-page heading should have been detected as a heading candidate
+        assert any("5.2 Convexity" in s for s in all_snippets), (
+            f"Mid-page heading not found in features. Got: {all_snippets}"
+        )
+
+    def test_y_position_is_set_on_features(self):
+        """Test that y_position is populated when bbox data is available."""
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.name = None
+
+        page_height = 800.0
+        page = MagicMock()
+        page.rect.height = page_height
+
+        heading_span = {
+            "font": "Times-Bold",
+            "size": 16,
+            "text": "Chapter 1: Introduction",
+            "bbox": (50, 100, 400, 120),
+            "flags": 16,
+        }
+        page.get_text.return_value = {
+            "height": page_height,
+            "blocks": [
+                {"type": 0, "lines": [{"spans": [heading_span]}]},
+            ],
+        }
+        doc.__iter__ = lambda self: iter([page])
+
+        mock_llm = MagicMock()
+        generator = TOCGenerator(doc=doc, llm=mock_llm)
+
+        features = generator._extract_features_sequential(doc, show_progress=False)
+
+        first_span = features[0][0][0]
+        assert first_span.y_position == round(100 / 800, 2)
+        assert first_span.is_bold is True
