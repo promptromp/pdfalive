@@ -900,14 +900,22 @@ class TOCGenerator:
         # Only include a summary to keep token count reasonable
         features_summary = self._summarize_features_for_postprocessing(features)
 
+        # Detect front matter offset to warn the LLM
+        offset_note = self._detect_page_offset_note(toc, reference_text)
+
         user_content = f"""
 Please review and refine the following automatically generated Table of Contents.
 
 ## Generated TOC (to be refined)
 
+The page numbers below are **PDF page numbers** (physical position in the PDF file).
+Do NOT change them to match any printed page numbers in the reference text.
+
 {toc_entries_str if toc_entries_str else "(No entries were generated)"}
 
 ## Reference Text from First Pages (may contain printed TOC)
+
+{offset_note}
 
 {reference_text if reference_text else "(No text extracted from first pages)"}
 
@@ -916,6 +924,7 @@ Please review and refine the following automatically generated Table of Contents
 {features_summary}
 
 Please return a cleaned and improved TOC based on the guidelines in your instructions.
+Remember: output page numbers must be PDF page numbers, NOT printed page numbers.
 """
 
         messages = [
@@ -930,6 +939,9 @@ Please return a cleaned and improved TOC based on the guidelines in your instruc
         # Make LLM call with retry logic
         console.print("[bold]Postprocessing TOC...[/bold]")
         refined_toc = self._invoke_with_retry(model, messages, "TOC postprocessing", input_tokens)
+
+        # Validate and correct page numbers if the LLM shifted to printed page numbers
+        refined_toc = self._correct_postprocessed_page_numbers(toc, refined_toc)
 
         # Estimate output tokens
         output_tokens = estimate_tokens(str(refined_toc.entries))
@@ -948,6 +960,106 @@ Please return a cleaned and improved TOC based on the guidelines in your instruc
         )
 
         return refined_toc, usage
+
+    def _detect_page_offset_note(self, toc: TOC, reference_text: str) -> str:
+        """Detect the offset between PDF page numbers and printed page numbers.
+
+        Looks at the first chapter-level entry in the generated TOC to estimate
+        the front matter offset, then generates an explicit warning for the LLM.
+
+        Args:
+            toc: The generated TOC with correct PDF page numbers.
+            reference_text: The extracted reference text from first pages.
+
+        Returns:
+            A warning string to include in the postprocessor prompt, or empty string
+            if no offset is detected.
+        """
+        if not toc.entries:
+            return ""
+
+        # Find the first chapter-level (level 1) entry that's past the front matter
+        # (i.e., not a "Table of Contents" or "Preface" entry in the first few pages)
+        first_chapter_page = None
+        for entry in toc.entries:
+            if entry.level == 1 and entry.page_number > 5:
+                first_chapter_page = entry.page_number
+                break
+
+        if first_chapter_page is None:
+            return ""
+
+        # The offset is the number of front matter pages before content "page 1"
+        estimated_offset = first_chapter_page - 1
+
+        if estimated_offset < 3:
+            return ""
+
+        return (
+            f"**WARNING**: This document has approximately {estimated_offset} pages of front matter. "
+            f"The printed page numbers below (if any) start counting AFTER the front matter, "
+            f'so printed page "1" corresponds to approximately PDF page {first_chapter_page}. '
+            f"DO NOT use printed page numbers in your output — use PDF page numbers from the Generated TOC above."
+        )
+
+    def _correct_postprocessed_page_numbers(self, original_toc: TOC, refined_toc: TOC) -> TOC:
+        """Correct page numbers if the postprocessor shifted them to printed page numbers.
+
+        Compares the refined TOC against the original to detect a systematic page
+        number offset. If the postprocessor replaced PDF page numbers with printed
+        page numbers (which differ by a front matter offset), this method detects
+        and reverses the shift.
+
+        Args:
+            original_toc: The pre-postprocessing TOC with correct PDF page numbers.
+            refined_toc: The postprocessed TOC that may have shifted page numbers.
+
+        Returns:
+            The corrected TOC with PDF page numbers restored.
+        """
+        if not original_toc.entries or not refined_toc.entries:
+            return refined_toc
+
+        # Build a map of normalized title -> page_number from the original TOC
+        def normalize(title: str) -> str:
+            return re.sub(r"\s+", " ", title.strip().lower())
+
+        original_map: dict[str, int] = {}
+        for entry in original_toc.entries:
+            original_map[normalize(entry.title)] = entry.page_number
+
+        # Match refined entries to original entries and compute page offsets
+        offsets: list[int] = []
+        for entry in refined_toc.entries:
+            key = normalize(entry.title)
+            if key in original_map:
+                offsets.append(original_map[key] - entry.page_number)
+
+        if not offsets:
+            return refined_toc
+
+        # Check if there's a consistent non-zero offset
+        offset_counter = Counter(offsets)
+        most_common_offset, count = offset_counter.most_common(1)[0]
+
+        # If majority of matched entries are shifted by the same amount, correct all entries
+        if most_common_offset != 0 and count >= len(offsets) * 0.5:
+            console.print(
+                f"  [yellow]Detected page number offset of {most_common_offset} in postprocessed TOC "
+                f"({count}/{len(offsets)} entries shifted). Correcting...[/yellow]"
+            )
+            corrected_entries = []
+            for entry in refined_toc.entries:
+                corrected_page = entry.page_number + most_common_offset
+                # Only apply correction if the result is within valid range
+                if 1 <= corrected_page <= self.doc.page_count:
+                    corrected_entries.append(entry.model_copy(update={"page_number": corrected_page}))
+                else:
+                    corrected_entries.append(entry)
+
+            return TOC(entries=corrected_entries)
+
+        return refined_toc
 
     def _summarize_features_for_postprocessing(self, features: list, max_entries: int = 150) -> str:
         """Create a compact summary of features for postprocessing context.
