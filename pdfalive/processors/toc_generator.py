@@ -35,7 +35,9 @@ from pdfalive.tokens import TokenUsage, estimate_tokens
 # response type warns "Expected `none`" even though the value is valid).
 # A context-manager approach (warnings.catch_warnings) doesn't work here because
 # pydantic-core emits the warning from Rust, bypassing Python-level scoped filters.
-warnings.filterwarnings("ignore", message="Expected `none`", category=UserWarning, module="pydantic")
+warnings.filterwarnings(
+    "ignore", message="Pydantic serializer warnings", category=UserWarning, module=r"pydantic\.main"
+)
 
 # Regex pattern for section numbering (e.g. "1.", "1.2", "Chapter 1", "Appendix A")
 _SECTION_NUMBER_PATTERN = re.compile(r"^\s*(\d+\.|\d+\.\d+|Chapter\s|Section\s|Part\s|Appendix\s)", re.IGNORECASE)
