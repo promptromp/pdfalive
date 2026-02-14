@@ -170,7 +170,7 @@ pdfalive supports TOML configuration files for setting default CLI options. This
 
 	# Global settings (shared across commands)
 	[global]
-	model-identifier = "gpt-5.2"
+	model-identifier = "gpt-5.3"
 	show-token-usage = true
 
 	# Settings for generate-toc command

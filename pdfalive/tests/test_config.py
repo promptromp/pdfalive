@@ -106,13 +106,13 @@ class TestRenameConfig:
             {
                 "query": "Rename to [Author] Title.pdf",
                 "yes": True,
-                "model-identifier": "gpt-5.2",
+                "model-identifier": "gpt-5.3",
                 "show-token-usage": True,
             }
         )
         assert config.query == "Rename to [Author] Title.pdf"
         assert config.yes is True
-        assert config.model_identifier == "gpt-5.2"
+        assert config.model_identifier == "gpt-5.3"
         assert config.show_token_usage is True
 
 
@@ -204,7 +204,7 @@ class TestLoadConfig:
         config_file.write_text(
             """
 [global]
-model-identifier = "gpt-5.2"
+model-identifier = "gpt-5.3"
 show-token-usage = true
 
 [generate-toc]
@@ -217,7 +217,7 @@ query = "Rename to [Author] Title.pdf"
         )
 
         config = load_config(config_file)
-        assert config.global_.model_identifier == "gpt-5.2"
+        assert config.global_.model_identifier == "gpt-5.3"
         assert config.global_.show_token_usage is True
         assert config.generate_toc.force is True
         assert config.generate_toc.request_delay == 5.0
@@ -355,7 +355,7 @@ class TestLoadConfigAsDefaultMap:
         config_file.write_text(
             """
 [global]
-model-identifier = "gpt-5.2"
+model-identifier = "gpt-5.3"
 
 [rename]
 query = "Test query"
@@ -365,8 +365,8 @@ query = "Test query"
         result = load_config_as_default_map(config_file)
         assert result is not None
         assert result["rename"]["query"] == "Test query"
-        assert result["rename"]["model_identifier"] == "gpt-5.2"
-        assert result["generate-toc"]["model_identifier"] == "gpt-5.2"
+        assert result["rename"]["model_identifier"] == "gpt-5.3"
+        assert result["generate-toc"]["model_identifier"] == "gpt-5.3"
 
     def test_returns_none_when_no_config_found(self, tmp_path: Path) -> None:
         """Test that None is returned when auto-detection finds nothing."""
