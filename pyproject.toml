@@ -56,6 +56,13 @@ include = ["pdfalive*"]
 [tool.mypy]
 ignore_missing_imports = true
 
+# pymupdf's type stubs are incomplete (Document not iterable, Page attributes
+# missing, etc.). Skip importing the module so mypy treats it as untyped,
+# falling back to Any for all pymupdf types.
+[[tool.mypy.overrides]]
+module = "pymupdf.*"
+follow_imports = "skip"
+
 [tool.ruff]
 line-length = 120
 target-version = "py313"
