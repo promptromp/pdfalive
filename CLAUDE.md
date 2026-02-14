@@ -84,7 +84,7 @@ pdfalive/
 - LangSmith for observability/tracing via `@traceable` decorator on CLI commands
 - Tenacity for retry logic with exponential backoff
 - Rich for terminal progress indicators and table output
-- Default model: `gpt-5.3` (configurable via `--model-identifier`)
+- Default model: `gpt-5.2` (configurable via `--model-identifier`)
 
 **TOC Generation Strategy:**
 The `TOCGenerator._extract_features()` method extracts font metadata (name, size) and text snippets from the first few blocks/lines of each page. This condensed representation is sent to the LLM which identifies chapter/section headings based on font patterns and returns structured `TOCEntry` objects with confidence scores. For large documents, features are batched with overlap for context continuity. When `--postprocess` is enabled, a second LLM pass refines the TOC by cross-referencing against any printed table of contents found in the document's first pages, removing duplicates, fixing typos, and adjusting hierarchy levels.
