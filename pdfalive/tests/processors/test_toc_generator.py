@@ -7,6 +7,10 @@ import pytest
 
 from pdfalive.models.toc import TOC, TOCEntry, TOCFeature
 from pdfalive.processors.toc_generator import (
+    _FRONT_MATTER_TITLE_PATTERN,
+    _FRONT_MATTER_TITLES,
+    _LETTERSPACED_PATTERN,
+    _SECTION_NUMBER_PATTERN,
     TOCGenerator,
     _compute_body_font_profile,
     _extract_features_from_page_range,
@@ -1412,3 +1416,976 @@ class TestHeadingCandidateIntegration:
         first_span = features[0][0][0]
         assert first_span.y_position == round(100 / 800, 2)
         assert first_span.is_bold is True
+
+
+class TestRomanNumeralAndLetterspacedPatterns:
+    """Tests for Roman numeral and letter-spaced heading detection."""
+
+    @pytest.fixture
+    def body_font_name(self):
+        return "Times-Roman"
+
+    @pytest.fixture
+    def body_font_size(self):
+        return 12.0
+
+    @pytest.mark.parametrize(
+        "text,should_match",
+        [
+            # Roman numerals that should match _SECTION_NUMBER_PATTERN
+            ("I THE SAMPLE SPACE", True),
+            ("II ELEMENTS OF COMBINATORIAL ANALYSIS", True),
+            ("III FLUCTUATIONS IN COIN TOSSING", True),
+            ("IV COMBINATION OF EVENTS", True),
+            ("V CONDITIONAL PROBABILITY", True),
+            ("IX THE BERNOULLI SCHEME", True),
+            ("XIV RANDOM VARIABLES", True),
+            ("XVII THE EXPONENTIAL", True),
+            ("IV. Some Section", True),
+            # Letter-spaced text that should match _LETTERSPACED_PATTERN
+            ("C H A P T E R  I", True),
+            ("P R E F A C E", True),
+            ("C H A P T E R  XIV", True),
+            # Arabic that should still match
+            ("1. The Empirical Background", True),
+            ("1.2 Subsection Title", True),
+            ("Chapter 3 Overview", True),
+            ("Appendix A Details", True),
+            # "I " matches Roman numeral pattern — accepted trade-off, LLM filters it
+            ("I went to the store", True),
+            # Should NOT match
+            ("Some random text", False),
+            ("The quick brown fox", False),
+        ],
+    )
+    def test_section_pattern_matches(self, text, should_match):
+        """Test that _SECTION_NUMBER_PATTERN and _LETTERSPACED_PATTERN match expected text."""
+        matches_section = bool(_SECTION_NUMBER_PATTERN.match(text))
+        matches_letterspaced = bool(_LETTERSPACED_PATTERN.match(text))
+        result = matches_section or matches_letterspaced
+        assert result == should_match, f"Text '{text}' expected match={should_match}, got {result}"
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            # Roman numeral headings detected as heading candidates via pattern
+            ("I THE SAMPLE SPACE", True),
+            ("XIV RANDOM VARIABLES", True),
+            ("IV. Some Section Title", True),
+            # Letter-spaced headings detected as heading candidates
+            ("C H A P T E R  I", True),
+            ("P R E F A C E", True),
+            # "I went..." is short-ish prose starting with "I " — the pattern matches
+            # the Roman numeral "I " but the LLM will filter this false positive.
+            # We accept this trade-off for better recall on Roman numeral chapters.
+            ("I went to the store", True),
+            # Regular body text - no match
+            ("Some random text here", False),
+        ],
+    )
+    def test_heading_candidate_roman_and_letterspaced(self, text, expected, body_font_name, body_font_size):
+        """Test _is_heading_candidate with Roman numerals and letter-spaced text."""
+        span = {"font": "Times-Roman", "size": 10, "text": text, "flags": 0}
+        result = _is_heading_candidate(span, body_font_name, body_font_size)
+        assert result == expected, f"Text '{text}' expected heading={expected}, got {result}"
+
+    def test_mid_page_roman_numeral_heading_found(self):
+        """Integration: Roman numeral heading in block 4+ is detected and included."""
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.name = None
+
+        page_height = 800.0
+        page = MagicMock()
+        page.rect.height = page_height
+
+        body_span = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "Body paragraph text",
+            "bbox": (50, 50, 400, 65),
+            "flags": 0,
+        }
+        roman_heading = {
+            "font": "Times-Bold",
+            "size": 12,
+            "text": "III FLUCTUATIONS IN COIN TOSSING",
+            "bbox": (50, 400, 400, 420),
+            "flags": 0,
+        }
+
+        page.get_text.return_value = {
+            "height": page_height,
+            "blocks": [
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                # Beyond max_blocks_per_page=3, must be detected by Phase 2
+                {"type": 0, "lines": [{"spans": [roman_heading]}]},
+            ],
+        }
+        doc.__iter__ = lambda self: iter([page])
+
+        mock_llm = MagicMock()
+        generator = TOCGenerator(doc=doc, llm=mock_llm)
+        features = generator._extract_features_sequential(doc, max_blocks_per_page=3, show_progress=False)
+
+        all_snippets = []
+        for block in features:
+            for line in block:
+                for span in line:
+                    if isinstance(span, TOCFeature):
+                        all_snippets.append(span.text_snippet)
+
+        assert any("III FLUCTUATIONS" in s for s in all_snippets), (
+            f"Roman numeral heading not found in features. Got: {all_snippets}"
+        )
+
+    def test_mid_page_letterspaced_heading_found(self):
+        """Integration: letter-spaced heading in block 4+ is detected and included."""
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.name = None
+
+        page_height = 800.0
+        page = MagicMock()
+        page.rect.height = page_height
+
+        body_span = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "Body paragraph text",
+            "bbox": (50, 50, 400, 65),
+            "flags": 0,
+        }
+        letterspaced_heading = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "C H A P T E R  V I I I",
+            "bbox": (50, 400, 400, 420),
+            "flags": 0,
+        }
+
+        page.get_text.return_value = {
+            "height": page_height,
+            "blocks": [
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [letterspaced_heading]}]},
+            ],
+        }
+        doc.__iter__ = lambda self: iter([page])
+
+        mock_llm = MagicMock()
+        generator = TOCGenerator(doc=doc, llm=mock_llm)
+        features = generator._extract_features_sequential(doc, max_blocks_per_page=3, show_progress=False)
+
+        all_snippets = []
+        for block in features:
+            for line in block:
+                for span in line:
+                    if isinstance(span, TOCFeature):
+                        all_snippets.append(span.text_snippet)
+
+        assert any("C H A P T E R" in s for s in all_snippets), (
+            f"Letter-spaced heading not found in features. Got: {all_snippets}"
+        )
+
+
+class TestSummarizeFeaturesForPostprocessing:
+    """Tests for even-sampling feature summary."""
+
+    @pytest.fixture
+    def mock_doc(self):
+        doc = MagicMock()
+        doc.page_count = 0
+        doc.get_toc.return_value = []
+        doc.name = None
+        doc.__iter__ = lambda self: iter([])
+        return doc
+
+    @pytest.fixture
+    def mock_llm(self):
+        return MagicMock()
+
+    def _make_features(self, num_pages: int, spans_per_page: int = 1) -> list:
+        """Helper to create features spanning many pages."""
+        features = []
+        for page_num in range(1, num_pages + 1):
+            block = [
+                [
+                    TOCFeature(
+                        page_number=page_num,
+                        font_name="Times-Roman",
+                        font_size=12,
+                        text_length=20,
+                        text_snippet=f"Page {page_num} text",
+                    )
+                    for _ in range(spans_per_page)
+                ]
+            ]
+            features.append(block)
+        return features
+
+    def test_small_document_returns_all_spans(self, mock_doc, mock_llm):
+        """When total spans <= max_entries, all are included."""
+        features = self._make_features(10)
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result = generator._summarize_features_for_postprocessing(features, max_entries=50)
+
+        assert result.count("\n") == 9  # 10 lines, 9 newlines
+        assert "Page 1" in result
+        assert "Page 10" in result
+
+    def test_large_document_samples_evenly(self, mock_doc, mock_llm):
+        """When total spans > max_entries, sampling covers the full document."""
+        features = self._make_features(500)
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result = generator._summarize_features_for_postprocessing(features, max_entries=50)
+
+        lines = result.strip().split("\n")
+        assert len(lines) == 50
+
+        # Extract page numbers from summary lines
+        page_numbers = []
+        for line in lines:
+            # Line format: "Page N ..."
+            page_num = int(line.split()[1])
+            page_numbers.append(page_num)
+
+        # First sample should be from early pages, last from late pages
+        assert page_numbers[0] == 1
+        assert page_numbers[-1] >= 490  # Near the end of the 500-page document
+
+        # Samples should be roughly evenly spaced (~10 pages apart for 500/50)
+        for i in range(1, len(page_numbers)):
+            gap = page_numbers[i] - page_numbers[i - 1]
+            assert gap >= 1, "Samples should be monotonically increasing"
+
+    def test_empty_features(self, mock_doc, mock_llm):
+        """Empty features returns placeholder text."""
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result = generator._summarize_features_for_postprocessing([], max_entries=50)
+        assert result == "(No features available)"
+
+    def test_default_max_entries_is_150(self, mock_doc, mock_llm):
+        """Verify the default max_entries is 150."""
+        features = self._make_features(200)
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        # Call with default — should cap at 150
+        result = generator._summarize_features_for_postprocessing(features)
+        lines = result.strip().split("\n")
+        assert len(lines) == 150
+
+
+class TestDetectPageOffsetNote:
+    """Tests for _detect_page_offset_note."""
+
+    @pytest.fixture
+    def generator(self, mock_doc, mock_llm):
+        return TOCGenerator(doc=mock_doc, llm=mock_llm)
+
+    def test_empty_toc_returns_empty(self, generator):
+        """No entries means no offset note."""
+        toc = TOC(entries=[])
+        assert generator._detect_page_offset_note(toc, "some text") == ""
+
+    def test_no_chapter_past_page_5_returns_empty(self, generator):
+        """If all level-1 entries are in first 5 pages, no offset detected."""
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Preface", page_number=3, level=1, confidence=0.9),
+            ]
+        )
+        assert generator._detect_page_offset_note(toc, "some text") == ""
+
+    def test_small_offset_returns_empty(self, generator):
+        """Offset of 2 or less is not flagged (minimal front matter)."""
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Chapter 1", page_number=3, level=1, confidence=0.9),
+            ]
+        )
+        # offset = 3 - 1 = 2, which is < 3
+        assert generator._detect_page_offset_note(toc, "some text") == ""
+
+    def test_significant_offset_generates_warning(self, generator):
+        """Offset of 15 generates a warning with correct page reference and conversion formula."""
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Table of Contents", page_number=3, level=1, confidence=0.9),
+                TOCEntry(title="Chapter I", page_number=16, level=1, confidence=0.95),
+            ]
+        )
+        note = generator._detect_page_offset_note(toc, "some text")
+        assert "Note" in note
+        assert "15" in note  # estimated offset
+        assert "PDF page 16" in note
+        assert "adding 15" in note  # explicit conversion formula
+        assert "N + 15" in note  # conversion formula
+
+    def test_skips_early_level1_entries(self, generator):
+        """Entries in first 5 pages (like preface/TOC) are skipped for offset detection."""
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Preface", page_number=4, level=1, confidence=0.9),
+                TOCEntry(title="Chapter I", page_number=22, level=1, confidence=0.95),
+            ]
+        )
+        note = generator._detect_page_offset_note(toc, "some text")
+        assert "Note" in note
+        assert "21" in note  # offset = 22 - 1
+        assert "PDF page 22" in note
+
+    def test_skips_front_matter_titles_past_page_5(self, generator):
+        """Front matter titles like 'Contents' past page 5 are skipped for offset."""
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Contents", page_number=10, level=1, confidence=0.9),
+                TOCEntry(title="Chapter I", page_number=22, level=1, confidence=0.95),
+            ]
+        )
+        note = generator._detect_page_offset_note(toc, "some text")
+        assert "Note" in note
+        assert "21" in note  # offset from Chapter I (22-1), not Contents (10-1)
+        assert "PDF page 22" in note
+
+
+class TestDetectFrontMatterOffset:
+    """Tests for _detect_front_matter_offset."""
+
+    @pytest.fixture
+    def generator(self, mock_doc, mock_llm):
+        return TOCGenerator(doc=mock_doc, llm=mock_llm)
+
+    def _make_toc(self, entries_data: list[tuple[str, int, int]]) -> TOC:
+        """Helper: create TOC from (title, page, level) tuples."""
+        return TOC(entries=[TOCEntry(title=t, page_number=p, level=lvl, confidence=0.9) for t, p, lvl in entries_data])
+
+    def test_empty_toc_returns_zero(self, generator):
+        """Empty TOC yields no offset."""
+        assert generator._detect_front_matter_offset(TOC(entries=[])) == 0
+
+    def test_no_level1_past_page_5_returns_zero(self, generator):
+        """Level-1 entries only in first 5 pages means no significant front matter."""
+        toc = self._make_toc([("Preface", 3, 1)])
+        assert generator._detect_front_matter_offset(toc) == 0
+
+    def test_first_level1_past_page_5_returns_offset(self, generator):
+        """First non-front-matter level-1 entry past page 5 determines the offset."""
+        toc = self._make_toc(
+            [
+                ("Table of Contents", 3, 1),
+                ("Introduction", 16, 1),  # front matter title, skipped
+                ("Chapter I", 17, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 16  # 17 - 1
+
+    def test_skips_level2_entries(self, generator):
+        """Level-2 entries are ignored for offset detection."""
+        toc = self._make_toc(
+            [
+                ("Subsection 1.1", 20, 2),
+                ("Chapter I", 30, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 29  # 30 - 1
+
+    @pytest.mark.parametrize(
+        "page_number,expected_offset",
+        [
+            (6, 5),
+            (10, 9),
+            (22, 21),
+        ],
+    )
+    def test_offset_equals_page_minus_one(self, generator, page_number, expected_offset):
+        """Offset is always first qualifying page_number - 1."""
+        toc = self._make_toc([("Chapter I", page_number, 1)])
+        assert generator._detect_front_matter_offset(toc) == expected_offset
+
+    @pytest.mark.parametrize(
+        "front_matter_title",
+        [
+            "Contents",
+            "Table of Contents",
+            "Introduction",
+            "Preface",
+            "Foreword",
+            "Acknowledgements",
+            "Acknowledgments",
+        ],
+    )
+    def test_skips_front_matter_titles(self, generator, front_matter_title):
+        """Known front matter titles past page 5 are skipped for offset detection."""
+        toc = self._make_toc(
+            [
+                (front_matter_title, 10, 1),
+                ("Chapter I", 22, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 21  # 22 - 1, not 9
+
+    def test_skips_all_front_matter_picks_first_real_chapter(self, generator):
+        """All front matter titles are skipped; offset comes from the real first chapter."""
+        toc = self._make_toc(
+            [
+                ("Contents", 10, 1),
+                ("Preface", 12, 1),
+                ("Introduction", 16, 1),
+                ("Chapter I", 18, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 17  # 18 - 1
+
+    @pytest.mark.parametrize(
+        "front_matter_title",
+        [
+            "Acknowledgments for the English Edition",
+            "Foreword to the Second Edition",
+            "Preface to the Revised Edition",
+            "Contents of Volume II",
+        ],
+    )
+    def test_skips_front_matter_titles_with_suffixes(self, generator, front_matter_title):
+        """Front matter titles with extra suffixes are still recognized and skipped."""
+        toc = self._make_toc(
+            [
+                (front_matter_title, 10, 1),
+                ("Chapter I", 22, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 21  # 22 - 1, not 9
+
+    def test_front_matter_titles_constant_has_expected_entries(self):
+        """Verify the _FRONT_MATTER_TITLES constant contains expected values."""
+        assert "contents" in _FRONT_MATTER_TITLES
+        assert "table of contents" in _FRONT_MATTER_TITLES
+        assert "introduction" in _FRONT_MATTER_TITLES
+        assert "preface" in _FRONT_MATTER_TITLES
+        assert "foreword" in _FRONT_MATTER_TITLES
+
+
+class TestPageContainsHeading:
+    """Tests for _page_contains_heading."""
+
+    @pytest.fixture
+    def mock_doc_with_pages(self):
+        """Create a mock document with configurable page text."""
+        doc = MagicMock()
+        doc.page_count = 100
+        doc.get_toc.return_value = []
+        doc.name = None
+
+        # Default page text - can be customized per test
+        page_texts = {}
+
+        def get_page(idx):
+            page = MagicMock()
+            text = page_texts.get(idx, f"Page {idx + 1} body text content")
+            page.get_text.return_value = text
+            return page
+
+        doc.__getitem__ = lambda self, idx: get_page(idx)
+        doc._page_texts = page_texts  # Expose for test configuration
+        return doc
+
+    @pytest.fixture
+    def generator(self, mock_doc_with_pages, mock_llm):
+        return TOCGenerator(doc=mock_doc_with_pages, llm=mock_llm)
+
+    def test_finds_exact_heading_on_page(self, generator):
+        """Heading text found on the exact page returns True."""
+        generator.doc._page_texts[15] = "Some text\nIntroduction to Probability\nMore text"
+        assert generator._page_contains_heading(16, "Introduction to Probability") is True
+
+    def test_case_insensitive_match(self, generator):
+        """Matching is case-insensitive."""
+        generator.doc._page_texts[15] = "CHAPTER I: THE SAMPLE SPACE"
+        assert generator._page_contains_heading(16, "Chapter I: The Sample Space") is True
+
+    def test_whitespace_normalized(self, generator):
+        """Extra whitespace in page text or title is collapsed."""
+        generator.doc._page_texts[15] = "Chapter  I:  The   Sample Space"
+        assert generator._page_contains_heading(16, "Chapter I: The Sample Space") is True
+
+    def test_returns_false_for_missing_heading(self, generator):
+        """Returns False when heading text is not on the page or neighbors."""
+        generator.doc._page_texts[15] = "Completely unrelated text about nothing"
+        generator.doc._page_texts[14] = "Also unrelated"
+        generator.doc._page_texts[16] = "Still unrelated"
+        assert generator._page_contains_heading(16, "Introduction to Probability") is False
+
+    def test_returns_false_for_short_search_text(self, generator):
+        """Titles shorter than 3 chars after normalization are rejected."""
+        generator.doc._page_texts[0] = "AB is here"
+        assert generator._page_contains_heading(1, "AB") is False
+
+    def test_strips_number_prefix(self, generator):
+        """Section number prefixes like '1. ' are stripped before searching."""
+        generator.doc._page_texts[15] = "The Empirical Background of probability"
+        assert generator._page_contains_heading(16, "1. The Empirical Background") is True
+
+    def test_searches_within_window(self, generator):
+        """Heading on an adjacent page (within window) is found."""
+        generator.doc._page_texts[16] = "Introduction to Methods"
+        assert generator._page_contains_heading(16, "Introduction to Methods", window=1) is True
+
+    def test_clamps_to_document_bounds(self, generator):
+        """Search window is clamped to valid page range."""
+        generator.doc._page_texts[0] = "Preface to the Book"
+        # page_number=1, window=1 → search pages 0..1 (clamped, not -1..1)
+        assert generator._page_contains_heading(1, "Preface to the Book") is True
+
+    def test_strips_punctuation_from_title(self, generator):
+        """Colons and other punctuation in the title are stripped before matching."""
+        # PDF text has words as separate spans without punctuation between them
+        generator.doc._page_texts[15] = "Introduction The Nature of Probability Theory"
+        assert generator._page_contains_heading(16, "Introduction: The Nature of Probability Theory") is True
+
+    def test_strips_punctuation_from_page_text(self, generator):
+        """Punctuation in the page text is also stripped."""
+        generator.doc._page_texts[15] = "Chapter I: The Sample Space"
+        assert generator._page_contains_heading(16, "Chapter I The Sample Space") is True
+
+    def test_matches_with_mixed_punctuation(self, generator):
+        """Both title and page text have different punctuation; still matches."""
+        generator.doc._page_texts[15] = "Results — Discussion & Analysis"
+        assert generator._page_contains_heading(16, "Results: Discussion & Analysis") is True
+
+
+class TestCorrectPostprocessedPageNumbers:
+    """Tests for _correct_postprocessed_page_numbers."""
+
+    @pytest.fixture
+    def mock_doc_with_pages(self):
+        """Create a mock document with configurable page text for verification."""
+        doc = MagicMock()
+        doc.page_count = 600
+        doc.get_toc.return_value = []
+        doc.name = None
+
+        page_texts = {}
+
+        def get_page(idx):
+            page = MagicMock()
+            text = page_texts.get(idx, "")
+            page.get_text.return_value = text
+            return page
+
+        doc.__getitem__ = lambda self, idx: get_page(idx)
+        doc._page_texts = page_texts
+        return doc
+
+    @pytest.fixture
+    def generator(self, mock_doc_with_pages, mock_llm):
+        return TOCGenerator(doc=mock_doc_with_pages, llm=mock_llm)
+
+    def _make_toc(self, entries_data: list[tuple[str, int, int]]) -> TOC:
+        """Helper: create TOC from (title, page, level) tuples."""
+        return TOC(entries=[TOCEntry(title=t, page_number=p, level=lvl, confidence=0.9) for t, p, lvl in entries_data])
+
+    def test_no_correction_when_pages_match(self, generator):
+        """No correction applied when original and refined page numbers agree."""
+        original = self._make_toc(
+            [
+                ("Introduction", 16, 1),
+                ("Chapter I", 22, 1),
+                ("Chapter II", 41, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Introduction", 16, 1),
+                ("Chapter I", 22, 1),
+                ("Chapter II", 41, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        for orig, res in zip(original.entries, result.entries, strict=True):
+            assert orig.page_number == res.page_number
+
+    def test_restores_original_pages_for_matched_entries(self, generator):
+        """Matched entries get their original PDF page numbers restored."""
+        original = self._make_toc(
+            [
+                ("Introduction", 16, 1),
+                ("Chapter I", 22, 1),
+                ("Chapter II", 41, 1),
+            ]
+        )
+        # Postprocessor changed page numbers for existing entries
+        refined = self._make_toc(
+            [
+                ("Introduction", 1, 1),
+                ("Chapter I", 7, 1),
+                ("Chapter II", 26, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 16
+        assert result.entries[1].page_number == 22
+        assert result.entries[2].page_number == 41
+
+    def test_applies_offset_to_new_entries_when_heading_found_at_corrected_page(self, generator):
+        """New entries get offset applied when heading found at corrected page but not original."""
+        # offset = 15 (from "Chapter I" at page 16, 16-1=15)
+        # Heading text exists at corrected pages (page+offset), NOT at original pages
+        generator.doc._page_texts[24] = "Subsection 1.1 content"  # PDF page 25 = 10+15
+        generator.doc._page_texts[34] = "Subsection 1.2 content"  # PDF page 35 = 20+15
+
+        original = self._make_toc(
+            [
+                ("Chapter I", 16, 1),
+                ("Chapter II", 41, 1),
+            ]
+        )
+        # Postprocessor keeps existing entries and adds new ones with printed page numbers
+        refined = self._make_toc(
+            [
+                ("Chapter I", 16, 1),
+                ("Subsection 1.1", 10, 2),  # printed page → sanity check finds at 25
+                ("Subsection 1.2", 20, 2),  # printed page → sanity check finds at 35
+                ("Chapter II", 41, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 16  # matched, restored
+        assert result.entries[1].page_number == 25  # new, offset applied (10 + 15)
+        assert result.entries[2].page_number == 35  # new, offset applied (20 + 15)
+        assert result.entries[3].page_number == 41  # matched, restored
+
+    def test_empty_refined_toc_returned_as_is(self, generator):
+        """Empty refined TOC is returned unchanged."""
+        empty = TOC(entries=[])
+        original = self._make_toc([("Chapter I", 22, 1)])
+
+        assert generator._correct_postprocessed_page_numbers(original, empty) == empty
+
+    def test_empty_original_with_nonempty_refined(self, generator):
+        """When original is empty, refined entries are kept (no offset detected)."""
+        empty = TOC(entries=[])
+        refined = self._make_toc([("Chapter I", 22, 1)])
+
+        result = generator._correct_postprocessed_page_numbers(empty, refined)
+        assert result.entries[0].page_number == 22  # no offset, kept as-is
+
+    def test_no_offset_applied_when_front_matter_small(self, generator):
+        """New entries are kept as-is when front matter offset < 3."""
+        original = self._make_toc(
+            [
+                ("Chapter 1", 4, 1),  # offset = 4 - 1 = 3... but page <= 5, so skipped
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Chapter 1", 4, 1),
+                ("Section 1.1", 10, 2),  # new entry
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        # offset = 0 (no level-1 entry past page 5), so new entry kept as-is
+        assert result.entries[1].page_number == 10
+
+    def test_new_entry_keeps_page_when_heading_found_at_original(self, generator):
+        """New entry with correct PDF page number is kept when heading found there."""
+        # Set heading text at PDF page 30 (the original page), not at corrected page 45
+        generator.doc._page_texts[29] = "Special Section content here"
+
+        original = self._make_toc(
+            [
+                ("Chapter I", 16, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Chapter I", 16, 1),
+                ("Special Section", 30, 2),  # already a correct PDF page
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[1].page_number == 30  # kept, found at original page
+
+    def test_new_entry_kept_as_is_when_heading_not_found_anywhere(self, generator):
+        """New entry kept as-is when heading not found at either original or corrected page."""
+        original = self._make_toc(
+            [
+                ("Chapter I", 16, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Chapter I", 16, 1),
+                ("Mystery Section", 25, 2),  # not found anywhere
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[1].page_number == 25  # kept as-is (LLM should output PDF pages)
+
+    def test_title_matching_is_case_insensitive(self, generator):
+        """Title matching between original and refined is case-insensitive."""
+        original = self._make_toc(
+            [
+                ("Introduction", 16, 1),
+                ("CHAPTER I", 22, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("introduction", 1, 1),
+                ("Chapter I", 7, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 16
+        assert result.entries[1].page_number == 22
+
+    def test_fuzzy_match_substring_containment_high_ratio(self, generator):
+        """Refined title that is a modestly expanded superstring of original matches
+        via substring when coverage ratio >= 0.5."""
+        original = self._make_toc(
+            [
+                ("The Exponential Densities", 100, 1),
+                ("Chapter I", 22, 1),
+            ]
+        )
+        # Postprocessor expanded the title with a modest suffix (high coverage ratio)
+        refined = self._make_toc(
+            [
+                ("The Exponential Densities: Extended", 85, 1),
+                ("Chapter I", 7, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 100  # matched via substring (high ratio)
+        assert result.entries[1].page_number == 22
+
+    def test_fuzzy_match_rejects_low_coverage_substring(self, generator):
+        """Refined title that is much longer than the original is NOT matched
+        via substring when the coverage ratio is below 0.5."""
+        original = self._make_toc(
+            [
+                ("INTRODUCTION", 16, 1),
+                ("Chapter I", 22, 1),
+            ]
+        )
+        # Postprocessor expanded "Introduction" to a much longer title (ratio ≈ 0.27)
+        refined = self._make_toc(
+            [
+                ("Introduction: The Nature of Probability Theory", 1, 1),
+                ("Chapter I", 7, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        # "introduction" (12) vs "introduction the nature of probability theory" (45)
+        # coverage ratio 0.27 < 0.5, so NOT matched — treated as new entry
+        assert result.entries[0].page_number == 1  # not matched, kept as-is
+        assert result.entries[1].page_number == 22  # exact match, restored
+
+    def test_fuzzy_match_original_substring_of_refined(self, generator):
+        """Original title that is a substring of refined title matches."""
+        original = self._make_toc(
+            [
+                ("The Exponential and the Uniform Densities", 100, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("The Exponential and the Uniform Densities: Extended", 85, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 100  # matched via substring
+
+    def test_fuzzy_match_substring_skips_cross_level(self, generator):
+        """Substring matching does not match across different hierarchy levels."""
+        original = self._make_toc(
+            [
+                ("Introduction", 15, 1),  # level 1 front matter entry
+                ("Chapter I", 17, 1),
+            ]
+        )
+        # Postprocessor added a section-level "1. Introduction" under Chapter I
+        refined = self._make_toc(
+            [
+                ("Introduction", 15, 1),
+                ("Chapter I", 17, 1),
+                ("1. Introduction", 136, 2),  # level 2 — should NOT match level 1 "Introduction"
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 15  # exact match, restored
+        assert result.entries[1].page_number == 17  # exact match, restored
+        assert result.entries[2].page_number == 136  # no cross-level match, kept as-is
+
+    def test_fuzzy_match_skips_short_substrings(self, generator):
+        """Substring matching requires minimum 8 chars for the shorter string."""
+        # All entries at page ≤5 so no offset is detected
+        original = self._make_toc(
+            [
+                ("Methods", 4, 1),  # only 7 chars — too short for substring match
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Methods and Materials Analysis", 50, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        # "methods" is 7 chars, below 8-char minimum — should NOT match via substring
+        # No offset detected (page ≤5), so kept as-is
+        assert result.entries[0].page_number == 50  # no match, kept as-is
+
+    def test_punctuation_stripped_in_title_matching(self, generator):
+        """Punctuation in titles is stripped for matching."""
+        original = self._make_toc(
+            [
+                ("INTRODUCTION", 16, 1),
+                ("Chapter I: The Sample Space", 22, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Introduction", 1, 1),
+                ("Chapter I - The Sample Space", 7, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 16
+        assert result.entries[1].page_number == 22
+
+
+class TestFuzzyMatchBestMatch:
+    """Tests for _fuzzy_match best-match selection with coverage ratio."""
+
+    @pytest.fixture
+    def mock_doc_with_pages(self):
+        """Create a mock document with configurable page text."""
+        doc = MagicMock()
+        doc.page_count = 600
+        doc.get_toc.return_value = []
+        doc.name = None
+
+        page_texts: dict[int, str] = {}
+
+        def get_page(idx):
+            page = MagicMock()
+            text = page_texts.get(idx, "")
+            page.get_text.return_value = text
+            return page
+
+        doc.__getitem__ = lambda self, idx: get_page(idx)
+        doc._page_texts = page_texts
+        return doc
+
+    @pytest.fixture
+    def mock_llm(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def generator(self, mock_doc_with_pages, mock_llm):
+        return TOCGenerator(doc=mock_doc_with_pages, llm=mock_llm)
+
+    def _make_toc(self, entries_data: list[tuple[str, int, int]]) -> TOC:
+        return TOC(entries=[TOCEntry(title=t, page_number=p, level=lvl, confidence=0.9) for t, p, lvl in entries_data])
+
+    def test_fuzzy_match_prefers_best_match_over_first_match(self, generator):
+        """When 'Introduction' (page 10) and '2 Introduction to Ito-Calculus' (page 24)
+        both exist in original, refined '2 Introduction to Ito-Calculus' should match
+        the latter (best coverage ratio) rather than the former (first found)."""
+        original = self._make_toc(
+            [
+                ("Introduction", 10, 1),
+                ("2 Introduction to Ito-Calculus", 24, 1),
+            ]
+        )
+        # Postprocessor returns the entry with the wrong page
+        refined = self._make_toc(
+            [
+                ("Introduction", 10, 1),
+                ("2 Introduction to Ito-Calculus", 10, 1),  # wrong page
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 10  # exact match
+        assert result.entries[1].page_number == 24  # best match, not first match
+
+    def test_fuzzy_match_rejects_low_coverage_ratio(self, generator):
+        """Short substring with low coverage ratio is rejected.
+        'introduction' (12 chars) vs '2 introduction to itocalculus' (29+ chars) → ratio < 0.5."""
+        original = self._make_toc(
+            [
+                ("Introduction", 10, 1),
+            ]
+        )
+        # Refined entry has a much longer title — should NOT match via substring
+        refined = self._make_toc(
+            [
+                ("2 Introduction to Ito-Calculus", 5, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        # No match due to low coverage ratio; kept as-is (no offset since page ≤ 5)
+        assert result.entries[0].page_number == 5
+
+    @pytest.mark.parametrize(
+        "orig_title,refined_title,should_match",
+        [
+            # High ratio: "the sample space" (16) vs "the sample space extended" (25) → 0.64
+            ("The Sample Space", "The Sample Space Extended", True),
+            # Low ratio: "introduction" (12) vs "2 introduction to itocalculus" (30) → 0.40
+            ("Introduction", "2 Introduction to Ito-Calculus", False),
+            # Exact match → ratio 1.0
+            ("Chapter One Title", "Chapter One Title", True),
+        ],
+    )
+    def test_coverage_ratio_acceptance_rejection(self, generator, orig_title, refined_title, should_match):
+        """Parametrized test for coverage ratio acceptance/rejection."""
+        original = self._make_toc([(orig_title, 50, 1)])
+        refined = self._make_toc([(refined_title, 99, 1)])
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        if should_match:
+            assert result.entries[0].page_number == 50
+        else:
+            assert result.entries[0].page_number == 99
+
+
+class TestFrontMatterTitlePattern:
+    """Tests for _FRONT_MATTER_TITLE_PATTERN regex matching."""
+
+    @pytest.mark.parametrize(
+        "title,is_front_matter",
+        [
+            # Exact front matter titles
+            ("introduction", True),
+            ("preface", True),
+            ("foreword", True),
+            ("contents", True),
+            ("table of contents", True),
+            ("acknowledgements", True),
+            ("acknowledgments", True),
+            # Front matter with qualifying phrases
+            ("introduction to the second edition", True),
+            ("foreword to the revised edition", True),
+            ("preface to the third edition", True),
+            ("acknowledgments for the english edition", True),
+            ("contents of volume ii", True),
+            ("contents of the second edition", True),
+            # NOT front matter — "to <subject>" without "the"
+            ("introduction to itocalculus", False),
+            ("introduction to probability", False),
+            ("introduction to algorithms", False),
+            ("introduction to stochastic processes", False),
+            # NOT front matter — random titles
+            ("chapter 1", False),
+            ("2 introduction to itocalculus", False),
+            ("the exponential and the uniform densities", False),
+        ],
+    )
+    def test_front_matter_classification(self, title, is_front_matter):
+        """Test that _FRONT_MATTER_TITLE_PATTERN correctly classifies front matter."""
+        assert bool(_FRONT_MATTER_TITLE_PATTERN.match(title)) == is_front_matter, (
+            f"Title '{title}' expected is_front_matter={is_front_matter}"
+        )

@@ -187,6 +187,227 @@ class TestTOC:
         assert merged.entries[1].level == 2
 
 
+class TestTOCSanitizeHierarchy:
+    """Tests for TOC.sanitize_hierarchy() — ensures PyMuPDF set_toc() compatibility."""
+
+    def _entry(self, title: str, page: int, level: int) -> TOCEntry:
+        return TOCEntry(title=title, page_number=page, level=level, confidence=0.9)
+
+    def test_empty_toc(self):
+        """Empty TOC is returned unchanged."""
+        toc = TOC(entries=[])
+        assert toc.sanitize_hierarchy().entries == []
+
+    def test_valid_hierarchy_unchanged(self):
+        """A valid hierarchy passes through without modification."""
+        toc = TOC(
+            entries=[
+                self._entry("Ch 1", 1, 1),
+                self._entry("Sec 1.1", 2, 2),
+                self._entry("Ch 2", 10, 1),
+                self._entry("Sec 2.1", 11, 2),
+                self._entry("Sub 2.1.1", 12, 3),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        levels = [e.level for e in result.entries]
+        assert levels == [1, 2, 1, 2, 3]
+
+    def test_first_entry_promoted_to_level_1(self):
+        """First entry with level > 1 is promoted to level 1."""
+        toc = TOC(
+            entries=[
+                self._entry("Sec 1.1", 1, 2),
+                self._entry("Ch 2", 10, 1),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        assert result.entries[0].level == 1
+        assert result.entries[1].level == 1
+
+    def test_level_jump_clamped(self):
+        """A jump from level 1 to level 3 is clamped to level 2."""
+        toc = TOC(
+            entries=[
+                self._entry("Ch 1", 1, 1),
+                self._entry("Deep sub", 2, 3),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        assert result.entries[0].level == 1
+        assert result.entries[1].level == 2
+
+    def test_multiple_jumps_cascaded(self):
+        """Multiple consecutive jumps are each clamped relative to previous."""
+        toc = TOC(
+            entries=[
+                self._entry("Ch 1", 1, 1),
+                self._entry("Sub 1", 2, 4),
+                self._entry("Sub 2", 3, 5),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        levels = [e.level for e in result.entries]
+        assert levels == [1, 2, 3]
+
+    def test_level_decrease_preserved(self):
+        """Decreasing levels (e.g., level 3 -> level 1) are not clamped."""
+        toc = TOC(
+            entries=[
+                self._entry("Ch 1", 1, 1),
+                self._entry("Sec 1.1", 2, 2),
+                self._entry("Sub 1.1.1", 3, 3),
+                self._entry("Ch 2", 10, 1),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        levels = [e.level for e in result.entries]
+        assert levels == [1, 2, 3, 1]
+
+    def test_all_level_2_entries(self):
+        """All entries at level 2 — first gets promoted, rest clamped to max prev+1."""
+        toc = TOC(
+            entries=[
+                self._entry("A", 1, 2),
+                self._entry("B", 5, 2),
+                self._entry("C", 10, 2),
+            ]
+        )
+        result = toc.sanitize_hierarchy()
+        levels = [e.level for e in result.entries]
+        assert levels == [1, 2, 2]
+
+    def test_preserves_other_fields(self):
+        """Sanitization only changes level, not title/page/confidence."""
+        entry = TOCEntry(title="My Section", page_number=42, level=3, confidence=0.75)
+        toc = TOC(entries=[entry])
+        result = toc.sanitize_hierarchy()
+        sanitized = result.entries[0]
+        assert sanitized.level == 1  # changed
+        assert sanitized.title == "My Section"  # preserved
+        assert sanitized.page_number == 42  # preserved
+        assert sanitized.confidence == 0.75  # preserved
+
+    @pytest.mark.parametrize(
+        "input_levels,expected_levels",
+        [
+            ([1], [1]),
+            ([2], [1]),
+            ([3], [1]),
+            ([1, 2], [1, 2]),
+            ([1, 3], [1, 2]),
+            ([2, 3], [1, 2]),
+            ([1, 1, 1], [1, 1, 1]),
+            ([1, 2, 3, 4], [1, 2, 3, 4]),
+            ([1, 4, 2, 5], [1, 2, 2, 3]),
+            ([3, 5, 1, 4], [1, 2, 1, 2]),
+        ],
+    )
+    def test_parametrized_level_sequences(self, input_levels, expected_levels):
+        """Parametrized tests for various level sequences."""
+        entries = [self._entry(f"Entry {i}", i + 1, lvl) for i, lvl in enumerate(input_levels)]
+        toc = TOC(entries=entries)
+        result = toc.sanitize_hierarchy()
+        actual = [e.level for e in result.entries]
+        assert actual == expected_levels
+
+
+class TestTOCSortByPage:
+    """Tests for TOC.sort_by_page() — ensures page number monotonicity."""
+
+    def _entry(self, title: str, page: int, level: int) -> TOCEntry:
+        return TOCEntry(title=title, page_number=page, level=level, confidence=0.9)
+
+    def test_empty_toc(self):
+        """Empty TOC is returned unchanged."""
+        toc = TOC(entries=[])
+        assert toc.sort_by_page().entries == []
+
+    def test_single_entry(self):
+        """Single-entry TOC is returned unchanged."""
+        toc = TOC(entries=[self._entry("Ch 1", 5, 1)])
+        result = toc.sort_by_page()
+        assert len(result.entries) == 1
+        assert result.entries[0].page_number == 5
+
+    def test_already_sorted(self):
+        """Already-sorted entries are preserved in order."""
+        toc = TOC(
+            entries=[
+                self._entry("Ch 1", 1, 1),
+                self._entry("Sec 1.1", 3, 2),
+                self._entry("Ch 2", 10, 1),
+            ]
+        )
+        result = toc.sort_by_page()
+        pages = [e.page_number for e in result.entries]
+        assert pages == [1, 3, 10]
+
+    def test_unsorted_entries(self):
+        """Unsorted entries are reordered by page number."""
+        toc = TOC(
+            entries=[
+                self._entry("Ch 2", 10, 1),
+                self._entry("Ch 1", 1, 1),
+                self._entry("Ch 3", 20, 1),
+            ]
+        )
+        result = toc.sort_by_page()
+        pages = [e.page_number for e in result.entries]
+        assert pages == [1, 10, 20]
+
+    def test_backward_jump_corrected(self):
+        """Backward page jump (e.g., page 12 followed by page 10) is fixed by sorting."""
+        toc = TOC(
+            entries=[
+                self._entry("1 Preliminaries", 12, 1),
+                self._entry("2 Introduction to Ito-Calculus", 10, 1),
+                self._entry("3 Advanced Topics", 30, 1),
+            ]
+        )
+        result = toc.sort_by_page()
+        pages = [e.page_number for e in result.entries]
+        assert pages == [10, 12, 30]
+
+    def test_ties_broken_by_level(self):
+        """Entries on the same page are ordered by level (parent before child)."""
+        toc = TOC(
+            entries=[
+                self._entry("Sec 1.1", 5, 2),
+                self._entry("Ch 1", 5, 1),
+                self._entry("Sub 1.1.1", 5, 3),
+            ]
+        )
+        result = toc.sort_by_page()
+        levels = [e.level for e in result.entries]
+        assert levels == [1, 2, 3]
+
+    def test_preserves_other_fields(self):
+        """Sorting only changes order, not entry contents."""
+        entry = TOCEntry(title="My Section", page_number=42, level=2, confidence=0.75)
+        toc = TOC(entries=[self._entry("Ch 1", 50, 1), entry])
+        result = toc.sort_by_page()
+        assert result.entries[0].title == "My Section"
+        assert result.entries[0].confidence == 0.75
+
+    @pytest.mark.parametrize(
+        "input_pages,expected_pages",
+        [
+            ([1, 2, 3], [1, 2, 3]),
+            ([3, 1, 2], [1, 2, 3]),
+            ([5, 5, 5], [5, 5, 5]),
+            ([10, 5, 20, 1], [1, 5, 10, 20]),
+        ],
+    )
+    def test_parametrized_page_sequences(self, input_pages, expected_pages):
+        """Parametrized tests for various page sequences."""
+        entries = [self._entry(f"Entry {i}", p, 1) for i, p in enumerate(input_pages)]
+        toc = TOC(entries=entries)
+        result = toc.sort_by_page()
+        actual = [e.page_number for e in result.entries]
+        assert actual == expected_pages
+
+
 class TestRenameOp:
     """Tests for RenameOp model."""
 

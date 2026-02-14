@@ -39,15 +39,61 @@ warnings.filterwarnings(
     "ignore", message="Pydantic serializer warnings", category=UserWarning, module=r"pydantic\.main"
 )
 
-# Regex pattern for section numbering (e.g. "1.", "1.2", "Chapter 1", "Appendix A")
-_SECTION_NUMBER_PATTERN = re.compile(r"^\s*(\d+\.|\d+\.\d+|Chapter\s|Section\s|Part\s|Appendix\s)", re.IGNORECASE)
+# Sub-pattern for Roman numerals (I through XXXIX covers typical chapter counts)
+_ROMAN_NUMERAL_RE = r"(?:X{0,3}(?:IX|IV|V?I{0,3}))"
+
+# Regex pattern for section numbering (e.g. "1.", "1.2", "Chapter 1", "Appendix A",
+# Roman numerals like "I ", "XIV.", and letter-spaced "C H A P T E R")
+_SECTION_NUMBER_PATTERN = re.compile(
+    r"^\s*("
+    r"\d+\.|\d+\.\d+"  # Arabic: "1.", "1.2"
+    r"|(?:Chapter|Section|Part|Appendix)\s"  # Named prefixes
+    r"|C\s+H\s+A\s+P\s+T\s+E\s+R"  # Letter-spaced CHAPTER
+    r"|" + _ROMAN_NUMERAL_RE + r"\.?\s"  # Roman numeral + optional dot + space
+    r")",
+    re.IGNORECASE,
+)
+
+# Pattern for letter-spaced ALL-CAPS text (e.g. "C H A P T E R  I" or "P R E F A C E")
+_LETTERSPACED_PATTERN = re.compile(r"^[A-Z](\s+[A-Z]){3,}")
 
 # Minimum/maximum text length for heading candidates
 _HEADING_MIN_LENGTH = 3
 _HEADING_MAX_LENGTH = 200
 
+# Front matter titles to skip when detecting front matter offset
+_FRONT_MATTER_TITLES = frozenset(
+    {
+        "contents",
+        "table of contents",
+        "introduction",
+        "preface",
+        "foreword",
+        "acknowledgements",
+        "acknowledgments",
+        "note on the use of the book",
+    }
+)
+
+# Compiled pattern to match front matter titles, optionally followed by qualifying
+# phrases like "to the ...", "for the ...", "of the ...", "of volume ...".
+# This prevents "Introduction to Ito-Calculus" from being classified as front matter
+# while still matching "Introduction to the Second Edition".
+_FRONT_MATTER_TITLE_PATTERN = re.compile(
+    r"^(?:" + "|".join(re.escape(t) for t in sorted(_FRONT_MATTER_TITLES)) + r")"
+    r"(?:\s+(?:to the|for the|of the|of volume)\b.*)?$"
+)
+
 # Minimum font size ratio vs body text to be considered a heading candidate
 _HEADING_FONT_SIZE_RATIO = 1.15
+
+# Fuzzy match: minimum length of the shorter string for substring matching
+_FUZZY_MIN_SUBSTRING_LEN = 8
+
+# Fuzzy match: minimum ratio of shorter/longer string lengths for a substring
+# match to be accepted.  Blocks e.g. "introduction" (12) matching
+# "2 introduction to itocalculus" (29) since 12/29 = 0.41 < 0.5.
+_FUZZY_MIN_COVERAGE_RATIO = 0.5
 
 
 def apply_toc_to_document(doc: pymupdf.Document, toc: list, output_file: str) -> None:
@@ -171,7 +217,11 @@ def _is_heading_candidate(span: dict, body_font_name: str, body_font_size: float
         return True
 
     # Section numbering pattern
-    return bool(_SECTION_NUMBER_PATTERN.match(text))
+    if _SECTION_NUMBER_PATTERN.match(text):
+        return True
+
+    # Letter-spaced ALL-CAPS text (e.g. "C H A P T E R  I")
+    return bool(_LETTERSPACED_PATTERN.match(text))
 
 
 def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list]:
@@ -308,7 +358,9 @@ class TOCGenerator:
         if postprocess:
             toc, postprocess_usage = self._postprocess_toc(toc, features)
             usage = usage + postprocess_usage
+            toc = toc.sort_by_page()
 
+        toc = toc.sanitize_hierarchy()
         self.doc.set_toc(toc.to_list())
         self.doc.save(output_file)
 
@@ -846,7 +898,7 @@ class TOCGenerator:
         self,
         toc: TOC,
         features: list,
-        max_pages_for_reference_toc: int = 10,
+        max_pages_for_reference_toc: int = 20,
     ) -> tuple[TOC, TokenUsage]:
         """Postprocess a generated TOC using LLM to clean up and improve entries.
 
@@ -881,14 +933,22 @@ class TOCGenerator:
         # Only include a summary to keep token count reasonable
         features_summary = self._summarize_features_for_postprocessing(features)
 
+        # Detect front matter offset to warn the LLM
+        offset_note = self._detect_page_offset_note(toc, reference_text)
+
         user_content = f"""
 Please review and refine the following automatically generated Table of Contents.
 
 ## Generated TOC (to be refined)
 
+The page numbers below are **PDF page numbers** (physical position in the PDF file).
+For existing entries, prefer keeping these page numbers unchanged.
+
 {toc_entries_str if toc_entries_str else "(No entries were generated)"}
 
 ## Reference Text from First Pages (may contain printed TOC)
+
+{offset_note}
 
 {reference_text if reference_text else "(No text extracted from first pages)"}
 
@@ -896,7 +956,9 @@ Please review and refine the following automatically generated Table of Contents
 
 {features_summary}
 
-Please return a cleaned and improved TOC based on the guidelines in your instructions.
+Please return a cleaned and improved TOC. It is very important that you add any missing \
+sections or chapters visible in the printed TOC above. ALL page numbers in your output \
+must be PDF page numbers (not printed page numbers).
 """
 
         messages = [
@@ -911,6 +973,9 @@ Please return a cleaned and improved TOC based on the guidelines in your instruc
         # Make LLM call with retry logic
         console.print("[bold]Postprocessing TOC...[/bold]")
         refined_toc = self._invoke_with_retry(model, messages, "TOC postprocessing", input_tokens)
+
+        # Validate and correct page numbers if the LLM shifted to printed page numbers
+        refined_toc = self._correct_postprocessed_page_numbers(toc, refined_toc)
 
         # Estimate output tokens
         output_tokens = estimate_tokens(str(refined_toc.entries))
@@ -930,8 +995,201 @@ Please return a cleaned and improved TOC based on the guidelines in your instruc
 
         return refined_toc, usage
 
-    def _summarize_features_for_postprocessing(self, features: list, max_entries: int = 50) -> str:
+    def _detect_front_matter_offset(self, toc: TOC) -> int:
+        """Detect the number of front matter pages from Phase 1 TOC data.
+
+        Finds the first level-1 entry past page 5 whose title is not a known
+        front matter title (e.g. "Contents", "Preface") and assumes it
+        corresponds to the start of the main content (approximately printed page 1).
+
+        Args:
+            toc: The generated TOC with correct PDF page numbers.
+
+        Returns:
+            Estimated front matter offset (0 if no significant front matter detected).
+        """
+        for entry in toc.entries:
+            if entry.level == 1 and entry.page_number > 5:
+                title_clean = re.sub(r"[^\w\s]", "", entry.title.strip().lower())
+                title_clean = re.sub(r"\s+", " ", title_clean)
+                if not _FRONT_MATTER_TITLE_PATTERN.match(title_clean):
+                    return entry.page_number - 1
+        return 0
+
+    def _detect_page_offset_note(self, toc: TOC, reference_text: str) -> str:
+        """Detect the offset between PDF page numbers and printed page numbers.
+
+        Looks at the first chapter-level entry in the generated TOC to estimate
+        the front matter offset, then generates an explicit warning for the LLM.
+
+        Args:
+            toc: The generated TOC with correct PDF page numbers.
+            reference_text: The extracted reference text from first pages.
+
+        Returns:
+            A warning string to include in the postprocessor prompt, or empty string
+            if no offset is detected.
+        """
+        estimated_offset = self._detect_front_matter_offset(toc)
+
+        if estimated_offset < 3:
+            return ""
+
+        first_chapter_page = estimated_offset + 1
+
+        return (
+            f"**Note**: This document has approximately {estimated_offset} pages of front matter. "
+            f"The printed page numbers below (if any) start counting AFTER the front matter, "
+            f'so printed page "1" corresponds to approximately PDF page {first_chapter_page}. '
+            f"For existing entries, keep their PDF page numbers unchanged. "
+            f"For new entries from the printed TOC, convert to PDF page numbers by adding {estimated_offset}: "
+            f"printed page N \u2192 PDF page N + {estimated_offset}."
+        )
+
+    def _page_contains_heading(self, page_number: int, title: str, window: int = 1) -> bool:
+        """Check if a heading's text appears on or near the given page.
+
+        Args:
+            page_number: 1-indexed PDF page number to check.
+            title: The heading title to search for.
+            window: Number of pages before/after to also check.
+
+        Returns:
+            True if the title text is found on or near the page.
+        """
+        # Normalize: strip common prefixes, punctuation, lowercase, collapse whitespace
+        search_text = re.sub(r"^\d+\.\s*", "", title)  # Strip "1. " prefixes
+        search_text = re.sub(r"[^\w\s]", "", search_text)  # Strip all punctuation
+        search_text = re.sub(r"\s+", " ", search_text.strip().lower())
+
+        if len(search_text) < 3:
+            return False  # Too short to match reliably
+
+        start = max(0, page_number - 1 - window)
+        end = min(self.doc.page_count, page_number + window)
+
+        for page_idx in range(start, end):
+            page_text = self.doc[page_idx].get_text("text")
+            page_text_normalized = re.sub(r"[^\w\s]", "", page_text.lower())
+            page_text_normalized = re.sub(r"\s+", " ", page_text_normalized)
+            if search_text in page_text_normalized:
+                return True
+
+        return False
+
+    def _correct_postprocessed_page_numbers(self, original_toc: TOC, refined_toc: TOC) -> TOC:
+        """Correct page numbers for entries added or modified by the postprocessor.
+
+        Uses a deterministic strategy:
+        1. Detect the front matter offset from Phase 1 data.
+        2. For matched entries (exist in both original and refined): restore the
+           original PDF page number.
+        3. For new entries (only in refined) with significant front matter: verify
+           and apply the offset by checking the actual PDF text.
+
+        Args:
+            original_toc: The pre-postprocessing TOC with correct PDF page numbers.
+            refined_toc: The postprocessed TOC that may have shifted page numbers.
+
+        Returns:
+            The corrected TOC with PDF page numbers restored.
+        """
+        if not refined_toc.entries:
+            return refined_toc
+
+        # Step 1: Detect front matter offset from Phase 1 data
+        offset = self._detect_front_matter_offset(original_toc)
+
+        # Step 2: Build map of original entries (normalized title -> page_number)
+        def normalize(title: str) -> str:
+            title = re.sub(r"[^\w\s]", "", title)  # strip all punctuation
+            return re.sub(r"\s+", " ", title.strip().lower())
+
+        original_map: dict[str, tuple[int, int]] = {}  # normalized title -> (page_number, level)
+        for entry in original_toc.entries:
+            original_map[normalize(entry.title)] = (entry.page_number, entry.level)
+
+        def _fuzzy_match(key: str, level: int) -> int | None:
+            """Try multi-strategy matching against original_map.
+
+            Returns the original page number if matched, or None.
+            Strategies (in order):
+            1. Exact normalized match
+            2. Best substring containment (same level, min length and coverage ratio)
+            """
+            # Strategy 1: exact match (any level — the LLM may change levels)
+            if key in original_map:
+                return original_map[key][0]
+
+            # Strategy 2: collect ALL substring matches at the same level,
+            # then pick the best one (highest coverage ratio = shorter/longer).
+            best_page: int | None = None
+            best_ratio: float = 0.0
+
+            for orig_key, (orig_page, orig_level) in original_map.items():
+                if orig_level != level:
+                    continue
+                shorter_len = min(len(key), len(orig_key))
+                longer_len = max(len(key), len(orig_key))
+                if shorter_len < _FUZZY_MIN_SUBSTRING_LEN:
+                    continue
+                if not (orig_key in key or key in orig_key):
+                    continue
+                ratio = shorter_len / longer_len
+                if ratio < _FUZZY_MIN_COVERAGE_RATIO:
+                    continue
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_page = orig_page
+
+            return best_page
+
+        corrected = []
+        restored_count = 0
+        offset_applied_count = 0
+
+        for entry in refined_toc.entries:
+            key = normalize(entry.title)
+
+            matched_page = _fuzzy_match(key, entry.level)
+            if matched_page is not None:
+                # MATCHED: restore original PDF page number
+                if entry.page_number != matched_page:
+                    restored_count += 1
+                corrected.append(entry.model_copy(update={"page_number": matched_page}))
+
+            else:
+                # NEW entry — the LLM should have already output PDF page numbers.
+                # Use _page_contains_heading as a sanity check; if the heading isn't
+                # found at the given page but IS found at page+offset, apply the offset
+                # (handles the case where the LLM still used printed page numbers).
+                if (
+                    offset >= 3
+                    and not self._page_contains_heading(entry.page_number, entry.title)
+                    and 1 <= entry.page_number + offset <= self.doc.page_count
+                    and self._page_contains_heading(entry.page_number + offset, entry.title)
+                ):
+                    offset_applied_count += 1
+                    corrected.append(entry.model_copy(update={"page_number": entry.page_number + offset}))
+                else:
+                    corrected.append(entry)
+
+        # Log corrections
+        if restored_count > 0:
+            console.print(f"  [yellow]Restored page numbers for {restored_count} existing entries[/yellow]")
+        if offset_applied_count > 0:
+            console.print(
+                f"  [yellow]Applied front matter offset (+{offset}) to {offset_applied_count} new entries[/yellow]"
+            )
+
+        return TOC(entries=corrected)
+
+    def _summarize_features_for_postprocessing(self, features: list, max_entries: int = 150) -> str:
         """Create a compact summary of features for postprocessing context.
+
+        Samples spans evenly across the entire document rather than taking only
+        the first N sequentially. This ensures the postprocessor sees features
+        from chapter boundaries throughout the book, not just early pages.
 
         Args:
             features: Nested list of TOCFeature objects.
@@ -940,30 +1198,34 @@ Please return a cleaned and improved TOC based on the guidelines in your instruc
         Returns:
             A string summary of the most relevant features.
         """
-        summary_lines = []
-        entry_count = 0
-
+        # Flatten all TOCFeature spans into a single list
+        all_spans: list[TOCFeature] = []
         for block in features:
-            if entry_count >= max_entries:
-                break
             for line in block:
-                if entry_count >= max_entries:
-                    break
                 for span in line:
-                    if entry_count >= max_entries:
-                        break
                     if isinstance(span, TOCFeature):
-                        parts = [f"Page {span.page_number}"]
-                        if span.y_position is not None:
-                            parts[0] += f" @y={span.y_position}"
-                        parts.append(f"{span.font_name} {span.font_size}pt")
-                        if span.is_bold:
-                            parts.append("[bold]")
-                        parts.append(f'- "{span.text_snippet}"')
-                        summary_lines.append(" ".join(parts))
-                        entry_count += 1
+                        all_spans.append(span)
 
-        if not summary_lines:
+        if not all_spans:
             return "(No features available)"
+
+        # Sample evenly across the document
+        total = len(all_spans)
+        if total <= max_entries:
+            sampled = all_spans
+        else:
+            step = total / max_entries
+            sampled = [all_spans[int(i * step)] for i in range(max_entries)]
+
+        summary_lines = []
+        for span in sampled:
+            parts = [f"Page {span.page_number}"]
+            if span.y_position is not None:
+                parts[0] += f" @y={span.y_position}"
+            parts.append(f"{span.font_name} {span.font_size}pt")
+            if span.is_bold:
+                parts.append("[bold]")
+            parts.append(f'- "{span.text_snippet}"')
+            summary_lines.append(" ".join(parts))
 
         return "\n".join(summary_lines)

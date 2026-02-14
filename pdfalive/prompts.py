@@ -47,7 +47,7 @@ When you encounter a feature which you believe signifies a chapter or section he
 Each TOC entry should include:
 - Title: The text snippet of the feature.
 - Level: An integer representing the hierarchical level of the entry (1 for top-level chapters, 2 for sections, etc.). The user will instruct you on the maximum depth (level) to include.
-- Page Number: The page number where the feature is located (1-indexed).
+- Page Number: The PDF page number where the feature is located (1-indexed from the first physical page of the PDF file). Use this exact page number in your output — do not substitute printed page numbers visible in the text.
 - Confidence: A float between 0 and 1 indicating your confidence that this feature represents a TOC entry.
 
 Return the TOC as a list of entries, where each entry is represented as a dictionary with keys "title", "level", and "page_number".
@@ -100,7 +100,7 @@ When you encounter a feature which you believe signifies a chapter or section he
 Each TOC entry should include:
 - Title: The text snippet of the feature.
 - Level: An integer representing the hierarchical level of the entry (1 for top-level chapters, 2 for sections, etc.). The user will instruct you on the maximum depth (level) to include.
-- Page Number: The page number where the feature is located (1-indexed).
+- Page Number: The PDF page number where the feature is located (1-indexed from the first physical page of the PDF file). Use this exact page number in your output — do not substitute printed page numbers visible in the text.
 - Confidence: A float between 0 and 1 indicating your confidence that this feature represents a TOC entry.
 
 Return the TOC as a list of entries, where each entry is represented as a dictionary with keys "title", "level", and "page_number".
@@ -131,10 +131,21 @@ You will be given:
 Your job is to produce a cleaned, verified, and improved TOC by:
 - **Removing duplicates**: If the same chapter/section appears multiple times (exact or near-duplicates with typos), keep only one entry
 - **Fixing typos**: Correct obvious spelling mistakes in section titles
-- **Adjusting page numbers**: If a printed TOC exists in the document, use it as a reference. Note that page numbers in the printed TOC may differ from our 1-indexed page numbers due to front matter, but the *relative gaps* between sections should be similar
-- **Adding missing entries**: If the printed TOC shows sections that are missing from our generated TOC, add them with appropriate page number estimates
+- **Adding missing entries**: If the printed TOC shows sections that are missing from our generated TOC, add them (see page numbering rules below)
 - **Removing false positives**: Remove entries that don't appear to be actual chapter/section headings (e.g., running headers, page numbers, etc.)
 - **Fixing hierarchy levels**: Ensure level assignments are consistent (level 1 for chapters, level 2 for sections, etc.)
+
+### Page Numbering Note
+
+The page numbers in the **Generated TOC** are **PDF page numbers** (1-indexed from the very first physical page of the file). These should be preserved as-is for existing entries.
+
+The **printed TOC** in the reference text may use the **book's own page numbering**, which can differ from PDF page numbers when front matter is present (title page, copyright, preface, etc.). For example, printed page "1" might correspond to PDF page 16.
+
+- **For existing entries**: keep their page numbers EXACTLY as given — they are already correct PDF page numbers.
+  Do NOT replace them with printed page numbers from the reference text.
+- **For new entries**: you MUST output PDF page numbers, not printed page numbers. If the user message
+  provides a front matter offset, add that offset to any printed page number to get the PDF page number.
+  For example, if the offset is 15 and the printed TOC says page 1, output page 16.
 
 ## Input Format
 
@@ -155,11 +166,14 @@ Return a refined TOC as a list of entries, where each entry includes:
 
 1. **Trust the printed TOC for section names** if one exists - it's authoritative for what sections exist
 2. **Preserve section numbering**: If the extracted heading includes a section number prefix (e.g., "4.1 Some Text", "Chapter 3: Title"), ALWAYS keep the numbering in the title even if the printed TOC omits it. Section numbers are valuable navigational aids in bookmarks.
-3. **Be careful with page number adjustments** - only change them if you have strong evidence from the printed TOC
+3. **Always output PDF page numbers** — for existing entries, keep their page numbers unchanged.
+   For new entries, convert printed page numbers to PDF page numbers using the front matter offset
+   provided in the user message.
 4. **Preserve entries you're unsure about** rather than removing them - it's better to have extra entries than miss important ones
-5. **Use the document features** to verify that headings actually exist at the claimed page numbers
+5. **Use the document features** to verify that headings actually exist at the claimed PDF pages
 6. **Maintain the original structure** when possible - don't reorganize unless clearly wrong
 7. **Set high confidence (0.9+)** for entries verified against a printed TOC, lower confidence for entries you're less certain about
+8. **Page number ordering**: Output entries with non-decreasing page numbers. If you notice a later entry has a smaller page number than an earlier entry, re-check and correct the page numbers so the sequence is monotonically non-decreasing
 
 """
 

@@ -180,6 +180,20 @@ def generate_toc(
             f"using model [bold magenta]{model_identifier}[/bold magenta]..."
         )
 
+    # Show active options summary
+    options_parts = []
+    if force:
+        options_parts.append("force")
+    if postprocess:
+        options_parts.append("postprocess")
+    if ocr:
+        options_parts.append(f"ocr ({ocr_language}, {ocr_dpi} DPI)")
+        if ocr_output:
+            options_parts.append("ocr-output")
+    else:
+        options_parts.append("ocr disabled")
+    console.print(f"  Options: [cyan]{', '.join(options_parts)}[/cyan]")
+
     try:
         doc = pymupdf.open(input_file)
         original_doc = None  # Keep reference to original if we need to discard OCR

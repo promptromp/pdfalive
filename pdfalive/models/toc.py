@@ -35,6 +35,57 @@ class TOC(BaseModel):
         """Convert TOC to list format compatible with PyMuPDF `set_toc()`."""
         return [entry.to_list() for entry in self.entries]
 
+    def sanitize_hierarchy(self) -> "TOC":
+        """Sanitize TOC hierarchy to satisfy PyMuPDF's set_toc() constraints.
+
+        PyMuPDF requires:
+        - The first entry must have level 1
+        - Each entry's level can be at most 1 higher than the previous entry's level
+
+        This method adjusts levels that violate these constraints while preserving
+        the relative hierarchy as much as possible.
+
+        Returns:
+            A new TOC with valid hierarchy levels.
+        """
+        if not self.entries:
+            return self
+
+        sanitized: list[TOCEntry] = []
+        for i, entry in enumerate(self.entries):
+            if i == 0:
+                # First entry must be level 1
+                new_level = 1
+            else:
+                prev_level = sanitized[i - 1].level
+                # Level can increase by at most 1 from previous
+                new_level = min(entry.level, prev_level + 1)
+
+            # Level must be at least 1
+            new_level = max(1, new_level)
+
+            if new_level != entry.level:
+                sanitized.append(entry.model_copy(update={"level": new_level}))
+            else:
+                sanitized.append(entry)
+
+        return TOC(entries=sanitized)
+
+    def sort_by_page(self) -> "TOC":
+        """Sort TOC entries by page number to enforce monotonicity.
+
+        Entries are sorted by (page_number, level) so that page numbers are
+        non-decreasing.  Ties on the same page are broken by level so that
+        parent entries come before their children.
+
+        Returns:
+            A new TOC with entries sorted by page number.
+        """
+        if not self.entries:
+            return self
+        sorted_entries = sorted(self.entries, key=lambda e: (e.page_number, e.level))
+        return TOC(entries=sorted_entries)
+
     def merge(self, other: "TOC") -> "TOC":
         """Merge another TOC into this one, handling duplicates.
 
