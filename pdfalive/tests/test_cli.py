@@ -3,6 +3,7 @@
 import os
 import stat
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -169,26 +170,25 @@ class TestRenameInputFile:
             assert result.exit_code != 0
             assert "No valid file paths found" in result.output
 
-    @pytest.mark.slow
-    def test_input_file_skips_comments_and_blank_lines(self, runner: CliRunner) -> None:
+    @patch("pdfalive.cli.RenameProcessor")
+    @patch("pdfalive.cli.init_chat_model")
+    def test_input_file_skips_comments_and_blank_lines(
+        self, mock_init_chat_model: MagicMock, mock_processor_cls: MagicMock, runner: CliRunner
+    ) -> None:
         """Test that --input-file correctly skips comments and blank lines."""
+        # Make processor.generate_renames return empty result to short-circuit
+        mock_processor = mock_processor_cls.return_value
+        mock_result = MagicMock()
+        mock_result.operations = []
+        mock_processor.generate_renames.return_value = (mock_result, MagicMock())
+
         with runner.isolated_filesystem():
-            # Create test files
             Path("file1.pdf").write_bytes(b"%PDF-1.4 dummy")
             Path("file2.pdf").write_bytes(b"%PDF-1.4 dummy")
 
-            # Create input file with comments and blank lines
-            input_content = """# This is a comment
-file1.pdf
-
-# Another comment
-file2.pdf
-
-"""
+            input_content = "# This is a comment\nfile1.pdf\n\n# Another comment\nfile2.pdf\n\n"
             Path("paths.txt").write_text(input_content)
 
-            # The command will fail when trying to actually process (no valid PDF/LLM)
-            # but we can verify it parsed the file correctly by checking the file count
             result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
             # Should show "2 file(s)" (parsed correctly, skipping comments)
             assert "2" in result.output and "file" in result.output
