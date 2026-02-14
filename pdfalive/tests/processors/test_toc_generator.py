@@ -7,6 +7,7 @@ import pytest
 
 from pdfalive.models.toc import TOC, TOCEntry, TOCFeature
 from pdfalive.processors.toc_generator import (
+    _FRONT_MATTER_TITLES,
     _LETTERSPACED_PATTERN,
     _SECTION_NUMBER_PATTERN,
     TOCGenerator,
@@ -1709,7 +1710,7 @@ class TestDetectPageOffsetNote:
         assert generator._detect_page_offset_note(toc, "some text") == ""
 
     def test_significant_offset_generates_warning(self, generator):
-        """Offset of 15 generates a warning with correct page reference."""
+        """Offset of 15 generates a warning with correct page reference and conversion formula."""
         toc = TOC(
             entries=[
                 TOCEntry(title="Table of Contents", page_number=3, level=1, confidence=0.9),
@@ -1720,6 +1721,8 @@ class TestDetectPageOffsetNote:
         assert "Note" in note
         assert "15" in note  # estimated offset
         assert "PDF page 16" in note
+        assert "adding 15" in note  # explicit conversion formula
+        assert "N + 15" in note  # conversion formula
 
     def test_skips_early_level1_entries(self, generator):
         """Entries in first 5 pages (like preface/TOC) are skipped for offset detection."""
@@ -1732,6 +1735,19 @@ class TestDetectPageOffsetNote:
         note = generator._detect_page_offset_note(toc, "some text")
         assert "Note" in note
         assert "21" in note  # offset = 22 - 1
+        assert "PDF page 22" in note
+
+    def test_skips_front_matter_titles_past_page_5(self, generator):
+        """Front matter titles like 'Contents' past page 5 are skipped for offset."""
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Contents", page_number=10, level=1, confidence=0.9),
+                TOCEntry(title="Chapter I", page_number=22, level=1, confidence=0.95),
+            ]
+        )
+        note = generator._detect_page_offset_note(toc, "some text")
+        assert "Note" in note
+        assert "21" in note  # offset from Chapter I (22-1), not Contents (10-1)
         assert "PDF page 22" in note
 
 
@@ -1788,6 +1804,45 @@ class TestDetectFrontMatterOffset:
         """Offset is always first qualifying page_number - 1."""
         toc = self._make_toc([("Chapter I", page_number, 1)])
         assert generator._detect_front_matter_offset(toc) == expected_offset
+
+    @pytest.mark.parametrize(
+        "front_matter_title",
+        [
+            "Contents",
+            "Table of Contents",
+            "Preface",
+            "Foreword",
+            "Acknowledgements",
+            "Acknowledgments",
+        ],
+    )
+    def test_skips_front_matter_titles(self, generator, front_matter_title):
+        """Known front matter titles past page 5 are skipped for offset detection."""
+        toc = self._make_toc(
+            [
+                (front_matter_title, 10, 1),
+                ("Chapter I", 22, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 21  # 22 - 1, not 9
+
+    def test_skips_contents_picks_first_real_chapter(self, generator):
+        """Contents at page 10 is skipped; offset comes from the real first chapter."""
+        toc = self._make_toc(
+            [
+                ("Contents", 10, 1),
+                ("Preface", 12, 1),
+                ("Introduction", 16, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 15  # 16 - 1
+
+    def test_front_matter_titles_constant_has_expected_entries(self):
+        """Verify the _FRONT_MATTER_TITLES constant contains expected values."""
+        assert "contents" in _FRONT_MATTER_TITLES
+        assert "table of contents" in _FRONT_MATTER_TITLES
+        assert "preface" in _FRONT_MATTER_TITLES
+        assert "foreword" in _FRONT_MATTER_TITLES
 
 
 class TestPageContainsHeading:
@@ -1861,69 +1916,21 @@ class TestPageContainsHeading:
         # page_number=1, window=1 → search pages 0..1 (clamped, not -1..1)
         assert generator._page_contains_heading(1, "Preface to the Book") is True
 
+    def test_strips_punctuation_from_title(self, generator):
+        """Colons and other punctuation in the title are stripped before matching."""
+        # PDF text has words as separate spans without punctuation between them
+        generator.doc._page_texts[15] = "Introduction The Nature of Probability Theory"
+        assert generator._page_contains_heading(16, "Introduction: The Nature of Probability Theory") is True
 
-class TestResolvePageNumber:
-    """Tests for _resolve_page_number."""
+    def test_strips_punctuation_from_page_text(self, generator):
+        """Punctuation in the page text is also stripped."""
+        generator.doc._page_texts[15] = "Chapter I: The Sample Space"
+        assert generator._page_contains_heading(16, "Chapter I The Sample Space") is True
 
-    @pytest.fixture
-    def mock_doc_with_pages(self):
-        """Create a mock document with configurable page text."""
-        doc = MagicMock()
-        doc.page_count = 600
-        doc.get_toc.return_value = []
-        doc.name = None
-
-        page_texts = {}
-
-        def get_page(idx):
-            page = MagicMock()
-            text = page_texts.get(idx, "")
-            page.get_text.return_value = text
-            return page
-
-        doc.__getitem__ = lambda self, idx: get_page(idx)
-        doc._page_texts = page_texts
-        return doc
-
-    @pytest.fixture
-    def generator(self, mock_doc_with_pages, mock_llm):
-        return TOCGenerator(doc=mock_doc_with_pages, llm=mock_llm)
-
-    def test_returns_corrected_page_when_heading_found_at_corrected(self, generator):
-        """When heading is found at offset-corrected page, returns corrected page."""
-        offset = 15
-        # Heading "Methods" at printed page 10 → should be PDF page 25
-        generator.doc._page_texts[24] = "Methods and Materials"
-        result = generator._resolve_page_number("Methods", 10, offset)
-        assert result == 25  # 10 + 15
-
-    def test_returns_original_page_when_heading_found_at_original(self, generator):
-        """When heading only found at original page (already correct PDF page), keeps it."""
-        offset = 15
-        # Heading at original page 30 (already a PDF page number)
-        generator.doc._page_texts[29] = "Results and Discussion"
-        result = generator._resolve_page_number("Results", 30, offset)
-        assert result == 30
-
-    def test_defaults_to_corrected_when_not_found_anywhere(self, generator):
-        """When heading not found at either page, defaults to offset-corrected."""
-        offset = 15
-        result = generator._resolve_page_number("Unknown Chapter", 10, offset)
-        assert result == 25  # 10 + 15 (default)
-
-    def test_keeps_original_when_corrected_out_of_range(self, generator):
-        """When corrected page exceeds document length, keeps original."""
-        generator.doc.page_count = 100
-        result = generator._resolve_page_number("Appendix", 90, 15)
-        assert result == 90  # 90 + 15 = 105 > 100
-
-    def test_prefers_corrected_over_original_when_both_match(self, generator):
-        """When heading found at both pages, prefers corrected (checked first)."""
-        offset = 15
-        generator.doc._page_texts[24] = "Methods in Science"
-        generator.doc._page_texts[9] = "Methods in Science"
-        result = generator._resolve_page_number("Methods", 10, offset)
-        assert result == 25  # corrected is checked first
+    def test_matches_with_mixed_punctuation(self, generator):
+        """Both title and page text have different punctuation; still matches."""
+        generator.doc._page_texts[15] = "Results — Discussion & Analysis"
+        assert generator._page_contains_heading(16, "Results: Discussion & Analysis") is True
 
 
 class TestCorrectPostprocessedPageNumbers:
@@ -1999,11 +2006,11 @@ class TestCorrectPostprocessedPageNumbers:
         assert result.entries[1].page_number == 22
         assert result.entries[2].page_number == 41
 
-    def test_applies_offset_to_new_entries(self, generator):
-        """New entries from the postprocessor get the front matter offset applied."""
-        # Set up page text so _resolve_page_number finds headings at corrected pages
-        generator.doc._page_texts[24] = "Subsection 1.1 content"  # PDF page 25
-        generator.doc._page_texts[34] = "Subsection 1.2 content"  # PDF page 35
+    def test_applies_offset_to_new_entries_when_heading_found_at_corrected_page(self, generator):
+        """New entries get offset applied when heading found at corrected page but not original."""
+        # Heading text exists at corrected pages (page+offset), NOT at original pages
+        generator.doc._page_texts[24] = "Subsection 1.1 content"  # PDF page 25 = 10+15
+        generator.doc._page_texts[34] = "Subsection 1.2 content"  # PDF page 35 = 20+15
 
         original = self._make_toc(
             [
@@ -2017,8 +2024,8 @@ class TestCorrectPostprocessedPageNumbers:
             [
                 ("Introduction", 16, 1),
                 ("Chapter I", 22, 1),
-                ("Subsection 1.1", 10, 2),  # printed page → needs +15
-                ("Subsection 1.2", 20, 2),  # printed page → needs +15
+                ("Subsection 1.1", 10, 2),  # printed page → sanity check finds at 25
+                ("Subsection 1.2", 20, 2),  # printed page → sanity check finds at 35
                 ("Chapter II", 41, 1),
             ]
         )
@@ -2061,8 +2068,8 @@ class TestCorrectPostprocessedPageNumbers:
         # offset = 0 (no level-1 entry past page 5), so new entry kept as-is
         assert result.entries[1].page_number == 10
 
-    def test_new_entry_keeps_original_when_already_correct_pdf_page(self, generator):
-        """New entry with correct PDF page number is verified and kept."""
+    def test_new_entry_keeps_page_when_heading_found_at_original(self, generator):
+        """New entry with correct PDF page number is kept when heading found there."""
         # Set heading text at PDF page 30 (the original page), not at corrected page 45
         generator.doc._page_texts[29] = "Special Section content here"
 
@@ -2080,6 +2087,22 @@ class TestCorrectPostprocessedPageNumbers:
         result = generator._correct_postprocessed_page_numbers(original, refined)
         assert result.entries[1].page_number == 30  # kept, found at original page
 
+    def test_new_entry_kept_as_is_when_heading_not_found_anywhere(self, generator):
+        """New entry kept as-is when heading not found at either original or corrected page."""
+        original = self._make_toc(
+            [
+                ("Chapter I", 16, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Chapter I", 16, 1),
+                ("Mystery Section", 25, 2),  # not found anywhere
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[1].page_number == 25  # kept as-is (LLM should output PDF pages)
+
     def test_title_matching_is_case_insensitive(self, generator):
         """Title matching between original and refined is case-insensitive."""
         original = self._make_toc(
@@ -2092,6 +2115,76 @@ class TestCorrectPostprocessedPageNumbers:
             [
                 ("introduction", 1, 1),
                 ("Chapter I", 7, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 16
+        assert result.entries[1].page_number == 22
+
+    def test_fuzzy_match_substring_containment(self, generator):
+        """Refined title that is a superstring of original title matches via substring."""
+        original = self._make_toc(
+            [
+                ("INTRODUCTION", 16, 1),
+                ("Chapter I", 22, 1),
+            ]
+        )
+        # Postprocessor expanded the title with a subtitle
+        refined = self._make_toc(
+            [
+                ("Introduction: The Nature of Probability Theory", 1, 1),
+                ("Chapter I", 7, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 16  # matched via substring
+        assert result.entries[1].page_number == 22
+
+    def test_fuzzy_match_original_substring_of_refined(self, generator):
+        """Original title that is a substring of refined title matches."""
+        original = self._make_toc(
+            [
+                ("The Exponential and the Uniform Densities", 100, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("The Exponential and the Uniform Densities: Extended", 85, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 100  # matched via substring
+
+    def test_fuzzy_match_skips_short_substrings(self, generator):
+        """Substring matching requires minimum 8 chars for the shorter string."""
+        # All entries at page ≤5 so no offset is detected
+        original = self._make_toc(
+            [
+                ("Methods", 4, 1),  # only 7 chars — too short for substring match
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Methods and Materials Analysis", 50, 1),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        # "methods" is 7 chars, below 8-char minimum — should NOT match via substring
+        # No offset detected (page ≤5), so kept as-is
+        assert result.entries[0].page_number == 50  # no match, kept as-is
+
+    def test_punctuation_stripped_in_title_matching(self, generator):
+        """Punctuation in titles is stripped for matching."""
+        original = self._make_toc(
+            [
+                ("INTRODUCTION", 16, 1),
+                ("Chapter I: The Sample Space", 22, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Introduction", 1, 1),
+                ("Chapter I - The Sample Space", 7, 1),
             ]
         )
         result = generator._correct_postprocessed_page_numbers(original, refined)

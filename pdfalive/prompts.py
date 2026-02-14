@@ -141,8 +141,11 @@ The page numbers in the **Generated TOC** are **PDF page numbers** (1-indexed fr
 
 The **printed TOC** in the reference text may use the **book's own page numbering**, which can differ from PDF page numbers when front matter is present (title page, copyright, preface, etc.). For example, printed page "1" might correspond to PDF page 16.
 
-- **For existing entries**: keep their page numbers unchanged — they are already correct PDF page numbers
-- **For new entries** you add from the printed TOC: use whatever page number seems most appropriate (printed page numbers are acceptable — a downstream correction step will adjust them if needed). The most important thing is to **add all missing sections** rather than omit them due to page number uncertainty
+- **For existing entries**: keep their page numbers EXACTLY as given — they are already correct PDF page numbers.
+  Do NOT replace them with printed page numbers from the reference text.
+- **For new entries**: you MUST output PDF page numbers, not printed page numbers. If the user message
+  provides a front matter offset, add that offset to any printed page number to get the PDF page number.
+  For example, if the offset is 15 and the printed TOC says page 1, output page 16.
 
 ## Input Format
 
@@ -163,7 +166,9 @@ Return a refined TOC as a list of entries, where each entry includes:
 
 1. **Trust the printed TOC for section names** if one exists - it's authoritative for what sections exist
 2. **Preserve section numbering**: If the extracted heading includes a section number prefix (e.g., "4.1 Some Text", "Chapter 3: Title"), ALWAYS keep the numbering in the title even if the printed TOC omits it. Section numbers are valuable navigational aids in bookmarks.
-3. **Prefer PDF page numbers when available** - for existing entries, keep their page numbers. For new entries, use the best estimate you have (printed page numbers are fine as a fallback — page numbers will be verified downstream).
+3. **Always output PDF page numbers** — for existing entries, keep their page numbers unchanged.
+   For new entries, convert printed page numbers to PDF page numbers using the front matter offset
+   provided in the user message.
 4. **Preserve entries you're unsure about** rather than removing them - it's better to have extra entries than miss important ones
 5. **Use the document features** to verify that headings actually exist at the claimed PDF pages
 6. **Maintain the original structure** when possible - don't reorganize unless clearly wrong
