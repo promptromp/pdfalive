@@ -2,6 +2,7 @@
 
 import re
 import time
+import warnings
 from collections import Counter
 from collections.abc import Iterator
 from multiprocessing import Pool, cpu_count
@@ -706,7 +707,13 @@ class TOCGenerator:
         console.print(f"  [dim]Invoking LLM for {batch_description} (~{input_tokens:,} input tokens)...[/dim]")
         start_time = time.time()
 
-        response = _invoke()
+        # Suppress PydanticSerializationUnexpectedValue warnings emitted by LangChain's
+        # with_structured_output() wrapper. The parsed output is correct; the warning is a
+        # known LangChain + Pydantic compatibility issue (the union serializer for the
+        # response type warns "Expected `none`" even though the value is valid).
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Expected `none`", category=UserWarning)
+            response = _invoke()
 
         elapsed = time.time() - start_time
         console.print(f"  [green]Completed {batch_description} in {elapsed:.1f}s[/green]")

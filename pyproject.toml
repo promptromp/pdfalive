@@ -44,8 +44,10 @@ dev = [
     "pytest-cov>=7.0.0",
     "ruff>=0.14.8",
 ]
+openai = ["langchain-openai>=1.1.7"]
 
-
+[tool.uv]
+default-groups = ["dev", "openai"]
 
 [project.scripts]
 pdfalive = "pdfalive.cli:cli"
