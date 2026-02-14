@@ -1714,7 +1714,7 @@ class TestDetectPageOffsetNote:
         toc = TOC(
             entries=[
                 TOCEntry(title="Table of Contents", page_number=3, level=1, confidence=0.9),
-                TOCEntry(title="Introduction", page_number=16, level=1, confidence=0.95),
+                TOCEntry(title="Chapter I", page_number=16, level=1, confidence=0.95),
             ]
         )
         note = generator._detect_page_offset_note(toc, "some text")
@@ -1772,15 +1772,15 @@ class TestDetectFrontMatterOffset:
         assert generator._detect_front_matter_offset(toc) == 0
 
     def test_first_level1_past_page_5_returns_offset(self, generator):
-        """First level-1 entry past page 5 determines the offset."""
+        """First non-front-matter level-1 entry past page 5 determines the offset."""
         toc = self._make_toc(
             [
                 ("Table of Contents", 3, 1),
-                ("Introduction", 16, 1),
-                ("Chapter II", 41, 1),
+                ("Introduction", 16, 1),  # front matter title, skipped
+                ("Chapter I", 17, 1),
             ]
         )
-        assert generator._detect_front_matter_offset(toc) == 15  # 16 - 1
+        assert generator._detect_front_matter_offset(toc) == 16  # 17 - 1
 
     def test_skips_level2_entries(self, generator):
         """Level-2 entries are ignored for offset detection."""
@@ -1810,6 +1810,7 @@ class TestDetectFrontMatterOffset:
         [
             "Contents",
             "Table of Contents",
+            "Introduction",
             "Preface",
             "Foreword",
             "Acknowledgements",
@@ -1826,21 +1827,42 @@ class TestDetectFrontMatterOffset:
         )
         assert generator._detect_front_matter_offset(toc) == 21  # 22 - 1, not 9
 
-    def test_skips_contents_picks_first_real_chapter(self, generator):
-        """Contents at page 10 is skipped; offset comes from the real first chapter."""
+    def test_skips_all_front_matter_picks_first_real_chapter(self, generator):
+        """All front matter titles are skipped; offset comes from the real first chapter."""
         toc = self._make_toc(
             [
                 ("Contents", 10, 1),
                 ("Preface", 12, 1),
                 ("Introduction", 16, 1),
+                ("Chapter I", 18, 1),
             ]
         )
-        assert generator._detect_front_matter_offset(toc) == 15  # 16 - 1
+        assert generator._detect_front_matter_offset(toc) == 17  # 18 - 1
+
+    @pytest.mark.parametrize(
+        "front_matter_title",
+        [
+            "Acknowledgments for the English Edition",
+            "Foreword to the Second Edition",
+            "Preface to the Revised Edition",
+            "Contents of Volume II",
+        ],
+    )
+    def test_skips_front_matter_titles_with_suffixes(self, generator, front_matter_title):
+        """Front matter titles with extra suffixes are still recognized and skipped."""
+        toc = self._make_toc(
+            [
+                (front_matter_title, 10, 1),
+                ("Chapter I", 22, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 21  # 22 - 1, not 9
 
     def test_front_matter_titles_constant_has_expected_entries(self):
         """Verify the _FRONT_MATTER_TITLES constant contains expected values."""
         assert "contents" in _FRONT_MATTER_TITLES
         assert "table of contents" in _FRONT_MATTER_TITLES
+        assert "introduction" in _FRONT_MATTER_TITLES
         assert "preface" in _FRONT_MATTER_TITLES
         assert "foreword" in _FRONT_MATTER_TITLES
 
@@ -2008,22 +2030,21 @@ class TestCorrectPostprocessedPageNumbers:
 
     def test_applies_offset_to_new_entries_when_heading_found_at_corrected_page(self, generator):
         """New entries get offset applied when heading found at corrected page but not original."""
+        # offset = 15 (from "Chapter I" at page 16, 16-1=15)
         # Heading text exists at corrected pages (page+offset), NOT at original pages
         generator.doc._page_texts[24] = "Subsection 1.1 content"  # PDF page 25 = 10+15
         generator.doc._page_texts[34] = "Subsection 1.2 content"  # PDF page 35 = 20+15
 
         original = self._make_toc(
             [
-                ("Introduction", 16, 1),
-                ("Chapter I", 22, 1),
+                ("Chapter I", 16, 1),
                 ("Chapter II", 41, 1),
             ]
         )
         # Postprocessor keeps existing entries and adds new ones with printed page numbers
         refined = self._make_toc(
             [
-                ("Introduction", 16, 1),
-                ("Chapter I", 22, 1),
+                ("Chapter I", 16, 1),
                 ("Subsection 1.1", 10, 2),  # printed page → sanity check finds at 25
                 ("Subsection 1.2", 20, 2),  # printed page → sanity check finds at 35
                 ("Chapter II", 41, 1),
@@ -2031,10 +2052,9 @@ class TestCorrectPostprocessedPageNumbers:
         )
         result = generator._correct_postprocessed_page_numbers(original, refined)
         assert result.entries[0].page_number == 16  # matched, restored
-        assert result.entries[1].page_number == 22  # matched, restored
-        assert result.entries[2].page_number == 25  # new, offset applied (10 + 15)
-        assert result.entries[3].page_number == 35  # new, offset applied (20 + 15)
-        assert result.entries[4].page_number == 41  # matched, restored
+        assert result.entries[1].page_number == 25  # new, offset applied (10 + 15)
+        assert result.entries[2].page_number == 35  # new, offset applied (20 + 15)
+        assert result.entries[3].page_number == 41  # matched, restored
 
     def test_empty_refined_toc_returned_as_is(self, generator):
         """Empty refined TOC is returned unchanged."""
@@ -2154,6 +2174,27 @@ class TestCorrectPostprocessedPageNumbers:
         )
         result = generator._correct_postprocessed_page_numbers(original, refined)
         assert result.entries[0].page_number == 100  # matched via substring
+
+    def test_fuzzy_match_substring_skips_cross_level(self, generator):
+        """Substring matching does not match across different hierarchy levels."""
+        original = self._make_toc(
+            [
+                ("Introduction", 15, 1),  # level 1 front matter entry
+                ("Chapter I", 17, 1),
+            ]
+        )
+        # Postprocessor added a section-level "1. Introduction" under Chapter I
+        refined = self._make_toc(
+            [
+                ("Introduction", 15, 1),
+                ("Chapter I", 17, 1),
+                ("1. Introduction", 136, 2),  # level 2 — should NOT match level 1 "Introduction"
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[0].page_number == 15  # exact match, restored
+        assert result.entries[1].page_number == 17  # exact match, restored
+        assert result.entries[2].page_number == 136  # no cross-level match, kept as-is
 
     def test_fuzzy_match_skips_short_substrings(self, generator):
         """Substring matching requires minimum 8 chars for the shorter string."""

@@ -66,6 +66,7 @@ _FRONT_MATTER_TITLES = frozenset(
     {
         "contents",
         "table of contents",
+        "introduction",
         "preface",
         "foreword",
         "acknowledgements",
@@ -993,7 +994,7 @@ must be PDF page numbers (not printed page numbers).
             if entry.level == 1 and entry.page_number > 5:
                 title_clean = re.sub(r"[^\w\s]", "", entry.title.strip().lower())
                 title_clean = re.sub(r"\s+", " ", title_clean)
-                if title_clean not in _FRONT_MATTER_TITLES:
+                if not any(title_clean == fm or title_clean.startswith(fm + " ") for fm in _FRONT_MATTER_TITLES):
                     return entry.page_number - 1
         return 0
 
@@ -1086,24 +1087,27 @@ must be PDF page numbers (not printed page numbers).
             title = re.sub(r"[^\w\s]", "", title)  # strip all punctuation
             return re.sub(r"\s+", " ", title.strip().lower())
 
-        original_map: dict[str, int] = {}
+        original_map: dict[str, tuple[int, int]] = {}  # normalized title -> (page_number, level)
         for entry in original_toc.entries:
-            original_map[normalize(entry.title)] = entry.page_number
+            original_map[normalize(entry.title)] = (entry.page_number, entry.level)
 
-        def _fuzzy_match(key: str) -> int | None:
+        def _fuzzy_match(key: str, level: int) -> int | None:
             """Try multi-strategy matching against original_map.
 
             Returns the original page number if matched, or None.
             Strategies (in order):
             1. Exact normalized match
-            2. Substring containment (min 8 chars for shorter string)
+            2. Substring containment (min 8 chars for shorter string, same level only)
             """
-            # Strategy 1: exact match
+            # Strategy 1: exact match (any level — the LLM may change levels)
             if key in original_map:
-                return original_map[key]
+                return original_map[key][0]
 
-            # Strategy 2: substring containment
-            for orig_key, orig_page in original_map.items():
+            # Strategy 2: substring containment (same level only to avoid
+            # matching e.g. "1. Introduction" (level 2) to "Introduction" (level 1))
+            for orig_key, (orig_page, orig_level) in original_map.items():
+                if orig_level != level:
+                    continue
                 shorter = min(len(key), len(orig_key))
                 if shorter >= 8 and (orig_key in key or key in orig_key):
                     return orig_page
@@ -1117,7 +1121,7 @@ must be PDF page numbers (not printed page numbers).
         for entry in refined_toc.entries:
             key = normalize(entry.title)
 
-            matched_page = _fuzzy_match(key)
+            matched_page = _fuzzy_match(key, entry.level)
             if matched_page is not None:
                 # MATCHED: restore original PDF page number
                 if entry.page_number != matched_page:
