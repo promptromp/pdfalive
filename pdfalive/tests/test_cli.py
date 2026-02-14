@@ -169,6 +169,7 @@ class TestRenameInputFile:
             assert result.exit_code != 0
             assert "No valid file paths found" in result.output
 
+    @pytest.mark.slow
     def test_input_file_skips_comments_and_blank_lines(self, runner: CliRunner) -> None:
         """Test that --input-file correctly skips comments and blank lines."""
         with runner.isolated_filesystem():

@@ -91,6 +91,9 @@ no-lines-before = ["standard-library"]
 quote-style = "double"
 
 [tool.pytest.ini_options]
+markers = [
+    "slow: marks tests that make real LLM/network calls (deselect with '-m \"not slow\"')",
+]
 filterwarnings = [
     # Ignore SWIG-related deprecation warnings from PyMuPDF (Python 3.13 compatibility issue)
     "ignore:builtin type Swig.*:DeprecationWarning",
