@@ -102,6 +102,11 @@ The CLI supports TOML configuration files (`pdfalive.toml` or `.pdfalive.toml`) 
 
 The config is loaded via an eager callback on the `--config` option in `cli.py`. Global settings apply to all LLM-using commands, and command-specific settings override globals. CLI arguments always take precedence over config file values.
 
+## Special Instructions
+
+- After making major changes to functionality, CLI options, or project architecture, always review and update all documentation to stay in sync: `README.md`, `docs/usage.md`, and `CLAUDE.md`. Docs should accurately reflect current defaults, option names, and feature descriptions.
+- When adding or removing CLI configuration options, also update the example `pdfalive.toml` snippets in `README.md` and `docs/usage.md`, as well as the config models in `pdfalive/config/models.py`.
+
 ## Development Guidelines
 
 - always prefer placing imports at top of files rather than inline. Especially when writing unit-test. only do otherwise to avoid circular dependencies in rare cases. In those cases, mention explicitly why you are doing this in a comment on the relevant code line.
