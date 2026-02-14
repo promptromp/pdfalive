@@ -7,6 +7,8 @@ import pytest
 
 from pdfalive.models.toc import TOC, TOCEntry, TOCFeature
 from pdfalive.processors.toc_generator import (
+    _LETTERSPACED_PATTERN,
+    _SECTION_NUMBER_PATTERN,
     TOCGenerator,
     _compute_body_font_profile,
     _extract_features_from_page_range,
@@ -1412,3 +1414,264 @@ class TestHeadingCandidateIntegration:
         first_span = features[0][0][0]
         assert first_span.y_position == round(100 / 800, 2)
         assert first_span.is_bold is True
+
+
+class TestRomanNumeralAndLetterspacedPatterns:
+    """Tests for Roman numeral and letter-spaced heading detection."""
+
+    @pytest.fixture
+    def body_font_name(self):
+        return "Times-Roman"
+
+    @pytest.fixture
+    def body_font_size(self):
+        return 12.0
+
+    @pytest.mark.parametrize(
+        "text,should_match",
+        [
+            # Roman numerals that should match _SECTION_NUMBER_PATTERN
+            ("I THE SAMPLE SPACE", True),
+            ("II ELEMENTS OF COMBINATORIAL ANALYSIS", True),
+            ("III FLUCTUATIONS IN COIN TOSSING", True),
+            ("IV COMBINATION OF EVENTS", True),
+            ("V CONDITIONAL PROBABILITY", True),
+            ("IX THE BERNOULLI SCHEME", True),
+            ("XIV RANDOM VARIABLES", True),
+            ("XVII THE EXPONENTIAL", True),
+            ("IV. Some Section", True),
+            # Letter-spaced text that should match _LETTERSPACED_PATTERN
+            ("C H A P T E R  I", True),
+            ("P R E F A C E", True),
+            ("C H A P T E R  XIV", True),
+            # Arabic that should still match
+            ("1. The Empirical Background", True),
+            ("1.2 Subsection Title", True),
+            ("Chapter 3 Overview", True),
+            ("Appendix A Details", True),
+            # "I " matches Roman numeral pattern — accepted trade-off, LLM filters it
+            ("I went to the store", True),
+            # Should NOT match
+            ("Some random text", False),
+            ("The quick brown fox", False),
+        ],
+    )
+    def test_section_pattern_matches(self, text, should_match):
+        """Test that _SECTION_NUMBER_PATTERN and _LETTERSPACED_PATTERN match expected text."""
+        matches_section = bool(_SECTION_NUMBER_PATTERN.match(text))
+        matches_letterspaced = bool(_LETTERSPACED_PATTERN.match(text))
+        result = matches_section or matches_letterspaced
+        assert result == should_match, f"Text '{text}' expected match={should_match}, got {result}"
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            # Roman numeral headings detected as heading candidates via pattern
+            ("I THE SAMPLE SPACE", True),
+            ("XIV RANDOM VARIABLES", True),
+            ("IV. Some Section Title", True),
+            # Letter-spaced headings detected as heading candidates
+            ("C H A P T E R  I", True),
+            ("P R E F A C E", True),
+            # "I went..." is short-ish prose starting with "I " — the pattern matches
+            # the Roman numeral "I " but the LLM will filter this false positive.
+            # We accept this trade-off for better recall on Roman numeral chapters.
+            ("I went to the store", True),
+            # Regular body text - no match
+            ("Some random text here", False),
+        ],
+    )
+    def test_heading_candidate_roman_and_letterspaced(self, text, expected, body_font_name, body_font_size):
+        """Test _is_heading_candidate with Roman numerals and letter-spaced text."""
+        span = {"font": "Times-Roman", "size": 10, "text": text, "flags": 0}
+        result = _is_heading_candidate(span, body_font_name, body_font_size)
+        assert result == expected, f"Text '{text}' expected heading={expected}, got {result}"
+
+    def test_mid_page_roman_numeral_heading_found(self):
+        """Integration: Roman numeral heading in block 4+ is detected and included."""
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.name = None
+
+        page_height = 800.0
+        page = MagicMock()
+        page.rect.height = page_height
+
+        body_span = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "Body paragraph text",
+            "bbox": (50, 50, 400, 65),
+            "flags": 0,
+        }
+        roman_heading = {
+            "font": "Times-Bold",
+            "size": 12,
+            "text": "III FLUCTUATIONS IN COIN TOSSING",
+            "bbox": (50, 400, 400, 420),
+            "flags": 0,
+        }
+
+        page.get_text.return_value = {
+            "height": page_height,
+            "blocks": [
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                # Beyond max_blocks_per_page=3, must be detected by Phase 2
+                {"type": 0, "lines": [{"spans": [roman_heading]}]},
+            ],
+        }
+        doc.__iter__ = lambda self: iter([page])
+
+        mock_llm = MagicMock()
+        generator = TOCGenerator(doc=doc, llm=mock_llm)
+        features = generator._extract_features_sequential(doc, max_blocks_per_page=3, show_progress=False)
+
+        all_snippets = []
+        for block in features:
+            for line in block:
+                for span in line:
+                    if isinstance(span, TOCFeature):
+                        all_snippets.append(span.text_snippet)
+
+        assert any("III FLUCTUATIONS" in s for s in all_snippets), (
+            f"Roman numeral heading not found in features. Got: {all_snippets}"
+        )
+
+    def test_mid_page_letterspaced_heading_found(self):
+        """Integration: letter-spaced heading in block 4+ is detected and included."""
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.name = None
+
+        page_height = 800.0
+        page = MagicMock()
+        page.rect.height = page_height
+
+        body_span = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "Body paragraph text",
+            "bbox": (50, 50, 400, 65),
+            "flags": 0,
+        }
+        letterspaced_heading = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "C H A P T E R  V I I I",
+            "bbox": (50, 400, 400, 420),
+            "flags": 0,
+        }
+
+        page.get_text.return_value = {
+            "height": page_height,
+            "blocks": [
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [letterspaced_heading]}]},
+            ],
+        }
+        doc.__iter__ = lambda self: iter([page])
+
+        mock_llm = MagicMock()
+        generator = TOCGenerator(doc=doc, llm=mock_llm)
+        features = generator._extract_features_sequential(doc, max_blocks_per_page=3, show_progress=False)
+
+        all_snippets = []
+        for block in features:
+            for line in block:
+                for span in line:
+                    if isinstance(span, TOCFeature):
+                        all_snippets.append(span.text_snippet)
+
+        assert any("C H A P T E R" in s for s in all_snippets), (
+            f"Letter-spaced heading not found in features. Got: {all_snippets}"
+        )
+
+
+class TestSummarizeFeaturesForPostprocessing:
+    """Tests for even-sampling feature summary."""
+
+    @pytest.fixture
+    def mock_doc(self):
+        doc = MagicMock()
+        doc.page_count = 0
+        doc.get_toc.return_value = []
+        doc.name = None
+        doc.__iter__ = lambda self: iter([])
+        return doc
+
+    @pytest.fixture
+    def mock_llm(self):
+        return MagicMock()
+
+    def _make_features(self, num_pages: int, spans_per_page: int = 1) -> list:
+        """Helper to create features spanning many pages."""
+        features = []
+        for page_num in range(1, num_pages + 1):
+            block = [
+                [
+                    TOCFeature(
+                        page_number=page_num,
+                        font_name="Times-Roman",
+                        font_size=12,
+                        text_length=20,
+                        text_snippet=f"Page {page_num} text",
+                    )
+                    for _ in range(spans_per_page)
+                ]
+            ]
+            features.append(block)
+        return features
+
+    def test_small_document_returns_all_spans(self, mock_doc, mock_llm):
+        """When total spans <= max_entries, all are included."""
+        features = self._make_features(10)
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result = generator._summarize_features_for_postprocessing(features, max_entries=50)
+
+        assert result.count("\n") == 9  # 10 lines, 9 newlines
+        assert "Page 1" in result
+        assert "Page 10" in result
+
+    def test_large_document_samples_evenly(self, mock_doc, mock_llm):
+        """When total spans > max_entries, sampling covers the full document."""
+        features = self._make_features(500)
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result = generator._summarize_features_for_postprocessing(features, max_entries=50)
+
+        lines = result.strip().split("\n")
+        assert len(lines) == 50
+
+        # Extract page numbers from summary lines
+        page_numbers = []
+        for line in lines:
+            # Line format: "Page N ..."
+            page_num = int(line.split()[1])
+            page_numbers.append(page_num)
+
+        # First sample should be from early pages, last from late pages
+        assert page_numbers[0] == 1
+        assert page_numbers[-1] >= 490  # Near the end of the 500-page document
+
+        # Samples should be roughly evenly spaced (~10 pages apart for 500/50)
+        for i in range(1, len(page_numbers)):
+            gap = page_numbers[i] - page_numbers[i - 1]
+            assert gap >= 1, "Samples should be monotonically increasing"
+
+    def test_empty_features(self, mock_doc, mock_llm):
+        """Empty features returns placeholder text."""
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        result = generator._summarize_features_for_postprocessing([], max_entries=50)
+        assert result == "(No features available)"
+
+    def test_default_max_entries_is_150(self, mock_doc, mock_llm):
+        """Verify the default max_entries is 150."""
+        features = self._make_features(200)
+        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
+        # Call with default — should cap at 150
+        result = generator._summarize_features_for_postprocessing(features)
+        lines = result.strip().split("\n")
+        assert len(lines) == 150

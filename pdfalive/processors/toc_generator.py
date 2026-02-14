@@ -39,8 +39,23 @@ warnings.filterwarnings(
     "ignore", message="Pydantic serializer warnings", category=UserWarning, module=r"pydantic\.main"
 )
 
-# Regex pattern for section numbering (e.g. "1.", "1.2", "Chapter 1", "Appendix A")
-_SECTION_NUMBER_PATTERN = re.compile(r"^\s*(\d+\.|\d+\.\d+|Chapter\s|Section\s|Part\s|Appendix\s)", re.IGNORECASE)
+# Sub-pattern for Roman numerals (I through XXXIX covers typical chapter counts)
+_ROMAN_NUMERAL_RE = r"(?:X{0,3}(?:IX|IV|V?I{0,3}))"
+
+# Regex pattern for section numbering (e.g. "1.", "1.2", "Chapter 1", "Appendix A",
+# Roman numerals like "I ", "XIV.", and letter-spaced "C H A P T E R")
+_SECTION_NUMBER_PATTERN = re.compile(
+    r"^\s*("
+    r"\d+\.|\d+\.\d+"  # Arabic: "1.", "1.2"
+    r"|(?:Chapter|Section|Part|Appendix)\s"  # Named prefixes
+    r"|C\s+H\s+A\s+P\s+T\s+E\s+R"  # Letter-spaced CHAPTER
+    r"|" + _ROMAN_NUMERAL_RE + r"\.?\s"  # Roman numeral + optional dot + space
+    r")",
+    re.IGNORECASE,
+)
+
+# Pattern for letter-spaced ALL-CAPS text (e.g. "C H A P T E R  I" or "P R E F A C E")
+_LETTERSPACED_PATTERN = re.compile(r"^[A-Z](\s+[A-Z]){3,}")
 
 # Minimum/maximum text length for heading candidates
 _HEADING_MIN_LENGTH = 3
@@ -171,7 +186,11 @@ def _is_heading_candidate(span: dict, body_font_name: str, body_font_size: float
         return True
 
     # Section numbering pattern
-    return bool(_SECTION_NUMBER_PATTERN.match(text))
+    if _SECTION_NUMBER_PATTERN.match(text):
+        return True
+
+    # Letter-spaced ALL-CAPS text (e.g. "C H A P T E R  I")
+    return bool(_LETTERSPACED_PATTERN.match(text))
 
 
 def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list]:
@@ -846,7 +865,7 @@ class TOCGenerator:
         self,
         toc: TOC,
         features: list,
-        max_pages_for_reference_toc: int = 10,
+        max_pages_for_reference_toc: int = 20,
     ) -> tuple[TOC, TokenUsage]:
         """Postprocess a generated TOC using LLM to clean up and improve entries.
 
@@ -930,8 +949,12 @@ Please return a cleaned and improved TOC based on the guidelines in your instruc
 
         return refined_toc, usage
 
-    def _summarize_features_for_postprocessing(self, features: list, max_entries: int = 50) -> str:
+    def _summarize_features_for_postprocessing(self, features: list, max_entries: int = 150) -> str:
         """Create a compact summary of features for postprocessing context.
+
+        Samples spans evenly across the entire document rather than taking only
+        the first N sequentially. This ensures the postprocessor sees features
+        from chapter boundaries throughout the book, not just early pages.
 
         Args:
             features: Nested list of TOCFeature objects.
@@ -940,30 +963,34 @@ Please return a cleaned and improved TOC based on the guidelines in your instruc
         Returns:
             A string summary of the most relevant features.
         """
-        summary_lines = []
-        entry_count = 0
-
+        # Flatten all TOCFeature spans into a single list
+        all_spans: list[TOCFeature] = []
         for block in features:
-            if entry_count >= max_entries:
-                break
             for line in block:
-                if entry_count >= max_entries:
-                    break
                 for span in line:
-                    if entry_count >= max_entries:
-                        break
                     if isinstance(span, TOCFeature):
-                        parts = [f"Page {span.page_number}"]
-                        if span.y_position is not None:
-                            parts[0] += f" @y={span.y_position}"
-                        parts.append(f"{span.font_name} {span.font_size}pt")
-                        if span.is_bold:
-                            parts.append("[bold]")
-                        parts.append(f'- "{span.text_snippet}"')
-                        summary_lines.append(" ".join(parts))
-                        entry_count += 1
+                        all_spans.append(span)
 
-        if not summary_lines:
+        if not all_spans:
             return "(No features available)"
+
+        # Sample evenly across the document
+        total = len(all_spans)
+        if total <= max_entries:
+            sampled = all_spans
+        else:
+            step = total / max_entries
+            sampled = [all_spans[int(i * step)] for i in range(max_entries)]
+
+        summary_lines = []
+        for span in sampled:
+            parts = [f"Page {span.page_number}"]
+            if span.y_position is not None:
+                parts[0] += f" @y={span.y_position}"
+            parts.append(f"{span.font_name} {span.font_size}pt")
+            if span.is_bold:
+                parts.append("[bold]")
+            parts.append(f'- "{span.text_snippet}"')
+            summary_lines.append(" ".join(parts))
 
         return "\n".join(summary_lines)
