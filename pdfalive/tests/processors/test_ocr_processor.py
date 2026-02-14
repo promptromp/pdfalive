@@ -245,10 +245,8 @@ class TestOCRPageRangeWorker:
         mock_ocr_page_doc = MagicMock()
 
         # Return different docs for different calls
-        mock_pymupdf.open.side_effect = (
-            lambda *args, **kwargs: (mock_doc if args == () or args[0] != "pdf" else mock_ocr_page_doc)
-            if args
-            else mock_output_doc
+        mock_pymupdf.open.side_effect = lambda *args, **kwargs: (
+            (mock_doc if args == () or args[0] != "pdf" else mock_ocr_page_doc) if args else mock_output_doc
         )
         mock_pymupdf.open.return_value = mock_doc
         mock_pymupdf.Matrix.return_value = MagicMock()
