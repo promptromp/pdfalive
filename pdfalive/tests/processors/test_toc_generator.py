@@ -18,6 +18,7 @@ from pdfalive.processors.toc_generator import (
     _extract_toc_like_lines,
     _is_bold_font,
     _is_heading_candidate,
+    _is_retryable_error,
     _strip_subset_prefix,
     serialize_features_compact,
 )
@@ -2723,3 +2724,60 @@ class TestHeadingCandidateCap:
                         heading_candidates.append(span)
 
         assert len(heading_candidates) <= _MAX_HEADING_CANDIDATES_PER_PAGE
+
+
+class TestIsRetryableError:
+    """Tests for _is_retryable_error predicate."""
+
+    def _make_exc_with_status(self, status_code: int) -> Exception:
+        """Create an exception with a status_code attribute."""
+        exc = Exception("test error")
+        exc.status_code = status_code  # type: ignore[attr-defined]
+        return exc
+
+    @pytest.mark.parametrize(
+        "status_code,expected",
+        [
+            (400, False),  # Bad request (includes context overflow)
+            (401, False),  # Unauthorized
+            (403, False),  # Forbidden
+            (404, False),  # Not found
+            (422, False),  # Unprocessable entity
+            (429, True),  # Rate limited — retryable
+            (500, True),  # Internal server error — retryable
+            (502, True),  # Bad gateway — retryable
+            (503, True),  # Service unavailable — retryable
+        ],
+    )
+    def test_status_code_based(self, status_code, expected):
+        """Retryability based on HTTP status code."""
+        exc = self._make_exc_with_status(status_code)
+        assert _is_retryable_error(exc) is expected
+
+    @pytest.mark.parametrize(
+        "exc_class_name,expected",
+        [
+            ("OpenAIContextOverflowError", False),
+            ("BadRequestError", False),
+            ("InvalidRequestError", False),
+            ("ValidationError", False),
+            ("RateLimitError", True),  # No matching pattern → defaults to True
+            ("ConnectionError", True),
+            ("TimeoutError", True),
+        ],
+    )
+    def test_class_name_based(self, exc_class_name, expected):
+        """Retryability based on exception class name (no status_code)."""
+        # Dynamically create a class with the given name
+        exc_type = type(exc_class_name, (Exception,), {})
+        exc = exc_type("test error")
+        assert _is_retryable_error(exc) is expected
+
+    def test_status_code_takes_precedence_over_name(self):
+        """When status_code is present, it takes precedence over class name."""
+        # Even if class name matches a non-retryable pattern, status_code wins
+        exc_type = type("ContextOverflowError", (Exception,), {})
+        exc = exc_type("test")
+        exc.status_code = 429  # type: ignore[attr-defined]
+        # Status code 429 → retryable, even though name contains "ContextOverflow"
+        assert _is_retryable_error(exc) is True

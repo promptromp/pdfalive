@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -26,7 +26,7 @@ from pdfalive.prompts import (
     TOC_GENERATOR_SYSTEM_PROMPT,
     TOC_POSTPROCESSOR_SYSTEM_PROMPT,
 )
-from pdfalive.tokens import CHARS_PER_TOKEN, TokenUsage, estimate_tokens
+from pdfalive.tokens import TokenUsage, estimate_tokens
 
 
 # Regex to strip font subset prefixes like "ABCDEF+" from font names
@@ -125,14 +125,15 @@ def apply_toc_to_document(doc: pymupdf.Document, toc: list, output_file: str) ->
 # Console for rich output
 console = Console()
 
-# Default maximum tokens for features per batch to stay under context window limits
-# 200k context window - reserve space for:
-#   - System prompt (~2k tokens)
-#   - User message template (~500 tokens)
+# Default maximum tokens for features per batch to stay under context window limits.
+# Must fit within the smallest common context window (128k tokens) with headroom for:
+#   - System prompt (~800 tokens)
+#   - User message template (~200 tokens)
+#   - Structured output JSON schema (~500 tokens)
 #   - Response/output tokens (~10k reserved)
-#   - Safety margin (~7.5k)
-# This leaves ~180k for features; we use 130k with the compact serialization format
-DEFAULT_MAX_TOKENS_PER_BATCH = 130000
+#   - Safety margin (~17k)
+# Token counts are computed using tiktoken (o200k_base encoding) for accuracy.
+DEFAULT_MAX_TOKENS_PER_BATCH = 100000
 
 # Default number of blocks to overlap between batches for context continuity
 DEFAULT_OVERLAP_BLOCKS = 5
@@ -149,6 +150,27 @@ MAX_RETRY_ATTEMPTS = 5
 RETRY_MULTIPLIER = 2  # Exponential backoff multiplier
 RETRY_MIN_WAIT_SECONDS = 10  # Minimum wait time between retries
 RETRY_MAX_WAIT_SECONDS = 120  # Maximum wait time between retries
+
+# Exception class name fragments that indicate non-retryable client errors
+_NON_RETRYABLE_PATTERNS = ("ContextOverflow", "BadRequest", "InvalidRequest", "ValidationError")
+
+
+def _is_retryable_error(exception: BaseException) -> bool:
+    """Determine if an LLM API exception is retryable.
+
+    Only rate-limit (429) and server errors (5xx) are retried.
+    Client errors like context overflow (400) are deterministic and
+    will always fail with the same input, so retrying is pointless.
+    """
+    # Check HTTP status code (available on OpenAI / LangChain API errors)
+    status_code = getattr(exception, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code == 429 or status_code >= 500
+
+    # Fallback: match exception class name for known non-retryable types.
+    # Default to True (retry) for transient network errors, timeouts, etc.
+    exc_name = type(exception).__name__
+    return not any(pattern in exc_name for pattern in _NON_RETRYABLE_PATTERNS)
 
 
 # Pattern for lines that look like TOC entries: trailing page numbers,
@@ -304,25 +326,21 @@ def serialize_features_compact(features: list) -> str:
 def _estimate_block_tokens(block: list) -> int:
     """Estimate the token count for a single feature block in compact format.
 
-    Uses a character-based estimate calibrated to the compact serialization format
-    (roughly: font_id|size|snippet|y_pos|bold per span, plus page header overhead).
+    Builds an approximate compact-format string per block and counts tokens
+    via tiktoken. This is fast enough for per-block calls (~50 chars each).
 
     Args:
         block: A block from the features list (list of lines, each a list of TOCFeature spans).
 
     Returns:
-        Estimated token count for this block.
+        Token count for this block.
     """
-    char_count = 0
+    parts: list[str] = ["P1:"]
     for line in block:
         for span in line:
             if isinstance(span, TOCFeature):
-                # Approximate compact format: "F0|14|snippet text here|.12|B\n"
-                # ~3 font_id + 1 pipe + ~3 size + 1 pipe + snippet_len + extras
-                char_count += 10 + len(span.text_snippet)
-    # Add page header overhead ("P42:\n")
-    char_count += 6
-    return max(1, int(char_count / CHARS_PER_TOKEN))
+                parts.append(f"F0|12|{span.text_snippet}|.12|B")
+    return max(1, estimate_tokens("\n".join(parts)))
 
 
 def _is_bold_font(span: dict) -> bool:
@@ -960,7 +978,7 @@ class TOCGenerator:
             )
 
         @retry(
-            retry=retry_if_exception_type(Exception),
+            retry=retry_if_exception(_is_retryable_error),
             stop=stop_after_attempt(MAX_RETRY_ATTEMPTS),
             wait=wait_exponential(
                 multiplier=RETRY_MULTIPLIER,

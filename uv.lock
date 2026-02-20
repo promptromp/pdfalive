@@ -693,6 +693,7 @@ dependencies = [
     { name = "pymupdf" },
     { name = "rich" },
     { name = "tenacity" },
+    { name = "tiktoken" },
     { name = "urllib3" },
 ]
 
@@ -719,6 +720,7 @@ requires-dist = [
     { name = "pymupdf", specifier = ">=1.26.6" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "tenacity", specifier = ">=9.1.0" },
+    { name = "tiktoken", specifier = ">=0.9.0" },
     { name = "urllib3", specifier = ">=2.6.3" },
 ]
 

@@ -1,14 +1,24 @@
-"""Token counting and estimation utilities."""
+"""Token counting utilities using tiktoken for accurate tokenizer-based counts."""
 
 from dataclasses import dataclass, field
 
+import tiktoken
 from rich.console import Console
 
 
-# Rough estimate for token counting
-# The compact pipe-delimited format has fewer special characters than Python repr,
-# so the ratio is closer to 3.5 chars per token (still conservative vs the typical ~4)
-CHARS_PER_TOKEN = 3.5
+# Default tiktoken encoding — o200k_base (GPT-4o/5) produces near-identical counts
+# to cl100k_base for our data format, so it works as a universal default.
+DEFAULT_ENCODING = "o200k_base"
+
+_encoding: tiktoken.Encoding | None = None
+
+
+def get_encoding() -> tiktoken.Encoding:
+    """Return the lazily-loaded tiktoken encoding singleton."""
+    global _encoding
+    if _encoding is None:
+        _encoding = tiktoken.get_encoding(DEFAULT_ENCODING)
+    return _encoding
 
 
 @dataclass
@@ -77,18 +87,18 @@ class TokenUsage:
         console.print()
         console.print("[bold]Token Usage:[/bold]")
         console.print(f"  LLM calls: [cyan]{self.llm_calls}[/cyan]")
-        console.print(f"  Input tokens: [cyan]{self.input_tokens:,}[/cyan] (estimated)")
-        console.print(f"  Output tokens: [cyan]{self.output_tokens:,}[/cyan] (estimated)")
+        console.print(f"  Input tokens: [cyan]{self.input_tokens:,}[/cyan]")
+        console.print(f"  Output tokens: [cyan]{self.output_tokens:,}[/cyan]")
         console.print(f"  Total tokens: [cyan]{self.total_tokens:,}[/cyan]")
 
 
 def estimate_tokens(text: str) -> int:
-    """Estimate the number of tokens in a text string.
+    """Count the number of tokens in a text string using tiktoken.
 
-    This is a rough estimate based on character count.
-    For more accurate counts, use a tokenizer specific to the model.
+    Uses the o200k_base encoding which provides accurate counts for both
+    English prose and structured/pipe-delimited content.
     """
-    return int(len(text) / CHARS_PER_TOKEN)
+    return len(get_encoding().encode(text))
 
 
 def estimate_features_tokens(features: list) -> int:

@@ -6,33 +6,51 @@ import pytest
 from rich.console import Console
 
 from pdfalive.tokens import (
+    DEFAULT_ENCODING,
     TokenUsage,
     estimate_features_tokens,
     estimate_tokens,
+    get_encoding,
 )
 
 
 class TestEstimateTokens:
-    """Tests for token estimation functions."""
+    """Tests for token counting functions."""
 
     @pytest.mark.parametrize(
-        "text,expected_min,expected_max",
+        "text,expected",
         [
-            ("", 0, 0),
-            ("hello", 1, 2),  # 5 chars / 3.5 = 1.43 -> 1
-            ("a" * 100, 25, 35),  # 100 chars / 3.5 = 28
+            ("", 0),
+            ("hello", 1),
+            ("a" * 100, 13),
         ],
     )
-    def test_estimate_tokens_ranges(self, text, expected_min, expected_max):
-        """Test token estimation returns reasonable values."""
-        result = estimate_tokens(text)
-        assert expected_min <= result <= expected_max
+    def test_estimate_tokens_exact(self, text, expected):
+        """Test token counting returns exact tiktoken values."""
+        assert estimate_tokens(text) == expected
 
-    def test_estimate_tokens_scales_linearly(self):
-        """Test that token count scales roughly linearly with text length."""
-        short = estimate_tokens("a" * 105)  # Use 105 for clean division by 3.5
-        long = estimate_tokens("a" * 1050)
-        assert long == short * 10
+    def test_estimate_tokens_scales_with_length(self):
+        """Test that token count increases with text length."""
+        short = estimate_tokens("a" * 100)
+        long = estimate_tokens("a" * 1000)
+        assert long > short
+
+    def test_uses_tiktoken_encoding(self):
+        """Test that the encoding singleton is loaded from tiktoken."""
+        enc = get_encoding()
+        assert enc.name == DEFAULT_ENCODING
+        # Verify it returns the same singleton on repeated calls
+        assert get_encoding() is enc
+
+    def test_compact_format_tokenization(self):
+        """Test that compact pipe-delimited format is tokenized accurately."""
+        compact_line = "F0|14|Chapter 1|.12|B\n"
+        tokens = estimate_tokens(compact_line)
+        # tiktoken gives exact count (no ratio guesswork)
+        assert tokens > 0
+        # 100 lines should be roughly 100x one line (within tokenizer rounding)
+        tokens_100 = estimate_tokens(compact_line * 100)
+        assert 90 * tokens <= tokens_100 <= 110 * tokens
 
 
 class TestEstimateFeaturesTokens:
@@ -171,6 +189,8 @@ class TestTokenUsage:
         assert "500" in output  # output_tokens
         assert "Total tokens:" in output
         assert "1,500" in output  # total_tokens formatted
+        # Token counts are now accurate (not estimated)
+        assert "(estimated)" not in output
 
     def test_print_summary_creates_console_if_none(self, usage):
         """Test that print_summary works without passing a console."""
