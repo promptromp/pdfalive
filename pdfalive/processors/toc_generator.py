@@ -26,7 +26,11 @@ from pdfalive.prompts import (
     TOC_GENERATOR_SYSTEM_PROMPT,
     TOC_POSTPROCESSOR_SYSTEM_PROMPT,
 )
-from pdfalive.tokens import TokenUsage, estimate_tokens
+from pdfalive.tokens import CHARS_PER_TOKEN, TokenUsage, estimate_tokens
+
+
+# Regex to strip font subset prefixes like "ABCDEF+" from font names
+_FONT_SUBSET_PREFIX_PATTERN = re.compile(r"^[A-Z]{6}\+")
 
 
 # Suppress PydanticSerializationUnexpectedValue warnings emitted by LangChain's
@@ -84,8 +88,14 @@ _FRONT_MATTER_TITLE_PATTERN = re.compile(
     r"(?:\s+(?:to the|for the|of the|of volume)\b.*)?$"
 )
 
-# Minimum font size ratio vs body text to be considered a heading candidate
+# Minimum font size ratio vs body text to be considered a heading candidate (Phase 1)
 _HEADING_FONT_SIZE_RATIO = 1.15
+
+# Stricter font size ratio for Phase 2 heading candidates from remaining blocks
+_HEADING_FONT_SIZE_RATIO_PHASE2 = 1.2
+
+# Maximum number of heading candidates to add per page from Phase 2 scanning
+_MAX_HEADING_CANDIDATES_PER_PAGE = 3
 
 # Fuzzy match: minimum length of the shorter string for substring matching
 _FUZZY_MIN_SUBSTRING_LEN = 8
@@ -121,8 +131,8 @@ console = Console()
 #   - User message template (~500 tokens)
 #   - Response/output tokens (~10k reserved)
 #   - Safety margin (~7.5k)
-# This leaves ~180k for features, but we use 100k to be safe given estimation uncertainty
-DEFAULT_MAX_TOKENS_PER_BATCH = 100000
+# This leaves ~180k for features; we use 130k with the compact serialization format
+DEFAULT_MAX_TOKENS_PER_BATCH = 130000
 
 # Default number of blocks to overlap between batches for context continuity
 DEFAULT_OVERLAP_BLOCKS = 5
@@ -139,6 +149,180 @@ MAX_RETRY_ATTEMPTS = 5
 RETRY_MULTIPLIER = 2  # Exponential backoff multiplier
 RETRY_MIN_WAIT_SECONDS = 10  # Minimum wait time between retries
 RETRY_MAX_WAIT_SECONDS = 120  # Maximum wait time between retries
+
+
+# Pattern for lines that look like TOC entries: trailing page numbers,
+# dot-leaders, or tab-separated numbers
+_TOC_LINE_TRAILING_NUMBER_PATTERN = re.compile(
+    r"[.\s·…]{3,}\s*\d+\s*$"  # dot-leaders or spaces followed by a page number
+    r"|"
+    r"\t\d+\s*$"  # tab-separated page number
+    r"|"
+    r"\s{4,}\d+\s*$"  # multiple spaces followed by a page number
+)
+
+# Maximum line length for short title-like lines in TOC filtering
+_TOC_SHORT_LINE_MAX_LENGTH = 100
+
+
+def _extract_toc_like_lines(page_text: str) -> str:
+    """Filter page text to keep only lines that look like TOC entries.
+
+    Keeps lines that have:
+    - Trailing page numbers (with dot-leaders, tabs, or multiple spaces)
+    - Section numbering patterns (e.g. "1.", "Chapter 3")
+    - Short title-like lines (< 100 chars)
+
+    Args:
+        page_text: Raw text from a PDF page.
+
+    Returns:
+        Filtered text containing only TOC-like lines.
+    """
+    lines = page_text.split("\n")
+    kept: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Keep lines with trailing page numbers (dot-leaders, etc.)
+        if _TOC_LINE_TRAILING_NUMBER_PATTERN.search(stripped):
+            kept.append(stripped)
+            continue
+
+        # Keep lines matching section numbering
+        if _SECTION_NUMBER_PATTERN.match(stripped):
+            kept.append(stripped)
+            continue
+
+        # Keep short title-like lines
+        if len(stripped) < _TOC_SHORT_LINE_MAX_LENGTH:
+            kept.append(stripped)
+
+    return "\n".join(kept)
+
+
+def _strip_subset_prefix(font_name: str) -> str:
+    """Strip font subset prefix (e.g. 'ABCDEF+TimesNewRomanPS-BoldMT' -> 'TimesNewRomanPS-BoldMT').
+
+    PDF fonts often include a 6-letter uppercase prefix followed by '+' for subset-embedded fonts.
+    This prefix is arbitrary and varies per document, so stripping it reduces noise and enables
+    font deduplication.
+
+    Args:
+        font_name: The raw font name from PyMuPDF.
+
+    Returns:
+        Font name without subset prefix.
+    """
+    return _FONT_SUBSET_PREFIX_PATTERN.sub("", font_name)
+
+
+def serialize_features_compact(features: list) -> str:
+    """Serialize features into a compact text format with a font table.
+
+    Produces a format like:
+        FONTS:
+        F0=TimesNewRomanPS-BoldMT
+        F1=TimesNewRomanPSMT
+
+        P42:
+        F0|14|Chapter 3: Risk Manag|.12|B
+        F1|12|This is the first par|.15
+
+    This is significantly more compact than Python str() on nested lists, reducing
+    input tokens by ~50% while preserving all information the LLM needs.
+
+    Args:
+        features: Nested list of TOCFeature objects (blocks > lines > spans),
+                  as produced by _extract_features().
+
+    Returns:
+        Compact string representation of the features.
+    """
+    # Pass 1: Collect unique font names and build font table
+    font_set: dict[str, str] = {}  # stripped font name -> font ID
+
+    for block in features:
+        for line in block:
+            for span in line:
+                if isinstance(span, TOCFeature):
+                    stripped = _strip_subset_prefix(span.font_name)
+                    if stripped not in font_set:
+                        font_set[stripped] = f"F{len(font_set)}"
+
+    # Pass 2: Group spans by page and build output
+    page_spans: dict[int, list[str]] = {}
+    for block in features:
+        for line in block:
+            for span in line:
+                if isinstance(span, TOCFeature):
+                    stripped = _strip_subset_prefix(span.font_name)
+                    font_id = font_set[stripped]
+
+                    # Round font_size: 14.0 -> "14", 12.5 -> "12.5"
+                    size = span.font_size
+                    size_str = str(int(size)) if size == int(size) else str(round(size, 1))
+
+                    parts = [font_id, size_str, span.text_snippet]
+
+                    # Only emit y_position and bold for heading-like spans
+                    # (non-body spans: bold, larger size, or section-numbered)
+                    if span.y_position is not None:
+                        # Format: ".12" for 0.12, ".0" for 0.0
+                        y_str = f"{span.y_position:.2f}".lstrip("0") or "0"
+                        parts.append(y_str)
+                    if span.is_bold:
+                        parts.append("B")
+
+                    line_str = "|".join(parts)
+
+                    if span.page_number not in page_spans:
+                        page_spans[span.page_number] = []
+                    page_spans[span.page_number].append(line_str)
+
+    # Build output string
+    lines: list[str] = []
+
+    # Font table header
+    if font_set:
+        lines.append("FONTS:")
+        for font_name, font_id in font_set.items():
+            lines.append(f"{font_id}={font_name}")
+        lines.append("")
+
+    # Page groups
+    for page_num in sorted(page_spans.keys()):
+        lines.append(f"P{page_num}:")
+        lines.extend(page_spans[page_num])
+
+    return "\n".join(lines)
+
+
+def _estimate_block_tokens(block: list) -> int:
+    """Estimate the token count for a single feature block in compact format.
+
+    Uses a character-based estimate calibrated to the compact serialization format
+    (roughly: font_id|size|snippet|y_pos|bold per span, plus page header overhead).
+
+    Args:
+        block: A block from the features list (list of lines, each a list of TOCFeature spans).
+
+    Returns:
+        Estimated token count for this block.
+    """
+    char_count = 0
+    for line in block:
+        for span in line:
+            if isinstance(span, TOCFeature):
+                # Approximate compact format: "F0|14|snippet text here|.12|B\n"
+                # ~3 font_id + 1 pipe + ~3 size + 1 pipe + snippet_len + extras
+                char_count += 10 + len(span.text_snippet)
+    # Add page header overhead ("P42:\n")
+    char_count += 6
+    return max(1, int(char_count / CHARS_PER_TOKEN))
 
 
 def _is_bold_font(span: dict) -> bool:
@@ -268,11 +452,13 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list
 
         for block_ix, block in enumerate(page_dict["blocks"]):
             if block_ix >= max_blocks_per_page:
-                # Buffer remaining blocks for heading candidate scanning
+                # Buffer first span of remaining blocks for heading candidate scanning
                 if block["type"] == 0:
-                    for line in block.get("lines", []):
-                        for span in line.get("spans", []):
-                            remaining_spans_buffer.append((page_number, page_height, len(features), [span]))
+                    lines = block.get("lines", [])
+                    if lines:
+                        spans = lines[0].get("spans", [])
+                        if spans:
+                            remaining_spans_buffer.append((page_number, page_height, len(features), [spans[0]]))
                 continue
 
             features.append([])
@@ -460,11 +646,13 @@ class TOCGenerator:
 
             for block_ix, block in enumerate(page_dict["blocks"]):
                 if block_ix >= max_blocks_per_page:
-                    # Buffer remaining blocks for heading candidate scanning
+                    # Buffer first span of remaining blocks for heading candidate scanning
                     if block["type"] == 0:
-                        for line in block.get("lines", []):
-                            for span in line.get("spans", []):
-                                remaining_spans_buffer.append((page_number, page_height, len(features), [span]))
+                        lines = block.get("lines", [])
+                        if lines:
+                            spans = lines[0].get("spans", [])
+                            if spans:
+                                remaining_spans_buffer.append((page_number, page_height, len(features), [spans[0]]))
                     continue
 
                 features.append([])
@@ -514,15 +702,23 @@ class TOCGenerator:
                 _process_page(page, ix + 1)
 
         # Phase 2: Compute body font profile and scan remaining blocks for heading candidates
+        # Uses stricter criteria than Phase 1 to limit false positives from body text
         if remaining_spans_buffer:
             body_font_name, body_font_size = _compute_body_font_profile(features)
+            # Stricter body size threshold for Phase 2
+            phase2_body_size = body_font_size * (_HEADING_FONT_SIZE_RATIO_PHASE2 / _HEADING_FONT_SIZE_RATIO)
 
             # Group heading candidates by their insert_index for in-order insertion
             # Process in reverse order so insert indices remain valid
             candidates_by_index: dict[int, list[list]] = {}
+            # Track per-page candidate count to enforce cap
+            page_candidate_count: dict[int, int] = {}
+
             for page_number, page_height, insert_idx, spans in remaining_spans_buffer:
+                if page_candidate_count.get(page_number, 0) >= _MAX_HEADING_CANDIDATES_PER_PAGE:
+                    continue
                 for span in spans:
-                    if _is_heading_candidate(span, body_font_name, body_font_size):
+                    if _is_heading_candidate(span, body_font_name, phase2_body_size):
                         bbox = span.get("bbox", None)
                         y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
                         feature = TOCFeature(
@@ -537,6 +733,9 @@ class TOCGenerator:
                         if insert_idx not in candidates_by_index:
                             candidates_by_index[insert_idx] = []
                         candidates_by_index[insert_idx].append([[feature]])
+                        page_candidate_count[page_number] = page_candidate_count.get(page_number, 0) + 1
+                        if page_candidate_count[page_number] >= _MAX_HEADING_CANDIDATES_PER_PAGE:
+                            break
 
             # Insert heading candidate blocks at the right positions (reverse order to preserve indices)
             for idx in sorted(candidates_by_index.keys(), reverse=True):
@@ -619,13 +818,19 @@ class TOCGenerator:
             feature_offset += len(features)
 
         # Phase 2: Compute body font profile and scan for heading candidates
+        # Uses stricter criteria than Phase 1 to limit false positives
         if all_remaining_spans:
             body_font_name, body_font_size = _compute_body_font_profile(all_features)
+            phase2_body_size = body_font_size * (_HEADING_FONT_SIZE_RATIO_PHASE2 / _HEADING_FONT_SIZE_RATIO)
 
             candidates_by_index: dict[int, list[list]] = {}
+            page_candidate_count: dict[int, int] = {}
+
             for page_number, page_height, insert_idx, spans in all_remaining_spans:
+                if page_candidate_count.get(page_number, 0) >= _MAX_HEADING_CANDIDATES_PER_PAGE:
+                    continue
                 for span in spans:
-                    if _is_heading_candidate(span, body_font_name, body_font_size):
+                    if _is_heading_candidate(span, body_font_name, phase2_body_size):
                         bbox = span.get("bbox", None)
                         y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
                         feature = TOCFeature(
@@ -640,6 +845,9 @@ class TOCGenerator:
                         if insert_idx not in candidates_by_index:
                             candidates_by_index[insert_idx] = []
                         candidates_by_index[insert_idx].append([[feature]])
+                        page_candidate_count[page_number] = page_candidate_count.get(page_number, 0) + 1
+                        if page_candidate_count[page_number] >= _MAX_HEADING_CANDIDATES_PER_PAGE:
+                            break
 
             for idx in sorted(candidates_by_index.keys(), reverse=True):
                 for block in reversed(candidates_by_index[idx]):
@@ -702,8 +910,7 @@ class TOCGenerator:
         current_tokens = 0
 
         for block in features:
-            block_str = str(block)
-            block_tokens = estimate_tokens(block_str)
+            block_tokens = _estimate_block_tokens(block)
 
             # If adding this block would exceed limit and we have content, yield current batch
             if current_tokens + block_tokens > effective_max_tokens and current_batch:
@@ -712,7 +919,7 @@ class TOCGenerator:
                 # Start new batch with overlap from end of previous batch
                 overlap_start = max(0, len(current_batch) - overlap_blocks)
                 current_batch = current_batch[overlap_start:]
-                current_tokens = estimate_tokens(str(current_batch))
+                current_tokens = estimate_tokens(serialize_features_compact(current_batch))
 
             current_batch.append(block)
             current_tokens += block_tokens
@@ -825,12 +1032,14 @@ class TOCGenerator:
             if not is_first_batch:
                 batch_context = f"\n\nThis is batch {batch_idx + 1} of {total_batches}."
 
+            features_text = serialize_features_compact(batch)
+
             user_content = f"""
                 Generate a table of contents based on the document features given below.
                 Limit the TOC to a maximum depth of {max_depth} levels.{batch_context}
                 \n\n
                 ------------------------
-                {str(batch)}
+                {features_text}
             """
 
             messages = [
@@ -869,16 +1078,18 @@ class TOCGenerator:
 
     def _extract_reference_toc_text(
         self,
-        max_pages: int = 10,
+        max_pages: int = 20,
+        unfiltered_pages: int = 3,
     ) -> str:
         """Extract text from the first few pages that may contain a printed TOC.
 
-        Scans the first N pages of the document looking for text that might
-        be a printed table of contents, which can be used as a reference
-        for postprocessing.
+        Scans the first N pages of the document. The first `unfiltered_pages` are
+        included in full (title/copyright/TOC pages are typically here). Remaining
+        pages are filtered to keep only TOC-like lines, reducing token usage.
 
         Args:
             max_pages: Maximum number of pages to scan from the beginning.
+            unfiltered_pages: Number of initial pages to include without filtering.
 
         Returns:
             Concatenated text from the first pages, with page markers.
@@ -889,8 +1100,15 @@ class TOCGenerator:
         for page_idx in range(pages_to_scan):
             page = self.doc[page_idx]
             page_text = page.get_text("text")
-            if page_text.strip():
+            if not page_text.strip():
+                continue
+
+            if page_idx < unfiltered_pages:
                 reference_texts.append(f"--- Page {page_idx + 1} ---\n{page_text}")
+            else:
+                filtered = _extract_toc_like_lines(page_text)
+                if filtered.strip():
+                    reference_texts.append(f"--- Page {page_idx + 1} ---\n{filtered}")
 
         return "\n\n".join(reference_texts)
 
@@ -1184,12 +1402,12 @@ must be PDF page numbers (not printed page numbers).
 
         return TOC(entries=corrected)
 
-    def _summarize_features_for_postprocessing(self, features: list, max_entries: int = 150) -> str:
+    def _summarize_features_for_postprocessing(self, features: list, max_entries: int = 80) -> str:
         """Create a compact summary of features for postprocessing context.
 
-        Samples spans evenly across the entire document rather than taking only
-        the first N sequentially. This ensures the postprocessor sees features
-        from chapter boundaries throughout the book, not just early pages.
+        Prioritizes heading-like spans (bold, larger fonts, section-numbered) and
+        samples evenly across the document. Uses compact font references to reduce
+        token usage.
 
         Args:
             features: Nested list of TOCFeature objects.
@@ -1198,34 +1416,56 @@ must be PDF page numbers (not printed page numbers).
         Returns:
             A string summary of the most relevant features.
         """
-        # Flatten all TOCFeature spans into a single list
-        all_spans: list[TOCFeature] = []
+        # Flatten and separate heading-like vs body spans
+        heading_spans: list[TOCFeature] = []
+        body_spans: list[TOCFeature] = []
+
+        body_font_name, body_font_size = _compute_body_font_profile(features)
+
         for block in features:
             for line in block:
                 for span in line:
                     if isinstance(span, TOCFeature):
-                        all_spans.append(span)
+                        is_heading = (
+                            span.is_bold
+                            or (body_font_size > 0 and span.font_size > body_font_size * 1.1)
+                            or bool(_SECTION_NUMBER_PATTERN.match(span.text_snippet.strip()))
+                        )
+                        if is_heading:
+                            heading_spans.append(span)
+                        else:
+                            body_spans.append(span)
 
-        if not all_spans:
+        if not heading_spans and not body_spans:
             return "(No features available)"
 
-        # Sample evenly across the document
-        total = len(all_spans)
-        if total <= max_entries:
-            sampled = all_spans
-        else:
-            step = total / max_entries
-            sampled = [all_spans[int(i * step)] for i in range(max_entries)]
+        # Allocate most entries to heading spans, rest to body for context
+        heading_budget = min(len(heading_spans), int(max_entries * 0.8))
+        body_budget = min(len(body_spans), max_entries - heading_budget)
 
+        def _sample(spans: list[TOCFeature], n: int) -> list[TOCFeature]:
+            if len(spans) <= n:
+                return spans
+            step = len(spans) / n
+            return [spans[int(i * step)] for i in range(n)]
+
+        sampled = _sample(heading_spans, heading_budget) + _sample(body_spans, body_budget)
+        # Sort by page number for readability
+        sampled.sort(key=lambda s: (s.page_number, s.y_position or 0))
+
+        # Build compact summary using stripped font names
         summary_lines = []
         for span in sampled:
-            parts = [f"Page {span.page_number}"]
+            font = _strip_subset_prefix(span.font_name)
+            size = int(span.font_size) if span.font_size == int(span.font_size) else round(span.font_size, 1)
+            parts = [f"P{span.page_number}"]
             if span.y_position is not None:
-                parts[0] += f" @y={span.y_position}"
-            parts.append(f"{span.font_name} {span.font_size}pt")
+                y_str = f"{span.y_position:.2f}".lstrip("0") or "0"
+                parts[0] += f"@{y_str}"
+            parts.append(f"{font} {size}")
             if span.is_bold:
-                parts.append("[bold]")
-            parts.append(f'- "{span.text_snippet}"')
+                parts.append("B")
+            parts.append(f'"{span.text_snippet}"')
             summary_lines.append(" ".join(parts))
 
         return "\n".join(summary_lines)

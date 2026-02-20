@@ -19,8 +19,8 @@ class TestEstimateTokens:
         "text,expected_min,expected_max",
         [
             ("", 0, 0),
-            ("hello", 1, 2),  # 5 chars / 3 = 1.67 -> 1
-            ("a" * 100, 30, 40),  # 100 chars / 3 = 33
+            ("hello", 1, 2),  # 5 chars / 3.5 = 1.43 -> 1
+            ("a" * 100, 25, 35),  # 100 chars / 3.5 = 28
         ],
     )
     def test_estimate_tokens_ranges(self, text, expected_min, expected_max):
@@ -30,8 +30,8 @@ class TestEstimateTokens:
 
     def test_estimate_tokens_scales_linearly(self):
         """Test that token count scales roughly linearly with text length."""
-        short = estimate_tokens("a" * 99)  # Use 99 to get clean division by 3
-        long = estimate_tokens("a" * 990)
+        short = estimate_tokens("a" * 105)  # Use 105 for clean division by 3.5
+        long = estimate_tokens("a" * 1050)
         assert long == short * 10
 
 

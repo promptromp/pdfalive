@@ -6,9 +6,9 @@ from rich.console import Console
 
 
 # Rough estimate for token counting
-# For structured data with special characters, punctuation, and numbers,
-# the ratio is closer to 3 chars per token (more conservative than 4)
-CHARS_PER_TOKEN = 3
+# The compact pipe-delimited format has fewer special characters than Python repr,
+# so the ratio is closer to 3.5 chars per token (still conservative vs the typical ~4)
+CHARS_PER_TOKEN = 3.5
 
 
 @dataclass
@@ -88,7 +88,7 @@ def estimate_tokens(text: str) -> int:
     This is a rough estimate based on character count.
     For more accurate counts, use a tokenizer specific to the model.
     """
-    return len(text) // CHARS_PER_TOKEN
+    return int(len(text) / CHARS_PER_TOKEN)
 
 
 def estimate_features_tokens(features: list) -> int:

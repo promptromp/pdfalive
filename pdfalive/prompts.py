@@ -11,34 +11,31 @@ The data structure corresponds to the hierarchy of pages, blocks, lines, and spa
 
 ## Input Features
 
-Each feature (corresponding to a single span of text) is represented as a tuple of the form:
+Features are provided in a compact format with a font table and page-grouped spans.
 
-     (page_number, font_name, font_size, text_length, text_snippet[, y=<pos>, bold=<bool>])
+The format starts with a `FONTS:` section that maps short font IDs to full font names, followed by page groups where each span is encoded as pipe-delimited fields:
 
-The optional trailing fields are:
-- `y=<pos>`: Normalized vertical position on the page (0.0 = top of page, 1.0 = bottom of page). When present, use this to distinguish running headers (y near 0.0, typically < 0.05) from actual section headings that appear further down the page.
-- `bold=<bool>`: Whether the text span uses a bold font.
+    FONT_ID|FONT_SIZE|TEXT_SNIPPET[|Y_POS][|B]
 
-Example of how the features are structured:
-[
-    [  # Page 1
-        [  # Block 1
-            [  # Line 1
-                (1, "Times-Bold", 16, 45, "Chapter 1: Introduction", y=0.12, bold=True),
-                (1, "Times-Roman", 12, 120, "This is the first paragraph of the introduction...", y=0.15, bold=False)
-            ],
-            [  # Line 2
-                ("Times-Roman", 12, 98, "This is the second paragraph of the introduction...", y=0.20, bold=False)
-            ]
-        ],
-        [  # Block 2
-            [  # Line 1
-                ("Times-Bold", 14, 30, "Section 1.1: Background", y=0.45, bold=True),
-                ("Times-Roman", 12, 110, "Background information goes here...", y=0.48, bold=False)
-            ]
-        ]
-    ],
-]
+Optional trailing fields:
+- `Y_POS`: Normalized vertical position (e.g. `.12` means 12% from top). Use this to distinguish running headers (y near `.0`, typically < `.05`) from actual section headings further down the page.
+- `B`: Present when the span uses a bold font.
+
+Example:
+```
+FONTS:
+F0=Times-Bold
+F1=Times-Roman
+
+P1:
+F0|16|Chapter 1: Introductio|.12|B
+F1|12|This is the first para|.15
+F1|12|This is the second par|.2
+F0|14|Section 1.1: Backgroun|.45|B
+F1|12|Background information|.48
+```
+
+In this example, page 1 has spans from two fonts (F0=Times-Bold, F1=Times-Roman). The first span is bold (B), font size 16, at y-position 0.12 on the page.
 
 ## Task and Output Description
 
@@ -83,15 +80,15 @@ You are processing a batch of features from a large PDF document. Earlier batche
 
 ## Input Features
 
-Each feature (corresponding to a single span of text) is represented as a tuple of the form:
+Features are provided in a compact format with a font table and page-grouped spans.
 
-     (page_number, font_name, font_size, text_length, text_snippet[, y=<pos>, bold=<bool>])
+The format starts with a `FONTS:` section mapping short font IDs to full font names, followed by page groups where each span is:
 
-The optional trailing fields are:
-- `y=<pos>`: Normalized vertical position on the page (0.0 = top of page, 1.0 = bottom of page). When present, use this to distinguish running headers (y near 0.0, typically < 0.05) from actual section headings.
-- `bold=<bool>`: Whether the text span uses a bold font.
+    FONT_ID|FONT_SIZE|TEXT_SNIPPET[|Y_POS][|B]
 
-The features are structured hierarchically by pages, blocks, lines, and spans.
+Optional trailing fields:
+- `Y_POS`: Normalized vertical position (e.g. `.12` means 12% from top). Use to distinguish running headers (y near `.0`, < `.05`) from actual headings.
+- `B`: Present when the span uses a bold font.
 
 ## Task and Output Description
 
@@ -152,7 +149,7 @@ The **printed TOC** in the reference text may use the **book's own page numberin
 You will receive:
 - **Generated TOC**: The automatically extracted TOC entries with titles, page numbers, levels, and confidence scores
 - **Reference Text**: Text extracted from the first few pages that may contain a printed table of contents
-- **Document Features**: The font/text features used for extraction (for context). Features may include y-position (vertical position on page) and bold indicators which can help verify that headings are assigned to the correct pages (e.g. a heading at y=0.02 is likely a running header, not the actual section start)
+- **Document Features**: A compact summary of font/text features used for extraction (for context). Each line shows `Page N [FONT_ID SIZE] - "snippet"` with optional bold/y-position indicators to help verify heading placement (e.g. a heading at y=0.02 is likely a running header, not the actual section start)
 
 ## Output Format
 

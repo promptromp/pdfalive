@@ -10,12 +10,16 @@ from pdfalive.processors.toc_generator import (
     _FRONT_MATTER_TITLE_PATTERN,
     _FRONT_MATTER_TITLES,
     _LETTERSPACED_PATTERN,
+    _MAX_HEADING_CANDIDATES_PER_PAGE,
     _SECTION_NUMBER_PATTERN,
     TOCGenerator,
     _compute_body_font_profile,
     _extract_features_from_page_range,
+    _extract_toc_like_lines,
     _is_bold_font,
     _is_heading_candidate,
+    _strip_subset_prefix,
+    serialize_features_compact,
 )
 from pdfalive.tokens import TokenUsage
 
@@ -1635,8 +1639,8 @@ class TestSummarizeFeaturesForPostprocessing:
         result = generator._summarize_features_for_postprocessing(features, max_entries=50)
 
         assert result.count("\n") == 9  # 10 lines, 9 newlines
-        assert "Page 1" in result
-        assert "Page 10" in result
+        assert "P1 " in result
+        assert "P10 " in result
 
     def test_large_document_samples_evenly(self, mock_doc, mock_llm):
         """When total spans > max_entries, sampling covers the full document."""
@@ -1647,11 +1651,13 @@ class TestSummarizeFeaturesForPostprocessing:
         lines = result.strip().split("\n")
         assert len(lines) == 50
 
-        # Extract page numbers from summary lines
+        # Extract page numbers from compact summary lines
+        # Line format: "PN ..." or "PN@.y ..."
         page_numbers = []
         for line in lines:
-            # Line format: "Page N ..."
-            page_num = int(line.split()[1])
+            token = line.split()[0]  # e.g. "P42" or "P42@.12"
+            page_str = token.split("@")[0]  # strip y-position if present
+            page_num = int(page_str[1:])  # strip "P" prefix
             page_numbers.append(page_num)
 
         # First sample should be from early pages, last from late pages
@@ -1669,14 +1675,14 @@ class TestSummarizeFeaturesForPostprocessing:
         result = generator._summarize_features_for_postprocessing([], max_entries=50)
         assert result == "(No features available)"
 
-    def test_default_max_entries_is_150(self, mock_doc, mock_llm):
-        """Verify the default max_entries is 150."""
+    def test_default_max_entries_is_80(self, mock_doc, mock_llm):
+        """Verify the default max_entries is 80."""
         features = self._make_features(200)
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
-        # Call with default — should cap at 150
+        # Call with default — should cap at 80
         result = generator._summarize_features_for_postprocessing(features)
         lines = result.strip().split("\n")
-        assert len(lines) == 150
+        assert len(lines) == 80
 
 
 class TestDetectPageOffsetNote:
@@ -2389,3 +2395,331 @@ class TestFrontMatterTitlePattern:
         assert bool(_FRONT_MATTER_TITLE_PATTERN.match(title)) == is_front_matter, (
             f"Title '{title}' expected is_front_matter={is_front_matter}"
         )
+
+
+class TestStripSubsetPrefix:
+    """Tests for _strip_subset_prefix helper."""
+
+    @pytest.mark.parametrize(
+        "input_name,expected",
+        [
+            ("ABCDEF+TimesNewRomanPS-BoldMT", "TimesNewRomanPS-BoldMT"),
+            ("GHIJKL+Arial", "Arial"),
+            ("Times-Roman", "Times-Roman"),  # no prefix
+            ("Arial-Bold", "Arial-Bold"),  # no prefix
+            ("", ""),  # empty
+            ("ABCDEF+", ""),  # just prefix
+            ("abcdef+Times", "abcdef+Times"),  # lowercase doesn't match
+        ],
+    )
+    def test_strip_subset_prefix(self, input_name, expected):
+        """Test font subset prefix stripping."""
+        assert _strip_subset_prefix(input_name) == expected
+
+
+class TestSerializeFeaturesCompact:
+    """Tests for serialize_features_compact."""
+
+    def test_empty_features(self):
+        """Empty features produces empty output."""
+        result = serialize_features_compact([])
+        assert result == ""
+
+    def test_single_span(self):
+        """Single span produces font table and page entry."""
+        features = [
+            [
+                [
+                    TOCFeature(
+                        page_number=1,
+                        font_name="Times-Bold",
+                        font_size=16.0,
+                        text_length=25,
+                        text_snippet="Chapter 1: Intro",
+                        y_position=0.12,
+                        is_bold=True,
+                    )
+                ]
+            ]
+        ]
+        result = serialize_features_compact(features)
+        assert "FONTS:" in result
+        assert "F0=Times-Bold" in result
+        assert "P1:" in result
+        assert "F0|16|Chapter 1: Intro|.12|B" in result
+
+    def test_font_deduplication(self):
+        """Duplicate fonts are assigned the same ID."""
+        features = [
+            [
+                [
+                    TOCFeature(
+                        page_number=1,
+                        font_name="Times-Bold",
+                        font_size=16.0,
+                        text_length=10,
+                        text_snippet="Heading",
+                    ),
+                    TOCFeature(
+                        page_number=1,
+                        font_name="Times-Bold",
+                        font_size=12.0,
+                        text_length=20,
+                        text_snippet="Subheading",
+                    ),
+                ]
+            ]
+        ]
+        result = serialize_features_compact(features)
+        # Should have exactly one font entry
+        assert result.count("F0=") == 1
+        assert "F1=" not in result
+
+    def test_subset_prefix_stripped(self):
+        """Font subset prefixes (ABCDEF+) are stripped."""
+        features = [
+            [
+                [
+                    TOCFeature(
+                        page_number=1,
+                        font_name="ABCDEF+TimesNewRomanPS-BoldMT",
+                        font_size=14.0,
+                        text_length=10,
+                        text_snippet="Test",
+                    )
+                ]
+            ]
+        ]
+        result = serialize_features_compact(features)
+        assert "ABCDEF+" not in result
+        assert "TimesNewRomanPS-BoldMT" in result
+
+    def test_multiple_pages_grouped(self):
+        """Spans from different pages are grouped by page number."""
+        features = [
+            [
+                [
+                    TOCFeature(
+                        page_number=1,
+                        font_name="Arial",
+                        font_size=12.0,
+                        text_length=10,
+                        text_snippet="Page one",
+                    )
+                ]
+            ],
+            [
+                [
+                    TOCFeature(
+                        page_number=2,
+                        font_name="Arial",
+                        font_size=12.0,
+                        text_length=10,
+                        text_snippet="Page two",
+                    )
+                ]
+            ],
+        ]
+        result = serialize_features_compact(features)
+        assert "P1:" in result
+        assert "P2:" in result
+        # P1 should appear before P2
+        assert result.index("P1:") < result.index("P2:")
+
+    def test_font_size_rounding(self):
+        """Font sizes like 14.0 are rendered as '14', 12.5 as '12.5'."""
+        features = [
+            [
+                [
+                    TOCFeature(
+                        page_number=1,
+                        font_name="Font",
+                        font_size=14.0,
+                        text_length=5,
+                        text_snippet="A",
+                    ),
+                    TOCFeature(
+                        page_number=1,
+                        font_name="Font",
+                        font_size=12.5,
+                        text_length=5,
+                        text_snippet="B",
+                    ),
+                ]
+            ]
+        ]
+        result = serialize_features_compact(features)
+        assert "F0|14|A" in result
+        assert "F0|12.5|B" in result
+
+    def test_bold_omitted_when_false_or_none(self):
+        """Bold flag 'B' only emitted when is_bold=True."""
+        features = [
+            [
+                [
+                    TOCFeature(
+                        page_number=1,
+                        font_name="Font",
+                        font_size=12.0,
+                        text_length=5,
+                        text_snippet="A",
+                        is_bold=False,
+                    ),
+                    TOCFeature(
+                        page_number=1,
+                        font_name="Font",
+                        font_size=12.0,
+                        text_length=5,
+                        text_snippet="B",
+                        is_bold=None,
+                    ),
+                    TOCFeature(
+                        page_number=1,
+                        font_name="Font",
+                        font_size=12.0,
+                        text_length=5,
+                        text_snippet="C",
+                        is_bold=True,
+                    ),
+                ]
+            ]
+        ]
+        result = serialize_features_compact(features)
+        lines = [line for line in result.split("\n") if line.startswith("F0")]
+        # Only the third span should have |B
+        assert "|B" not in lines[0]
+        assert "|B" not in lines[1]
+        assert "|B" in lines[2]
+
+    def test_compact_vs_str_is_shorter(self):
+        """Compact format should be substantially shorter than str() format."""
+        features = []
+        for page_num in range(1, 20):
+            block = [
+                [
+                    TOCFeature(
+                        page_number=page_num,
+                        font_name="ABCDEF+TimesNewRomanPS-BoldMT",
+                        font_size=14.0,
+                        text_length=50,
+                        text_snippet=f"Chapter {page_num}: Some Title",
+                        y_position=0.12,
+                        is_bold=True,
+                    )
+                ]
+            ]
+            features.append(block)
+
+        compact = serialize_features_compact(features)
+        verbose = str(features)
+        # Compact format should be at least 40% shorter
+        assert len(compact) < len(verbose) * 0.6, (
+            f"Compact ({len(compact)}) not sufficiently shorter than verbose ({len(verbose)})"
+        )
+
+
+class TestExtractTocLikeLines:
+    """Tests for _extract_toc_like_lines helper."""
+
+    def test_keeps_lines_with_dot_leaders(self):
+        """Lines with dot-leader page numbers are kept."""
+        text = (
+            "Chapter 1: Introduction.............1\n"
+            "Some body text that goes on and on and on and on and on "
+            "and on and on and on and on and on and on and on.\n"
+            "Chapter 2: Methods.................15"
+        )
+        result = _extract_toc_like_lines(text)
+        assert "Introduction" in result
+        assert "Methods" in result
+
+    def test_keeps_section_numbered_lines(self):
+        """Lines matching section numbering are kept."""
+        text = "1. Introduction\nSome body text here\n2.3 Subsection Title"
+        result = _extract_toc_like_lines(text)
+        assert "1. Introduction" in result
+        assert "2.3 Subsection Title" in result
+
+    def test_keeps_short_lines(self):
+        """Short title-like lines (< 100 chars) are kept."""
+        long_line = (
+            "A very long line that exceeds one hundred characters and "
+            "contains mostly body text that would not be useful for "
+            "table of contents extraction purposes at all"
+        )
+        text = f"Chapter Summary\n{long_line}"
+        result = _extract_toc_like_lines(text)
+        assert "Chapter Summary" in result
+        assert "very long line" not in result
+
+    def test_empty_text(self):
+        """Empty text returns empty string."""
+        assert _extract_toc_like_lines("") == ""
+
+    def test_tab_separated_page_numbers(self):
+        """Lines with tab-separated page numbers are kept."""
+        text = "Introduction\t1\nBody text paragraph.\nMethods\t15"
+        result = _extract_toc_like_lines(text)
+        assert "Introduction\t1" in result
+        assert "Methods\t15" in result
+
+    def test_skips_blank_lines(self):
+        """Blank lines are skipped."""
+        text = "Title\n\n\nAnother Title"
+        result = _extract_toc_like_lines(text)
+        lines = result.split("\n")
+        assert all(line.strip() for line in lines)
+
+
+class TestHeadingCandidateCap:
+    """Tests for Phase 2 heading candidate per-page cap."""
+
+    def test_caps_candidates_per_page(self):
+        """Phase 2 should limit heading candidates to _MAX_HEADING_CANDIDATES_PER_PAGE per page."""
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.name = None
+
+        page_height = 800.0
+        page = MagicMock()
+        page.rect.height = page_height
+
+        # Create a page with many blocks beyond max_blocks_per_page=2
+        body_span = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "Body text paragraph",
+            "bbox": (50, 50, 400, 65),
+            "flags": 0,
+        }
+        # Create 10 heading-like spans in blocks beyond the limit
+        blocks = [
+            {"type": 0, "lines": [{"spans": [body_span]}]},
+            {"type": 0, "lines": [{"spans": [body_span]}]},
+        ]
+        for i in range(10):
+            heading_span = {
+                "font": "Times-Bold",
+                "size": 18,
+                "text": f"Heading {i + 1} Title Here",
+                "bbox": (50, 200 + i * 40, 400, 215 + i * 40),
+                "flags": 16,
+            }
+            blocks.append({"type": 0, "lines": [{"spans": [heading_span]}]})
+
+        page.get_text.return_value = {"height": page_height, "blocks": blocks}
+        doc.__iter__ = lambda self: iter([page])
+
+        mock_llm = MagicMock()
+        generator = TOCGenerator(doc=doc, llm=mock_llm)
+        features = generator._extract_features_sequential(doc, max_blocks_per_page=2, show_progress=False)
+
+        # Count heading candidates (features beyond the initial 2 blocks)
+        heading_candidates = []
+        for block in features[2:]:
+            for line in block:
+                for span in line:
+                    if isinstance(span, TOCFeature) and "Heading" in span.text_snippet:
+                        heading_candidates.append(span)
+
+        assert len(heading_candidates) <= _MAX_HEADING_CANDIDATES_PER_PAGE
