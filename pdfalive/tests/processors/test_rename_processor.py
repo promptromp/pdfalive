@@ -432,9 +432,9 @@ class TestRenameProcessorBatching:
         query = "Rename files"
 
         # Force multiple batches with very small token limit (just enough for prompt overhead + 1 file)
-        # Each filename is ~50 chars = ~17 tokens, so set limit to fit only 1 file
+        # Each filename is ~12 tokens (tiktoken), so set limit to fit only 1 file
         result, usage = processor.generate_renames(
-            paths, query, max_tokens_per_batch=PROMPT_OVERHEAD_TOKENS + 20, request_delay=0
+            paths, query, max_tokens_per_batch=PROMPT_OVERHEAD_TOKENS + 15, request_delay=0
         )
 
         # Should have called LLM twice (once per batch)
@@ -486,8 +486,8 @@ class TestRenameProcessorBatching:
         ]
         query = "Rename files"
 
-        # Use very small token limit to force batching
-        processor.generate_renames(paths, query, max_tokens_per_batch=PROMPT_OVERHEAD_TOKENS + 25, request_delay=0)
+        # Use very small token limit to force batching (each filename is ~12 tokens with tiktoken)
+        processor.generate_renames(paths, query, max_tokens_per_batch=PROMPT_OVERHEAD_TOKENS + 15, request_delay=0)
 
         # Should have multiple calls
         assert len(messages_received) >= 2
