@@ -1393,15 +1393,24 @@ must be PDF page numbers (not printed page numbers).
         for block in page_dict.get("blocks", []):
             if block.get("type") != 0:
                 continue
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    span_bbox = span.get("bbox")
-                    if span_bbox and page_height > 0:
-                        y_pos = span_bbox[1] / page_height
-                        if y_pos > y_threshold:
-                            span_text = _normalize_snippet(span.get("text", ""))
-                            if len(span_text) >= 3 and (search_text in span_text or span_text in search_text):
-                                return True
+            # Concatenate all text in the block and check y-position from the
+            # first span. This handles OCR text where headings are split across
+            # many single-word spans within one block.
+            block_spans = [span for line in block.get("lines", []) for span in line.get("spans", [])]
+            if not block_spans:
+                continue
+            first_bbox = block_spans[0].get("bbox")
+            if not first_bbox or page_height <= 0:
+                continue
+            y_pos = first_bbox[1] / page_height
+            if y_pos <= y_threshold:
+                continue
+            block_text = " ".join(s.get("text", "") for s in block_spans)
+            block_text_normalized = _normalize_snippet(block_text)
+            if len(block_text_normalized) >= 3 and (
+                search_text in block_text_normalized or block_text_normalized in search_text
+            ):
+                return True
         return False
 
     def _correct_running_header_pages(self, toc: TOC, features: list) -> TOC:
@@ -1423,16 +1432,27 @@ must be PDF page numbers (not printed page numbers).
         if not toc.entries:
             return toc
 
-        # Build feature index: (page_number, normalized_snippet) -> list of y-positions
-        feature_index: dict[tuple[int, str], list[float]] = {}
+        # Build page-zone text index: group feature text by page and y-zone.
+        # In OCR text each word is a separate span, so matching individual spans
+        # against multi-word titles fails. Instead, concatenate all feature text
+        # per page in two zones: "header" (y < RUNNING_HEADER_Y_THRESHOLD) and
+        # "body" (y >= RUNNING_HEADER_Y_THRESHOLD), then match against the
+        # concatenated text.
+        page_header_text: dict[int, str] = {}  # page -> concatenated header zone text
+        page_body_text: dict[int, str] = {}  # page -> concatenated body zone text
         for block in features:
             for line in block:
                 for span in line:
                     if isinstance(span, TOCFeature) and span.y_position is not None:
-                        key = (span.page_number, _normalize_snippet(span.text_snippet))
-                        if key not in feature_index:
-                            feature_index[key] = []
-                        feature_index[key].append(span.y_position)
+                        norm = _normalize_snippet(span.text_snippet)
+                        if not norm:
+                            continue
+                        if span.y_position < _RUNNING_HEADER_Y_THRESHOLD:
+                            page_header_text.setdefault(span.page_number, "")
+                            page_header_text[span.page_number] += " " + norm
+                        else:
+                            page_body_text.setdefault(span.page_number, "")
+                            page_body_text[span.page_number] += " " + norm
 
         corrected = []
         corrections = 0
@@ -1445,33 +1465,26 @@ must be PDF page numbers (not printed page numbers).
                 corrected.append(entry)
                 continue
 
-            # Find all y-positions where this title appears in features for this page
-            # Check both exact match and substring containment
-            y_positions: list[float] = []
-            for (feat_page, feat_text), feat_ys in feature_index.items():
-                if feat_page == page and len(feat_text) >= 3 and (entry_text in feat_text or feat_text in entry_text):
-                    y_positions.extend(feat_ys)
+            # Check if the title appears in the header zone of this page
+            header_text = page_header_text.get(page, "")
+            in_header = entry_text in header_text or header_text.strip() in entry_text
 
-            # Only flag as suspicious if ALL matches are at running header position
-            is_running_header_only = y_positions and all(y < _RUNNING_HEADER_Y_THRESHOLD for y in y_positions)
+            # Check if the title also appears in the body zone of this page
+            body_text = page_body_text.get(page, "")
+            in_body = bool(body_text) and (entry_text in body_text or body_text.strip() in entry_text)
+
+            # Only flag as suspicious if title IS in header zone but NOT in body zone
+            is_running_header_only = in_header and not in_body
 
             if not is_running_header_only:
                 corrected.append(entry)
                 continue
 
             # Suspicious entry: check if heading exists on previous page
-            # First try: check feature index for page N-1 with y > 0.5
+            # First try: check body features on page N-1
             prev_page = page - 1
-            found_on_prev = False
-            for (feat_page, feat_text), feat_ys in feature_index.items():
-                if (
-                    feat_page == prev_page
-                    and len(feat_text) >= 3
-                    and (entry_text in feat_text or feat_text in entry_text)
-                    and any(y > 0.5 for y in feat_ys)
-                ):
-                    found_on_prev = True
-                    break
+            prev_body = page_body_text.get(prev_page, "")
+            found_on_prev = bool(prev_body) and (entry_text in prev_body or prev_body.strip() in entry_text)
 
             # Fallback: search the actual PDF for heading in bottom of previous page
             if not found_on_prev:
