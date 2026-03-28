@@ -97,6 +97,13 @@ _HEADING_FONT_SIZE_RATIO_PHASE2 = 1.2
 # Maximum number of heading candidates to add per page from Phase 2 scanning
 _MAX_HEADING_CANDIDATES_PER_PAGE = 3
 
+# Normalized y-position threshold: spans below this are in the "bottom of page" zone
+# where relaxed heading detection criteria are applied (Phase 2)
+_BOTTOM_OF_PAGE_Y_THRESHOLD = 0.6
+
+# Running header y-position threshold: features at y < this are likely running headers
+_RUNNING_HEADER_Y_THRESHOLD = 0.05
+
 # Fuzzy match: minimum length of the shorter string for substring matching
 _FUZZY_MIN_SUBSTRING_LEN = 8
 
@@ -104,6 +111,20 @@ _FUZZY_MIN_SUBSTRING_LEN = 8
 # match to be accepted.  Blocks e.g. "introduction" (12) matching
 # "2 introduction to itocalculus" (29) since 12/29 = 0.41 < 0.5.
 _FUZZY_MIN_COVERAGE_RATIO = 0.5
+
+
+def _normalize_snippet(text: str) -> str:
+    """Normalize text for fuzzy matching: strip numbering, punctuation, whitespace.
+
+    Args:
+        text: Raw text to normalize.
+
+    Returns:
+        Lowercased text with numbering prefixes, punctuation, and extra whitespace removed.
+    """
+    text = re.sub(r"^\d+(?:\.\d+)*[\.\)]*\s*", "", text)  # Strip "1. ", "3.2 ", "1) " prefixes
+    text = re.sub(r"[^\w\s]", "", text)
+    return re.sub(r"\s+", " ", text.strip().lower())
 
 
 def apply_toc_to_document(doc: pymupdf.Document, toc: list, output_file: str) -> None:
@@ -384,11 +405,16 @@ def _compute_body_font_profile(features: list) -> tuple[str, float]:
     return counter.most_common(1)[0][0]
 
 
-def _is_heading_candidate(span: dict, body_font_name: str, body_font_size: float) -> bool:
+def _is_heading_candidate(
+    span: dict,
+    body_font_name: str,
+    body_font_size: float,
+    font_size_ratio: float = _HEADING_FONT_SIZE_RATIO,
+) -> bool:
     """Determine if a span is likely a heading based on font characteristics.
 
     A span is a heading candidate if:
-    - Font size >= 1.15x body font size (15% larger), OR
+    - Font size >= font_size_ratio * body font size, OR
     - Bold font AND font size >= body font size, OR
     - Text matches section numbering pattern (e.g. "1.", "Chapter", "Section")
     AND text length is between 3-200 chars.
@@ -397,6 +423,10 @@ def _is_heading_candidate(span: dict, body_font_name: str, body_font_size: float
         span: A PyMuPDF span dict.
         body_font_name: The most common font name (body text baseline).
         body_font_size: The most common font size (body text baseline).
+        font_size_ratio: Minimum font size ratio vs body text for size-based detection.
+            Defaults to _HEADING_FONT_SIZE_RATIO (1.15). Pass a higher value
+            (e.g. _HEADING_FONT_SIZE_RATIO_PHASE2) for stricter Phase 2 scanning.
+            This does NOT affect the bold-based check, which always uses body_font_size.
 
     Returns:
         True if the span looks like a heading.
@@ -411,7 +441,7 @@ def _is_heading_candidate(span: dict, body_font_name: str, body_font_size: float
     is_bold = _is_bold_font(span)
 
     # Size-based: significantly larger than body text
-    if body_font_size > 0 and font_size >= body_font_size * _HEADING_FONT_SIZE_RATIO:
+    if body_font_size > 0 and font_size >= body_font_size * font_size_ratio:
         return True
 
     # Bold + at least body size
@@ -558,12 +588,20 @@ class TOCGenerator:
         features = self._extract_features(self.doc)
         toc, usage = self._extract_toc(features, request_delay=request_delay)
 
+        # Deterministic correction: fix entries that point to running headers
+        # instead of actual section starts (e.g., when a section starts near the
+        # bottom of page N but the feature extraction only picked up the running
+        # header at the top of page N+1).
+        toc = self._correct_running_header_pages(toc, features)
+
         # Optionally postprocess the TOC to clean up duplicates, fix errors, etc.
         if postprocess:
             toc, postprocess_usage = self._postprocess_toc(toc, features)
             usage = usage + postprocess_usage
-            toc = toc.sort_by_page()
 
+        # Enforce page number monotonicity after any corrections (running header
+        # correction and/or postprocessing may reorder entries).
+        toc = toc.sort_by_page()
         toc = toc.sanitize_hierarchy()
         self.doc.set_toc(toc.to_list())
         self.doc.save(output_file)
@@ -720,11 +758,12 @@ class TOCGenerator:
                 _process_page(page, ix + 1)
 
         # Phase 2: Compute body font profile and scan remaining blocks for heading candidates
-        # Uses stricter criteria than Phase 1 to limit false positives from body text
+        # Uses stricter criteria than Phase 1 to limit false positives from body text,
+        # but relaxes criteria for spans near the bottom of pages to catch section headings
+        # that start late on a page (which otherwise get misattributed to running headers
+        # on the next page).
         if remaining_spans_buffer:
             body_font_name, body_font_size = _compute_body_font_profile(features)
-            # Stricter body size threshold for Phase 2
-            phase2_body_size = body_font_size * (_HEADING_FONT_SIZE_RATIO_PHASE2 / _HEADING_FONT_SIZE_RATIO)
 
             # Group heading candidates by their insert_index for in-order insertion
             # Process in reverse order so insert indices remain valid
@@ -736,9 +775,17 @@ class TOCGenerator:
                 if page_candidate_count.get(page_number, 0) >= _MAX_HEADING_CANDIDATES_PER_PAGE:
                     continue
                 for span in spans:
-                    if _is_heading_candidate(span, body_font_name, phase2_body_size):
-                        bbox = span.get("bbox", None)
-                        y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+                    bbox = span.get("bbox", None)
+                    y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+
+                    # Use relaxed criteria (Phase 1 ratio) for bottom-of-page spans
+                    # to catch section headings that start late on a page
+                    if y_pos is not None and y_pos > _BOTTOM_OF_PAGE_Y_THRESHOLD:
+                        ratio = _HEADING_FONT_SIZE_RATIO
+                    else:
+                        ratio = _HEADING_FONT_SIZE_RATIO_PHASE2
+
+                    if _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=ratio):
                         feature = TOCFeature(
                             page_number=page_number,
                             font_name=span["font"],
@@ -836,10 +883,10 @@ class TOCGenerator:
             feature_offset += len(features)
 
         # Phase 2: Compute body font profile and scan for heading candidates
-        # Uses stricter criteria than Phase 1 to limit false positives
+        # Uses stricter criteria than Phase 1 to limit false positives,
+        # but relaxes criteria for bottom-of-page spans to catch late-starting sections.
         if all_remaining_spans:
             body_font_name, body_font_size = _compute_body_font_profile(all_features)
-            phase2_body_size = body_font_size * (_HEADING_FONT_SIZE_RATIO_PHASE2 / _HEADING_FONT_SIZE_RATIO)
 
             candidates_by_index: dict[int, list[list]] = {}
             page_candidate_count: dict[int, int] = {}
@@ -848,9 +895,16 @@ class TOCGenerator:
                 if page_candidate_count.get(page_number, 0) >= _MAX_HEADING_CANDIDATES_PER_PAGE:
                     continue
                 for span in spans:
-                    if _is_heading_candidate(span, body_font_name, phase2_body_size):
-                        bbox = span.get("bbox", None)
-                        y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+                    bbox = span.get("bbox", None)
+                    y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+
+                    # Use relaxed criteria (Phase 1 ratio) for bottom-of-page spans
+                    if y_pos is not None and y_pos > _BOTTOM_OF_PAGE_Y_THRESHOLD:
+                        ratio = _HEADING_FONT_SIZE_RATIO
+                    else:
+                        ratio = _HEADING_FONT_SIZE_RATIO_PHASE2
+
+                    if _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=ratio):
                         feature = TOCFeature(
                             page_number=page_number,
                             font_name=span["font"],
@@ -1293,10 +1347,7 @@ must be PDF page numbers (not printed page numbers).
         Returns:
             True if the title text is found on or near the page.
         """
-        # Normalize: strip common prefixes, punctuation, lowercase, collapse whitespace
-        search_text = re.sub(r"^\d+\.\s*", "", title)  # Strip "1. " prefixes
-        search_text = re.sub(r"[^\w\s]", "", search_text)  # Strip all punctuation
-        search_text = re.sub(r"\s+", " ", search_text.strip().lower())
+        search_text = _normalize_snippet(title)
 
         if len(search_text) < 3:
             return False  # Too short to match reliably
@@ -1306,12 +1357,138 @@ must be PDF page numbers (not printed page numbers).
 
         for page_idx in range(start, end):
             page_text = self.doc[page_idx].get_text("text")
-            page_text_normalized = re.sub(r"[^\w\s]", "", page_text.lower())
-            page_text_normalized = re.sub(r"\s+", " ", page_text_normalized)
+            page_text_normalized = _normalize_snippet(page_text)
             if search_text in page_text_normalized:
                 return True
 
         return False
+
+    def _page_has_heading_in_bottom(self, page_number: int, title: str, y_threshold: float = 0.5) -> bool:
+        """Check if heading text appears in the bottom portion of a given page.
+
+        Searches the actual PDF page structure (blocks/spans) for text matching
+        the title at a vertical position below y_threshold.
+
+        Args:
+            page_number: 1-indexed PDF page number.
+            title: Heading title to search for.
+            y_threshold: Normalized y-position threshold (0.0=top, 1.0=bottom).
+                Only spans with y > y_threshold are searched.
+
+        Returns:
+            True if the title is found in the bottom portion of the page.
+        """
+        page_idx = page_number - 1
+        if page_idx < 0 or page_idx >= self.doc.page_count:
+            return False
+
+        page = self.doc[page_idx]
+        page_dict = page.get_text("dict")
+        page_height = page_dict.get("height", 1.0)
+
+        search_text = _normalize_snippet(title)
+        if len(search_text) < 3:
+            return False
+
+        for block in page_dict.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    span_bbox = span.get("bbox")
+                    if span_bbox and page_height > 0:
+                        y_pos = span_bbox[1] / page_height
+                        if y_pos > y_threshold:
+                            span_text = _normalize_snippet(span.get("text", ""))
+                            if len(span_text) >= 3 and (search_text in span_text or span_text in search_text):
+                                return True
+        return False
+
+    def _correct_running_header_pages(self, toc: TOC, features: list) -> TOC:
+        """Correct TOC entries that point to running headers instead of actual headings.
+
+        For each entry, checks if the title text appears only at running header
+        position (y < 0.05) in the extracted features. If so, searches page N-1
+        for the actual heading in the bottom portion and corrects the page number.
+
+        This is a deterministic correction that requires no additional LLM calls.
+
+        Args:
+            toc: The generated TOC to correct.
+            features: The extracted features used for TOC generation.
+
+        Returns:
+            A corrected TOC with running header misattributions fixed.
+        """
+        if not toc.entries:
+            return toc
+
+        # Build feature index: (page_number, normalized_snippet) -> list of y-positions
+        feature_index: dict[tuple[int, str], list[float]] = {}
+        for block in features:
+            for line in block:
+                for span in line:
+                    if isinstance(span, TOCFeature) and span.y_position is not None:
+                        key = (span.page_number, _normalize_snippet(span.text_snippet))
+                        if key not in feature_index:
+                            feature_index[key] = []
+                        feature_index[key].append(span.y_position)
+
+        corrected = []
+        corrections = 0
+
+        for entry in toc.entries:
+            page = entry.page_number
+            entry_text = _normalize_snippet(entry.title)
+
+            if len(entry_text) < 3 or page <= 1:
+                corrected.append(entry)
+                continue
+
+            # Find all y-positions where this title appears in features for this page
+            # Check both exact match and substring containment
+            y_positions: list[float] = []
+            for (feat_page, feat_text), feat_ys in feature_index.items():
+                if feat_page == page and len(feat_text) >= 3 and (entry_text in feat_text or feat_text in entry_text):
+                    y_positions.extend(feat_ys)
+
+            # Only flag as suspicious if ALL matches are at running header position
+            is_running_header_only = y_positions and all(y < _RUNNING_HEADER_Y_THRESHOLD for y in y_positions)
+
+            if not is_running_header_only:
+                corrected.append(entry)
+                continue
+
+            # Suspicious entry: check if heading exists on previous page
+            # First try: check feature index for page N-1 with y > 0.5
+            prev_page = page - 1
+            found_on_prev = False
+            for (feat_page, feat_text), feat_ys in feature_index.items():
+                if (
+                    feat_page == prev_page
+                    and len(feat_text) >= 3
+                    and (entry_text in feat_text or feat_text in entry_text)
+                    and any(y > 0.5 for y in feat_ys)
+                ):
+                    found_on_prev = True
+                    break
+
+            # Fallback: search the actual PDF for heading in bottom of previous page
+            if not found_on_prev:
+                found_on_prev = self._page_has_heading_in_bottom(prev_page, entry.title)
+
+            if found_on_prev:
+                corrected.append(entry.model_copy(update={"page_number": prev_page}))
+                corrections += 1
+            else:
+                corrected.append(entry)
+
+        if corrections > 0:
+            console.print(
+                f"  [yellow]Corrected {corrections} entries from running headers to actual section starts[/yellow]"
+            )
+
+        return TOC(entries=corrected)
 
     def _correct_postprocessed_page_numbers(self, original_toc: TOC, refined_toc: TOC) -> TOC:
         """Correct page numbers for entries added or modified by the postprocessor.

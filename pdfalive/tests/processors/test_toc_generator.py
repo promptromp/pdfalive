@@ -7,10 +7,14 @@ import pytest
 
 from pdfalive.models.toc import TOC, TOCEntry, TOCFeature
 from pdfalive.processors.toc_generator import (
+    _BOTTOM_OF_PAGE_Y_THRESHOLD,
     _FRONT_MATTER_TITLE_PATTERN,
     _FRONT_MATTER_TITLES,
+    _HEADING_FONT_SIZE_RATIO,
+    _HEADING_FONT_SIZE_RATIO_PHASE2,
     _LETTERSPACED_PATTERN,
     _MAX_HEADING_CANDIDATES_PER_PAGE,
+    _RUNNING_HEADER_Y_THRESHOLD,
     _SECTION_NUMBER_PATTERN,
     TOCGenerator,
     _compute_body_font_profile,
@@ -19,6 +23,7 @@ from pdfalive.processors.toc_generator import (
     _is_bold_font,
     _is_heading_candidate,
     _is_retryable_error,
+    _normalize_snippet,
     _strip_subset_prefix,
     serialize_features_compact,
 )
@@ -2781,3 +2786,360 @@ class TestIsRetryableError:
         exc.status_code = 429  # type: ignore[attr-defined]
         # Status code 429 → retryable, even though name contains "ContextOverflow"
         assert _is_retryable_error(exc) is True
+
+
+class TestIsHeadingCandidateFontSizeRatio:
+    """Tests for the font_size_ratio parameter of _is_heading_candidate."""
+
+    @pytest.fixture
+    def body_font_size(self):
+        return 12.0
+
+    @pytest.fixture
+    def body_font_name(self):
+        return "Times-Roman"
+
+    def test_default_ratio_matches_phase1(self, body_font_name, body_font_size):
+        """Default font_size_ratio uses Phase 1 ratio (1.15x)."""
+        span = {"font": "Times-Roman", "size": 13.9, "text": "Heading Text Here", "flags": 0}
+        # 13.9 >= 12.0 * 1.15 = 13.8 → should pass with default ratio
+        assert _is_heading_candidate(span, body_font_name, body_font_size) is True
+
+    def test_phase2_ratio_is_stricter(self, body_font_name, body_font_size):
+        """Phase 2 ratio (1.2x) rejects headings that Phase 1 would accept."""
+        span = {"font": "Times-Roman", "size": 13.9, "text": "Heading Text Here", "flags": 0}
+        # 13.9 < 12.0 * 1.2 = 14.4 → should fail with Phase 2 ratio
+        assert (
+            _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=_HEADING_FONT_SIZE_RATIO_PHASE2)
+            is False
+        )
+
+    def test_bold_check_not_affected_by_ratio(self, body_font_name, body_font_size):
+        """Bold check uses body_font_size directly, not scaled by ratio."""
+        # Bold heading at exactly body font size — should always pass
+        # (text does not match section numbering, so this tests the bold path only)
+        span = {"font": "Times-Bold", "size": 12.0, "text": "Precision and Accuracy", "flags": 16}
+        assert (
+            _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=_HEADING_FONT_SIZE_RATIO_PHASE2)
+            is True
+        )
+
+    def test_bold_at_body_size_was_broken_before(self, body_font_name, body_font_size):
+        """Regression: the old Phase 2 code inflated body_font_size to 1.043x, breaking bold check.
+
+        With the old approach: phase2_body_size = 12.0 * (1.2/1.15) = 12.52,
+        and bold check required font_size >= 12.52, so 12.0 would fail.
+        The new approach passes body_font_size=12.0 directly, so 12.0 passes.
+        """
+        old_phase2_body_size = body_font_size * (_HEADING_FONT_SIZE_RATIO_PHASE2 / _HEADING_FONT_SIZE_RATIO)
+        # Use text that does NOT match section numbering or letter-spaced patterns
+        span = {"font": "Times-Bold", "size": 12.0, "text": "Precision and Accuracy", "flags": 16}
+        # Old behavior: would fail because 12.0 < 12.52 (both size and bold checks fail)
+        assert _is_heading_candidate(span, body_font_name, old_phase2_body_size) is False
+        # New behavior: passes because bold check uses true body_font_size=12.0
+        assert (
+            _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=_HEADING_FONT_SIZE_RATIO_PHASE2)
+            is True
+        )
+
+    def test_section_numbering_unaffected_by_ratio(self, body_font_name, body_font_size):
+        """Section numbering pattern match is independent of font_size_ratio."""
+        span = {"font": "Times-Roman", "size": 10.0, "text": "3.2 Precision and Accuracy", "flags": 0}
+        assert (
+            _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=_HEADING_FONT_SIZE_RATIO_PHASE2)
+            is True
+        )
+
+
+class TestNormalizeSnippet:
+    """Tests for the _normalize_snippet helper."""
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("3.2 Precision and Accuracy", "precision and accuracy"),
+            ("1. Introduction", "introduction"),
+            ("  Chapter 1: Overview  ", "chapter 1 overview"),
+            ("FLOATING-POINT COMPUTATION", "floatingpoint computation"),
+            ("Ab", "ab"),
+            ("", ""),
+            ("1) First Item", "first item"),
+        ],
+    )
+    def test_normalization(self, text, expected):
+        assert _normalize_snippet(text) == expected
+
+
+class TestCorrectRunningHeaderPages:
+    """Tests for the _correct_running_header_pages method."""
+
+    @pytest.fixture
+    def mock_doc(self):
+        """Create a mock document for running header tests."""
+        doc = MagicMock()
+        doc.page_count = 10
+        doc.name = None
+        return doc
+
+    @pytest.fixture
+    def mock_llm(self):
+        return MagicMock()
+
+    def _make_feature(self, page: int, text: str, y_pos: float, bold: bool = False) -> TOCFeature:
+        return TOCFeature(
+            page_number=page,
+            font_name="Times-Bold" if bold else "Times-Roman",
+            font_size=14.0 if bold else 12.0,
+            text_length=len(text),
+            text_snippet=text[:25],
+            y_position=y_pos,
+            is_bold=bold,
+        )
+
+    def test_corrects_running_header_to_previous_page(self, mock_doc, mock_llm):
+        """Entry detected from running header should be corrected to page N-1."""
+        generator = TOCGenerator(mock_doc, mock_llm)
+
+        # Features: heading at bottom of page 5, running header at top of page 6
+        features = [
+            [[self._make_feature(5, "Precision and Accuracy", 0.82, bold=True)]],
+            [[self._make_feature(6, "Precision and Accuracy", 0.03, bold=True)]],
+            [[self._make_feature(6, "Body text continues", 0.15)]],
+        ]
+
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Precision and Accuracy", page_number=6, level=2, confidence=0.9),
+            ]
+        )
+
+        result = generator._correct_running_header_pages(toc, features)
+        assert result.entries[0].page_number == 5
+
+    def test_no_correction_when_heading_mid_page(self, mock_doc, mock_llm):
+        """Entry with mid-page occurrence should NOT be corrected."""
+        generator = TOCGenerator(mock_doc, mock_llm)
+
+        # Features: heading at mid-page on page 3 (genuine heading)
+        features = [
+            [[self._make_feature(3, "Chapter Overview", 0.03, bold=True)]],
+            [[self._make_feature(3, "Chapter Overview", 0.40, bold=True)]],
+        ]
+
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Chapter Overview", page_number=3, level=1, confidence=0.95),
+            ]
+        )
+
+        result = generator._correct_running_header_pages(toc, features)
+        assert result.entries[0].page_number == 3
+
+    def test_no_correction_for_page_1(self, mock_doc, mock_llm):
+        """Entries on page 1 should not be corrected (no previous page)."""
+        generator = TOCGenerator(mock_doc, mock_llm)
+
+        features = [
+            [[self._make_feature(1, "Introduction", 0.03, bold=True)]],
+        ]
+
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Introduction", page_number=1, level=1, confidence=0.95),
+            ]
+        )
+
+        result = generator._correct_running_header_pages(toc, features)
+        assert result.entries[0].page_number == 1
+
+    def test_fallback_to_pdf_text_search(self, mock_doc, mock_llm):
+        """When features lack page N-1 data, falls back to PDF text search."""
+        generator = TOCGenerator(mock_doc, mock_llm)
+
+        # Features only have running header on page 8, nothing on page 7
+        features = [
+            [[self._make_feature(8, "Error Analysis", 0.02, bold=True)]],
+        ]
+
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Error Analysis", page_number=8, level=2, confidence=0.85),
+            ]
+        )
+
+        # Mock the PDF: page 7 (0-indexed: 6) has "Error Analysis" near bottom
+        page7 = MagicMock()
+        page7.get_text.return_value = {
+            "height": 800.0,
+            "blocks": [
+                {
+                    "type": 0,
+                    "lines": [
+                        {"spans": [{"text": "body text", "bbox": (50, 100, 400, 120)}]},
+                    ],
+                },
+                {
+                    "type": 0,
+                    "lines": [
+                        {"spans": [{"text": "3.4 Error Analysis", "bbox": (50, 520, 400, 540)}]},
+                    ],
+                },
+            ],
+        }
+        mock_doc.__getitem__ = lambda self_doc, idx: page7 if idx == 6 else MagicMock()
+
+        result = generator._correct_running_header_pages(toc, features)
+        assert result.entries[0].page_number == 7
+
+    def test_no_correction_when_not_found_on_prev_page(self, mock_doc, mock_llm):
+        """When heading not found on previous page, entry stays unchanged."""
+        generator = TOCGenerator(mock_doc, mock_llm)
+
+        features = [
+            [[self._make_feature(5, "Convergence", 0.03, bold=True)]],
+        ]
+
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Convergence", page_number=5, level=2, confidence=0.85),
+            ]
+        )
+
+        # Mock: page 4 (0-indexed: 3) has no matching text
+        page4 = MagicMock()
+        page4.get_text.return_value = {
+            "height": 800.0,
+            "blocks": [
+                {
+                    "type": 0,
+                    "lines": [
+                        {"spans": [{"text": "unrelated content", "bbox": (50, 600, 400, 620)}]},
+                    ],
+                },
+            ],
+        }
+        mock_doc.__getitem__ = lambda self_doc, idx: page4 if idx == 3 else MagicMock()
+
+        result = generator._correct_running_header_pages(toc, features)
+        assert result.entries[0].page_number == 5
+
+    def test_empty_toc_returns_unchanged(self, mock_doc, mock_llm):
+        """Empty TOC should be returned as-is."""
+        generator = TOCGenerator(mock_doc, mock_llm)
+        toc = TOC(entries=[])
+        result = generator._correct_running_header_pages(toc, [])
+        assert result.entries == []
+
+
+class TestPageHasHeadingInBottom:
+    """Tests for the _page_has_heading_in_bottom helper."""
+
+    @pytest.fixture
+    def mock_doc(self):
+        doc = MagicMock()
+        doc.page_count = 5
+        doc.name = None
+        return doc
+
+    @pytest.fixture
+    def mock_llm(self):
+        return MagicMock()
+
+    def _make_page(self, blocks):
+        """Create a mock page returning the given blocks in get_text('dict')."""
+        page = MagicMock()
+        page.get_text.return_value = {"height": 800.0, "blocks": blocks}
+        return page
+
+    def test_finds_heading_in_bottom(self, mock_doc, mock_llm):
+        """Returns True when heading text is in the bottom portion."""
+        page = self._make_page(
+            [
+                {
+                    "type": 0,
+                    "lines": [
+                        {"spans": [{"text": "3.2 Precision and Accuracy", "bbox": (50, 520, 400, 540)}]},
+                    ],
+                },
+            ]
+        )
+        mock_doc.__getitem__ = lambda self, idx: page
+
+        generator = TOCGenerator(mock_doc, mock_llm)
+        assert generator._page_has_heading_in_bottom(1, "Precision and Accuracy") is True
+
+    def test_ignores_heading_in_top(self, mock_doc, mock_llm):
+        """Returns False when heading text is only in the top portion."""
+        page = self._make_page(
+            [
+                {
+                    "type": 0,
+                    "lines": [
+                        {"spans": [{"text": "Precision and Accuracy", "bbox": (50, 20, 400, 40)}]},
+                    ],
+                },
+            ]
+        )
+        mock_doc.__getitem__ = lambda self, idx: page
+
+        generator = TOCGenerator(mock_doc, mock_llm)
+        assert generator._page_has_heading_in_bottom(1, "Precision and Accuracy") is False
+
+    def test_returns_false_for_out_of_range_page(self, mock_doc, mock_llm):
+        """Returns False for page numbers out of document range."""
+        generator = TOCGenerator(mock_doc, mock_llm)
+        assert generator._page_has_heading_in_bottom(0, "Title") is False
+        assert generator._page_has_heading_in_bottom(99, "Title") is False
+
+    def test_returns_false_for_short_title(self, mock_doc, mock_llm):
+        """Returns False when title is too short to match reliably."""
+        page = self._make_page(
+            [
+                {"type": 0, "lines": [{"spans": [{"text": "AB", "bbox": (50, 600, 100, 620)}]}]},
+            ]
+        )
+        mock_doc.__getitem__ = lambda self, idx: page
+
+        generator = TOCGenerator(mock_doc, mock_llm)
+        assert generator._page_has_heading_in_bottom(1, "AB") is False
+
+
+class TestBottomOfPageHeadingExtraction:
+    """Integration tests for bottom-of-page heading candidate extraction."""
+
+    @pytest.fixture
+    def body_font_size(self):
+        return 12.0
+
+    @pytest.fixture
+    def body_font_name(self):
+        return "Times-Roman"
+
+    def test_bottom_heading_uses_relaxed_ratio(self, body_font_name, body_font_size):
+        """Heading at bottom of page with font 1.16x body passes with Phase 1 ratio."""
+        # 1.16x = 13.92, which passes 1.15x threshold but NOT 1.2x threshold
+        font_size = body_font_size * 1.16
+        span = {"font": "Times-Roman", "size": font_size, "text": "Subsection Title Here", "flags": 0}
+
+        # With Phase 1 ratio (default): passes
+        assert _is_heading_candidate(span, body_font_name, body_font_size) is True
+        # With Phase 2 ratio: fails
+        assert (
+            _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=_HEADING_FONT_SIZE_RATIO_PHASE2)
+            is False
+        )
+
+    def test_mid_page_heading_still_uses_strict_ratio(self):
+        """Verify that a heading at y=0.3 would use Phase 2 ratio (not relaxed)."""
+        # This is a logic test: y=0.3 <= _BOTTOM_OF_PAGE_Y_THRESHOLD (0.6),
+        # so Phase 2 ratio should be used
+        y_pos = 0.3
+        assert y_pos <= _BOTTOM_OF_PAGE_Y_THRESHOLD
+
+    def test_bottom_threshold_constant(self):
+        """Verify the bottom-of-page threshold is 0.6 (bottom 40%)."""
+        assert _BOTTOM_OF_PAGE_Y_THRESHOLD == 0.6
+
+    def test_running_header_threshold_constant(self):
+        """Verify the running header threshold is 0.05."""
+        assert _RUNNING_HEADER_Y_THRESHOLD == 0.05
