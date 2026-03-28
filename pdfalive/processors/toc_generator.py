@@ -599,8 +599,10 @@ class TOCGenerator:
             toc, postprocess_usage = self._postprocess_toc(toc, features)
             usage = usage + postprocess_usage
 
-        # Enforce page number monotonicity after any corrections (running header
-        # correction and/or postprocessing may reorder entries).
+        # Deduplicate and enforce page number monotonicity after all corrections.
+        # Postprocessing may produce duplicate entries (e.g., "Exercises" added once
+        # per chapter from a printed TOC but all mapping to the same page).
+        toc = toc.deduplicate()
         toc = toc.sort_by_page()
         toc = toc.sanitize_hierarchy()
         self.doc.set_toc(toc.to_list())

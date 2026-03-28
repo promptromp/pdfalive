@@ -86,6 +86,26 @@ class TOC(BaseModel):
         sorted_entries = sorted(self.entries, key=lambda e: (e.page_number, e.level))
         return TOC(entries=sorted_entries)
 
+    def deduplicate(self) -> "TOC":
+        """Remove duplicate entries with the same (page_number, title).
+
+        Keeps the first occurrence of each duplicate. This is useful after
+        postprocessing, where the LLM may add multiple identical entries
+        (e.g., "Exercises" appearing once per chapter in a printed TOC but
+        all mapping to the same page after page number correction).
+
+        Returns:
+            A new TOC with duplicates removed, preserving order.
+        """
+        seen: set[tuple[int, str]] = set()
+        unique: list[TOCEntry] = []
+        for entry in self.entries:
+            key = (entry.page_number, entry.title)
+            if key not in seen:
+                seen.add(key)
+                unique.append(entry)
+        return TOC(entries=unique)
+
     def merge(self, other: "TOC") -> "TOC":
         """Merge another TOC into this one, handling duplicates.
 
