@@ -21,7 +21,10 @@ The TOC generation pipeline in `pdfalive/processors/toc_generator.py` uses sever
 |----------|-------|---------|
 | `_HEADING_MIN_LENGTH` | 3 | Minimum text length for a heading candidate |
 | `_HEADING_MAX_LENGTH` | 200 | Maximum text length for a heading candidate |
-| `_HEADING_FONT_SIZE_RATIO` | 1.15 | Font must be >= 1.15x body text size to be considered a heading |
+| `_HEADING_FONT_SIZE_RATIO` | 1.15 | Font must be >= 1.15x body text size to be considered a heading (Phase 1 default) |
+| `_HEADING_FONT_SIZE_RATIO_PHASE2` | 1.2 | Stricter font size ratio for Phase 2 heading candidates from remaining blocks |
+| `_BOTTOM_OF_PAGE_Y_THRESHOLD` | 0.6 | Spans below this y-position use relaxed (Phase 1) criteria in Phase 2 |
+| `_RUNNING_HEADER_Y_THRESHOLD` | 0.05 | Features at y < this are likely running headers (used by running header correction) |
 
 ## Where They Sit in the Pipeline
 
@@ -29,15 +32,28 @@ The TOC generation pipeline in `pdfalive/processors/toc_generator.py` uses sever
 
 **Used by:** `_is_heading_candidate()`, called from `_extract_features_sequential()` and `_extract_features_parallel()`
 
-After extracting the first N blocks per page, remaining blocks are scanned for heading candidates. The constants decide which overflow spans are worth including as features sent to the LLM.
+After extracting the first N blocks per page, remaining blocks are scanned for heading candidates. The constants decide which overflow spans are worth including as features sent to the LLM. The `_is_heading_candidate()` function accepts a `font_size_ratio` parameter to decouple the size check from the bold check — the size check uses the explicit ratio while the bold check always uses the true `body_font_size`. For bottom-of-page spans (y > `_BOTTOM_OF_PAGE_Y_THRESHOLD`), Phase 2 applies the relaxed Phase 1 ratio (1.15x) instead of the stricter 1.2x ratio, catching section headings that start late on a page.
 
 **Constants involved:**
 - `_SECTION_NUMBER_PATTERN` — text-based heading detection
 - `_LETTERSPACED_PATTERN` — text-based heading detection
 - `_HEADING_MIN_LENGTH` / `_HEADING_MAX_LENGTH` — length bounds
-- `_HEADING_FONT_SIZE_RATIO` — font-size-based heading detection
+- `_HEADING_FONT_SIZE_RATIO` — font-size-based heading detection (Phase 1 default, also used for bottom-of-page in Phase 2)
+- `_HEADING_FONT_SIZE_RATIO_PHASE2` — stricter font-size-based heading detection (Phase 2, for non-bottom spans)
+- `_BOTTOM_OF_PAGE_Y_THRESHOLD` — y-position threshold for relaxed Phase 2 criteria
 
 **Key point:** The LLM never sees spans that are filtered out here. This is a gate that determines what information reaches the LLM.
+
+### Phase 1.5: Running Header Correction (post-LLM, pre-postprocessing)
+
+**Used by:** `_correct_running_header_pages()`, called from `run()` after `_extract_toc()` and before `_postprocess_toc()`
+
+After the LLM generates the initial TOC, a deterministic correction step detects entries whose title appears only at running header position (y < `_RUNNING_HEADER_Y_THRESHOLD`) in the features. For suspicious entries, it checks the previous page for the actual heading in the bottom half (via feature index lookup or PDF text search fallback), and corrects the page number if found. This requires no additional LLM calls.
+
+**Constants involved:**
+- `_RUNNING_HEADER_Y_THRESHOLD` — y-position threshold for running header detection
+
+**Key point:** This always runs (not gated behind `--postprocess`). It fixes the common "off-by-one" error where a section starts near the bottom of page N but the LLM assigns it to page N+1 because it only sees the running header at the top of the next page.
 
 ### Phase 2: Post-LLM Correction (after postprocessing)
 
