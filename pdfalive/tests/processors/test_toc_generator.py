@@ -1984,7 +1984,24 @@ class TestCorrectPostprocessedPageNumbers:
         def get_page(idx):
             page = MagicMock()
             text = page_texts.get(idx, "")
-            page.get_text.return_value = text
+
+            def get_text_fn(fmt="text"):
+                if fmt == "dict":
+                    # Return a minimal page dict with the text as a single body block
+                    if not text:
+                        return {"height": 800.0, "blocks": []}
+                    return {
+                        "height": 800.0,
+                        "blocks": [
+                            {
+                                "type": 0,
+                                "lines": [{"spans": [{"text": text, "bbox": (50, 120, 400, 140)}]}],
+                            }
+                        ],
+                    }
+                return text
+
+            page.get_text = get_text_fn
             return page
 
         doc.__getitem__ = lambda self, idx: get_page(idx)
@@ -3143,3 +3160,287 @@ class TestBottomOfPageHeadingExtraction:
     def test_running_header_threshold_constant(self):
         """Verify the running header threshold is 0.05."""
         assert _RUNNING_HEADER_Y_THRESHOLD == 0.05
+
+
+class TestFindHeadingPage:
+    """Tests for the _find_heading_page method."""
+
+    PAGE_HEIGHT = 800.0
+
+    @pytest.fixture
+    def mock_doc(self):
+        doc = MagicMock()
+        doc.page_count = 5
+        doc.name = None
+        return doc
+
+    @pytest.fixture
+    def mock_llm(self):
+        return MagicMock()
+
+    def _make_page(self, blocks):
+        """Create a mock page returning the given blocks via get_text('dict')."""
+        page = MagicMock()
+        page.get_text.return_value = {"height": self.PAGE_HEIGHT, "blocks": blocks}
+        return page
+
+    def _text_block(self, y_frac, text):
+        """Create a text block at the given y fraction of the page."""
+        y_px = y_frac * self.PAGE_HEIGHT
+        return {
+            "type": 0,
+            "lines": [{"spans": [{"text": text, "bbox": (50, y_px, 400, y_px + 20)}]}],
+        }
+
+    def test_finds_heading_at_body_position(self, mock_doc, mock_llm):
+        """Finds heading at y > 0.06 (not running header)."""
+        page = self._make_page(
+            [
+                self._text_block(0.04, "CHAPTER 4 Running Header"),  # running header
+                self._text_block(0.15, "Chapter 4: Numerical Differentiation"),  # actual heading
+            ]
+        )
+        mock_doc.__getitem__ = lambda _, idx: page
+
+        gen = TOCGenerator(mock_doc, mock_llm)
+        result = gen._find_heading_page("Numerical Differentiation", 1, 2)
+        assert result == 1
+
+    def test_skips_running_header(self, mock_doc, mock_llm):
+        """Returns None if heading only appears in running header position."""
+        page = self._make_page(
+            [
+                self._text_block(0.04, "CHAPTER 4 Numerical Differentiation"),  # running header only
+                self._text_block(0.20, "Some unrelated body text paragraph"),
+            ]
+        )
+        mock_doc.__getitem__ = lambda _, idx: page
+
+        gen = TOCGenerator(mock_doc, mock_llm)
+        result = gen._find_heading_page("Numerical Differentiation", 1, 2)
+        assert result is None
+
+    def test_returns_first_matching_page(self, mock_doc, mock_llm):
+        """Returns the first page where heading appears (not running header)."""
+        page1 = self._make_page(
+            [
+                self._text_block(0.04, "CHAPTER 4 Numerical Differentiation"),  # header only
+                self._text_block(0.20, "Other body text here"),
+            ]
+        )
+        page2 = self._make_page(
+            [
+                self._text_block(0.04, "CHAPTER 4 Numerical Differentiation"),  # header
+                self._text_block(0.10, "4.1 Numerical Differentiation"),  # actual heading
+            ]
+        )
+        mock_doc.__getitem__ = lambda _, idx: page1 if idx == 0 else page2
+
+        gen = TOCGenerator(mock_doc, mock_llm)
+        result = gen._find_heading_page("Numerical Differentiation", 1, 3)
+        assert result == 2
+
+    def test_returns_none_for_empty_range(self, mock_doc, mock_llm):
+        """Returns None when search range is empty."""
+        gen = TOCGenerator(mock_doc, mock_llm)
+        assert gen._find_heading_page("Title", 5, 5) is None
+
+    def test_returns_none_for_short_title(self, mock_doc, mock_llm):
+        """Returns None when title is too short to match reliably."""
+        gen = TOCGenerator(mock_doc, mock_llm)
+        assert gen._find_heading_page("Ab", 1, 3) is None
+
+    def test_handles_ocr_multi_word_blocks(self, mock_doc, mock_llm):
+        """Handles OCR text where heading is split across many spans."""
+        page = self._make_page(
+            [
+                {
+                    "type": 0,
+                    "lines": [
+                        {
+                            "spans": [
+                                {"text": "CHAPTER", "bbox": (50, 66, 120, 86)},
+                            ]
+                        },
+                        {
+                            "spans": [
+                                {"text": "Numerical", "bbox": (50, 134, 150, 154)},
+                                {"text": "Differentiation", "bbox": (160, 134, 300, 154)},
+                            ]
+                        },
+                    ],
+                },
+            ]
+        )
+        mock_doc.__getitem__ = lambda _, idx: page
+
+        gen = TOCGenerator(mock_doc, mock_llm)
+        result = gen._find_heading_page("Numerical Differentiation", 1, 2)
+        assert result == 1
+
+    def test_skips_footer_blocks(self, mock_doc, mock_llm):
+        """Blocks at y > 0.95 (footer zone) are skipped."""
+        page = self._make_page(
+            [
+                self._text_block(0.96, "Some Title in Footer"),
+                self._text_block(0.20, "Unrelated body text here"),
+            ]
+        )
+        mock_doc.__getitem__ = lambda _, idx: page
+
+        gen = TOCGenerator(mock_doc, mock_llm)
+        result = gen._find_heading_page("Some Title in Footer", 1, 2)
+        assert result is None
+
+    def test_clamps_to_document_bounds(self, mock_doc, mock_llm):
+        """Search range is clamped to document page count."""
+        page = self._make_page([self._text_block(0.15, "Target Heading")])
+        mock_doc.__getitem__ = lambda _, idx: page
+
+        gen = TOCGenerator(mock_doc, mock_llm)
+        # Search beyond doc bounds (page_count=5) — should not crash
+        result = gen._find_heading_page("Target Heading", 1, 100)
+        assert result == 1
+
+
+class TestCorrectPostprocessedNewEntries:
+    """Tests for the new-entry correction path in _correct_postprocessed_page_numbers."""
+
+    PAGE_HEIGHT = 800.0
+
+    @pytest.fixture
+    def mock_llm(self):
+        return MagicMock()
+
+    def _text_block(self, y_frac, text):
+        y_px = y_frac * self.PAGE_HEIGHT
+        return {
+            "type": 0,
+            "lines": [{"spans": [{"text": text, "bbox": (50, y_px, 400, y_px + 20)}]}],
+        }
+
+    def _make_page(self, blocks):
+        """Create a mock page that handles both get_text('text') and get_text('dict')."""
+        page = MagicMock()
+        page_dict = {"height": self.PAGE_HEIGHT, "blocks": blocks}
+        # Concatenate all text for the "text" format
+        all_text = " ".join(
+            span["text"]
+            for block in blocks
+            if block.get("type") == 0
+            for line in block.get("lines", [])
+            for span in line.get("spans", [])
+        )
+
+        def get_text_fn(fmt="text"):
+            if fmt == "dict":
+                return page_dict
+            return all_text
+
+        page.get_text = get_text_fn
+        return page
+
+    def _make_doc_with_heading(self, page_count, heading_text, heading_page_idx, heading_y=0.15):
+        """Create a mock doc where heading appears as actual heading on one page and running header everywhere."""
+        doc = MagicMock()
+        doc.page_count = page_count
+        doc.name = None
+        outer = self
+
+        def getitem(mock_self, idx):
+            blocks = [
+                outer._text_block(0.04, f"CHAPTER {heading_text}"),  # running header
+            ]
+            if idx == heading_page_idx:
+                blocks.append(outer._text_block(heading_y, heading_text))
+            else:
+                blocks.append(outer._text_block(0.20, "Regular body text content here"))
+            return outer._make_page(blocks)
+
+        doc.__getitem__ = getitem
+        return doc
+
+    def test_corrects_new_entry_to_actual_heading_page(self, mock_llm):
+        """New entry with wrong page is corrected to actual heading page (ignoring running headers)."""
+        # Actual heading on page 20 (0-indexed: 19), running headers on all pages
+        doc = self._make_doc_with_heading(50, "Numerical Differentiation", heading_page_idx=19)
+        gen = TOCGenerator(doc, mock_llm)
+
+        # offset = 10 - 1 = 9 (>= 3). Heading at p.20 is within search window [25-9, 25+9] = [16, 34]
+        original = TOC(
+            entries=[
+                TOCEntry(title="Mathematical Preliminaries", page_number=10, level=1, confidence=0.9),
+            ]
+        )
+        refined = TOC(
+            entries=[
+                TOCEntry(title="Mathematical Preliminaries", page_number=10, level=1, confidence=0.9),
+                TOCEntry(title="Numerical Differentiation", page_number=25, level=1, confidence=0.8),
+            ]
+        )
+        result = gen._correct_postprocessed_page_numbers(original, refined)
+        new_entry = [e for e in result.entries if "Numerical Differentiation" in e.title][0]
+        assert new_entry.page_number == 20
+
+    def test_leaves_correct_new_entry_unchanged(self, mock_llm):
+        """New entry already at correct page is not changed."""
+        doc = self._make_doc_with_heading(50, "Numerical Differentiation", heading_page_idx=19)
+        gen = TOCGenerator(doc, mock_llm)
+
+        original = TOC(
+            entries=[
+                TOCEntry(title="Mathematical Preliminaries", page_number=10, level=1, confidence=0.9),
+            ]
+        )
+        refined = TOC(
+            entries=[
+                TOCEntry(title="Mathematical Preliminaries", page_number=10, level=1, confidence=0.9),
+                TOCEntry(title="Numerical Differentiation", page_number=20, level=1, confidence=0.8),
+            ]
+        )
+        result = gen._correct_postprocessed_page_numbers(original, refined)
+        new_entry = [e for e in result.entries if "Numerical Differentiation" in e.title][0]
+        assert new_entry.page_number == 20  # unchanged — already correct
+
+    def test_no_search_when_offset_small(self, mock_llm):
+        """When offset < 3, new entries are kept as-is (no search)."""
+        doc = self._make_doc_with_heading(30, "Numerical Differentiation", heading_page_idx=9)
+        gen = TOCGenerator(doc, mock_llm)
+
+        # Offset will be 1 (page 2 - 1), too small to trigger search
+        original = TOC(
+            entries=[
+                TOCEntry(title="Mathematical Preliminaries", page_number=2, level=1, confidence=0.9),
+            ]
+        )
+        refined = TOC(
+            entries=[
+                TOCEntry(title="Mathematical Preliminaries", page_number=2, level=1, confidence=0.9),
+                TOCEntry(title="Numerical Differentiation", page_number=20, level=1, confidence=0.8),
+            ]
+        )
+        result = gen._correct_postprocessed_page_numbers(original, refined)
+        new_entry = [e for e in result.entries if "Numerical Differentiation" in e.title][0]
+        assert new_entry.page_number == 20  # kept as-is, no offset search
+
+    def test_keeps_entry_when_heading_not_found(self, mock_llm):
+        """New entry is kept as-is when heading is not found in search window."""
+        # Heading on page 5, but search window won't cover it
+        doc = self._make_doc_with_heading(50, "Rare Topic", heading_page_idx=4)
+        gen = TOCGenerator(doc, mock_llm)
+
+        original = TOC(
+            entries=[
+                TOCEntry(title="Mathematical Preliminaries", page_number=6, level=1, confidence=0.9),
+            ]
+        )
+        refined = TOC(
+            entries=[
+                TOCEntry(title="Mathematical Preliminaries", page_number=6, level=1, confidence=0.9),
+                # Page 40 — search window [35, 45] won't include page 5
+                TOCEntry(title="Rare Topic", page_number=40, level=1, confidence=0.7),
+            ]
+        )
+        result = gen._correct_postprocessed_page_numbers(original, refined)
+        rare_entry = [e for e in result.entries if "Rare Topic" in e.title][0]
+        assert rare_entry.page_number == 40  # kept as-is

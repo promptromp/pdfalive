@@ -1365,6 +1365,55 @@ must be PDF page numbers (not printed page numbers).
 
         return False
 
+    def _find_heading_page(self, title: str, start_page: int, end_page: int) -> int | None:
+        """Find the page where a heading appears as an actual heading, not a running header.
+
+        Searches pages in [start_page, end_page) for the title text in a
+        non-running-header position (y >= 0.06). Uses block-level text
+        concatenation to handle OCR text where each word is a separate span.
+
+        Args:
+            title: The heading title to search for.
+            start_page: First page to search (1-indexed, inclusive).
+            end_page: Last page to search (1-indexed, exclusive).
+
+        Returns:
+            The 1-indexed page number where the heading is found, or None.
+        """
+        search_text = _normalize_snippet(title)
+        if len(search_text) < 3:
+            return None
+
+        start_idx = max(0, start_page - 1)
+        end_idx = min(self.doc.page_count, end_page - 1)
+
+        for page_idx in range(start_idx, end_idx):
+            page = self.doc[page_idx]
+            page_dict = page.get_text("dict")
+            page_height = page_dict.get("height", 1.0)
+
+            for block in page_dict.get("blocks", []):
+                if block.get("type") != 0:
+                    continue
+                block_spans = [span for line in block.get("lines", []) for span in line.get("spans", [])]
+                if not block_spans:
+                    continue
+                first_bbox = block_spans[0].get("bbox")
+                if not first_bbox or page_height <= 0:
+                    continue
+                y_pos = first_bbox[1] / page_height
+                # Skip running headers (top ~5% of page) and footers (bottom ~5%)
+                if y_pos < 0.06 or y_pos > 0.95:
+                    continue
+                block_text = " ".join(s.get("text", "") for s in block_spans)
+                block_text_normalized = _normalize_snippet(block_text)
+                if len(block_text_normalized) >= 3 and (
+                    search_text in block_text_normalized or block_text_normalized in search_text
+                ):
+                    return page_idx + 1  # 1-indexed
+
+        return None
+
     def _page_has_heading_in_bottom(self, page_number: int, title: str, y_threshold: float = 0.5) -> bool:
         """Check if heading text appears in the bottom portion of a given page.
 
@@ -1588,17 +1637,19 @@ must be PDF page numbers (not printed page numbers).
 
             else:
                 # NEW entry — the LLM should have already output PDF page numbers.
-                # Use _page_contains_heading as a sanity check; if the heading isn't
-                # found at the given page but IS found at page+offset, apply the offset
-                # (handles the case where the LLM still used printed page numbers).
-                if (
-                    offset >= 3
-                    and not self._page_contains_heading(entry.page_number, entry.title)
-                    and 1 <= entry.page_number + offset <= self.doc.page_count
-                    and self._page_contains_heading(entry.page_number + offset, entry.title)
-                ):
-                    offset_applied_count += 1
-                    corrected.append(entry.model_copy(update={"page_number": entry.page_number + offset}))
+                # Search for the actual heading page, excluding running headers.
+                # The search window covers both the stated page and offset-corrected
+                # page, handling cases where the LLM used printed page numbers,
+                # partially applied the offset, or guessed incorrectly.
+                if offset >= 3:
+                    search_start = max(1, entry.page_number - offset)
+                    search_end = min(self.doc.page_count, entry.page_number + offset) + 1
+                    actual_page = self._find_heading_page(entry.title, search_start, search_end)
+                    if actual_page is not None and actual_page != entry.page_number:
+                        offset_applied_count += 1
+                        corrected.append(entry.model_copy(update={"page_number": actual_page}))
+                    else:
+                        corrected.append(entry)
                 else:
                     corrected.append(entry)
 
