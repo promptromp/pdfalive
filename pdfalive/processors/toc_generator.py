@@ -1365,17 +1365,24 @@ must be PDF page numbers (not printed page numbers).
 
         return False
 
-    def _find_heading_page(self, title: str, start_page: int, end_page: int) -> int | None:
+    def _find_heading_page(
+        self, title: str, start_page: int, end_page: int, hint_page: int | None = None
+    ) -> int | None:
         """Find the page where a heading appears as an actual heading, not a running header.
 
         Searches pages in [start_page, end_page) for the title text in a
         non-running-header position (y >= 0.06). Uses block-level text
         concatenation to handle OCR text where each word is a separate span.
 
+        When hint_page is provided, searches outward from that page so the
+        closest match wins (avoids false matches in distant front matter).
+
         Args:
             title: The heading title to search for.
             start_page: First page to search (1-indexed, inclusive).
             end_page: Last page to search (1-indexed, exclusive).
+            hint_page: Page to start searching from (1-indexed). If None,
+                searches sequentially from start_page.
 
         Returns:
             The 1-indexed page number where the heading is found, or None.
@@ -1387,7 +1394,18 @@ must be PDF page numbers (not printed page numbers).
         start_idx = max(0, start_page - 1)
         end_idx = min(self.doc.page_count, end_page - 1)
 
-        for page_idx in range(start_idx, end_idx):
+        # Build page order: outward from hint_page if provided, else sequential
+        if hint_page is not None:
+            center = hint_page - 1  # 0-indexed
+            page_order = []
+            for delta in range(end_idx - start_idx + 1):
+                for candidate in [center + delta, center - delta]:
+                    if start_idx <= candidate < end_idx and candidate not in page_order:
+                        page_order.append(candidate)
+        else:
+            page_order = list(range(start_idx, end_idx))
+
+        for page_idx in page_order:
             page = self.doc[page_idx]
             page_dict = page.get_text("dict")
             page_height = page_dict.get("height", 1.0)
@@ -1407,8 +1425,19 @@ must be PDF page numbers (not printed page numbers).
                     continue
                 block_text = " ".join(s.get("text", "") for s in block_spans)
                 block_text_normalized = _normalize_snippet(block_text)
-                if len(block_text_normalized) >= 3 and (
-                    search_text in block_text_normalized or block_text_normalized in search_text
+                if len(block_text_normalized) < 3:
+                    continue
+                # Check for substantial match: either the block contains the heading
+                # text, or vice versa with a minimum coverage ratio to prevent short
+                # body text (e.g. "interpolation") from matching long headings.
+                if search_text in block_text_normalized:
+                    return page_idx + 1  # 1-indexed
+                shorter_len = min(len(search_text), len(block_text_normalized))
+                longer_len = max(len(search_text), len(block_text_normalized))
+                if (
+                    shorter_len >= _FUZZY_MIN_SUBSTRING_LEN
+                    and block_text_normalized in search_text
+                    and shorter_len / longer_len >= _FUZZY_MIN_COVERAGE_RATIO
                 ):
                     return page_idx + 1  # 1-indexed
 
@@ -1458,8 +1487,16 @@ must be PDF page numbers (not printed page numbers).
                 continue
             block_text = " ".join(s.get("text", "") for s in block_spans)
             block_text_normalized = _normalize_snippet(block_text)
-            if len(block_text_normalized) >= 3 and (
-                search_text in block_text_normalized or block_text_normalized in search_text
+            if len(block_text_normalized) < 3:
+                continue
+            if search_text in block_text_normalized:
+                return True
+            shorter_len = min(len(search_text), len(block_text_normalized))
+            longer_len = max(len(search_text), len(block_text_normalized))
+            if (
+                shorter_len >= _FUZZY_MIN_SUBSTRING_LEN
+                and block_text_normalized in search_text
+                and shorter_len / longer_len >= _FUZZY_MIN_COVERAGE_RATIO
             ):
                 return True
         return False
@@ -1623,8 +1660,9 @@ must be PDF page numbers (not printed page numbers).
 
         corrected = []
         restored_count = 0
-        offset_applied_count = 0
 
+        # Step 3: For matched entries, restore original page numbers.
+        #         For new entries, keep the LLM's output (to be verified below).
         for entry in refined_toc.entries:
             key = normalize(entry.title)
 
@@ -1634,31 +1672,36 @@ must be PDF page numbers (not printed page numbers).
                 if entry.page_number != matched_page:
                     restored_count += 1
                 corrected.append(entry.model_copy(update={"page_number": matched_page}))
-
             else:
-                # NEW entry — the LLM should have already output PDF page numbers.
-                # Search for the actual heading page, excluding running headers.
-                # The search window covers both the stated page and offset-corrected
-                # page, handling cases where the LLM used printed page numbers,
-                # partially applied the offset, or guessed incorrectly.
-                if offset >= 3:
-                    search_start = max(1, entry.page_number - offset)
-                    search_end = min(self.doc.page_count, entry.page_number + offset) + 1
-                    actual_page = self._find_heading_page(entry.title, search_start, search_end)
-                    if actual_page is not None and actual_page != entry.page_number:
-                        offset_applied_count += 1
-                        corrected.append(entry.model_copy(update={"page_number": actual_page}))
-                    else:
-                        corrected.append(entry)
-                else:
-                    corrected.append(entry)
+                corrected.append(entry)
+
+        # Step 4: Verify ALL entries using running-header-aware page search.
+        # This catches errors from both matched entries (initial extraction was wrong)
+        # and new entries (LLM used printed page numbers or guessed incorrectly).
+        # Search a window of ±offset around each entry's current page.
+        verified_count = 0
+        if offset >= 3:
+            window = offset
+            for i, entry in enumerate(corrected):
+                search_text = _normalize_snippet(entry.title)
+                if len(search_text) < _FUZZY_MIN_SUBSTRING_LEN:
+                    continue
+                search_start = max(1, entry.page_number - window)
+                search_end = min(self.doc.page_count, entry.page_number + window) + 1
+                actual_page = self._find_heading_page(
+                    entry.title, search_start, search_end, hint_page=entry.page_number
+                )
+                if actual_page is not None and actual_page != entry.page_number:
+                    corrected[i] = entry.model_copy(update={"page_number": actual_page})
+                    verified_count += 1
 
         # Log corrections
         if restored_count > 0:
             console.print(f"  [yellow]Restored page numbers for {restored_count} existing entries[/yellow]")
-        if offset_applied_count > 0:
+        if verified_count > 0:
             console.print(
-                f"  [yellow]Applied front matter offset (+{offset}) to {offset_applied_count} new entries[/yellow]"
+                f"  [yellow]Verified and corrected {verified_count} entries "
+                f"via heading search (±{offset} page window)[/yellow]"
             )
 
         return TOC(entries=corrected)

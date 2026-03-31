@@ -2302,7 +2302,23 @@ class TestFuzzyMatchBestMatch:
         def get_page(idx):
             page = MagicMock()
             text = page_texts.get(idx, "")
-            page.get_text.return_value = text
+
+            def get_text_fn(fmt="text"):
+                if fmt == "dict":
+                    if not text:
+                        return {"height": 800.0, "blocks": []}
+                    return {
+                        "height": 800.0,
+                        "blocks": [
+                            {
+                                "type": 0,
+                                "lines": [{"spans": [{"text": text, "bbox": (50, 120, 400, 140)}]}],
+                            }
+                        ],
+                    }
+                return text
+
+            page.get_text = get_text_fn
             return page
 
         doc.__getitem__ = lambda self, idx: get_page(idx)
