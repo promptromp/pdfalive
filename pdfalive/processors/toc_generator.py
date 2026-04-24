@@ -97,6 +97,9 @@ _HEADING_FONT_SIZE_RATIO_PHASE2 = 1.2
 # Maximum number of heading candidates to add per page from Phase 2 scanning
 _MAX_HEADING_CANDIDATES_PER_PAGE = 3
 
+# Default maximum characters to preserve from each PDF text span.
+DEFAULT_TEXT_SNIPPET_LENGTH = 50
+
 # Normalized y-position threshold: spans below this are in the "bottom of page" zone
 # where relaxed heading detection criteria are applied (Phase 2)
 _BOTTOM_OF_PAGE_Y_THRESHOLD = 0.6
@@ -456,6 +459,48 @@ def _is_heading_candidate(
     return bool(_LETTERSPACED_PATTERN.match(text))
 
 
+def _merge_line_spans(spans: list[dict], text_snippet_length: int) -> dict:
+    """Merge spans from one PDF line into a single synthetic span.
+
+    PyMuPDF often splits one visual heading into multiple spans because of
+    font/style changes. Treating only the first span can produce numeric-only
+    headings like "3.2"; merging the line preserves the full candidate title.
+    """
+    if not spans:
+        return {}
+
+    text = re.sub(r"\s+", " ", " ".join(span.get("text", "").strip() for span in spans).strip())
+    first = spans[0]
+    bboxes = [span.get("bbox") for span in spans if span.get("bbox")]
+    first_bbox = bboxes[0] if bboxes else first.get("bbox")
+
+    return {
+        "font": first.get("font", ""),
+        "size": first.get("size", 0.0),
+        "text": text[:text_snippet_length],
+        "full_text_length": len(text),
+        "bbox": first_bbox,
+        "flags": first.get("flags", 0),
+        "is_bold": any(_is_bold_font(span) for span in spans),
+    }
+
+
+def _span_to_feature(span: dict, page_number: int, page_height: float, text_snippet_length: int) -> TOCFeature:
+    """Convert a raw or synthetic PyMuPDF span to a TOCFeature."""
+    bbox = span.get("bbox")
+    y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+    text = span.get("text", "")
+    return TOCFeature(
+        page_number=page_number,
+        font_name=span.get("font", ""),
+        font_size=span.get("size", 0.0),
+        text_length=span.get("full_text_length", len(text)),
+        text_snippet=text[:text_snippet_length],
+        y_position=y_pos,
+        is_bold=span.get("is_bold", _is_bold_font(span)),
+    )
+
+
 def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list]:
     """Worker function to extract features from a range of pages.
 
@@ -479,10 +524,11 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list
         max_blocks_per_page,
         max_lines_per_block,
         text_snippet_length,
+        *optional_page_count,
     ) = args
 
     doc = pymupdf.open(input_path)
-    page_count = doc.page_count
+    page_count = min(optional_page_count[0], doc.page_count) if optional_page_count else doc.page_count
 
     # Calculate page range for this process
     pages_per_process = page_count // total_processes
@@ -506,7 +552,7 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list
                     if lines:
                         spans = lines[0].get("spans", [])
                         if spans:
-                            remaining_spans_buffer.append((page_number, page_height, len(features), [spans[0]]))
+                            remaining_spans_buffer.append((page_number, page_height, len(features), spans))
                 continue
 
             features.append([])
@@ -519,19 +565,7 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list
                     features[-1].append([])
 
                     for span in line["spans"]:
-                        bbox = span.get("bbox", None)
-                        y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
-                        features[-1][-1].append(
-                            TOCFeature(
-                                page_number=page_number,
-                                font_name=span["font"],
-                                font_size=span["size"],
-                                text_length=len(span["text"]),
-                                text_snippet=span["text"][:text_snippet_length],
-                                y_position=y_pos,
-                                is_bold=_is_bold_font(span),
-                            )
-                        )
+                        features[-1][-1].append(_span_to_feature(span, page_number, page_height, text_snippet_length))
 
     doc.close()
     return start_page, end_page, features, remaining_spans_buffer
@@ -620,7 +654,7 @@ class TOCGenerator:
         max_pages: int | None = None,
         max_blocks_per_page: int = 3,
         max_lines_per_block: int = 5,
-        text_snippet_length: int = 25,
+        text_snippet_length: int = DEFAULT_TEXT_SNIPPET_LENGTH,
         show_progress: bool = True,
     ) -> list:
         """Extract features from the document to generate TOC entries.
@@ -671,7 +705,7 @@ class TOCGenerator:
         max_pages: int | None = None,
         max_blocks_per_page: int = 3,
         max_lines_per_block: int = 5,
-        text_snippet_length: int = 25,
+        text_snippet_length: int = DEFAULT_TEXT_SNIPPET_LENGTH,
         show_progress: bool = True,
     ) -> list:
         """Extract features sequentially (single process) using a two-phase approach.
@@ -710,7 +744,7 @@ class TOCGenerator:
                         if lines:
                             spans = lines[0].get("spans", [])
                             if spans:
-                                remaining_spans_buffer.append((page_number, page_height, len(features), [spans[0]]))
+                                remaining_spans_buffer.append((page_number, page_height, len(features), spans))
                     continue
 
                 features.append([])
@@ -723,18 +757,8 @@ class TOCGenerator:
                         features[-1].append([])
 
                         for span in line["spans"]:
-                            bbox = span.get("bbox", None)
-                            y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
                             features[-1][-1].append(
-                                TOCFeature(
-                                    page_number=page_number,
-                                    font_name=span["font"],
-                                    font_size=span["size"],
-                                    text_length=len(span["text"]),
-                                    text_snippet=span["text"][:text_snippet_length],
-                                    y_position=y_pos,
-                                    is_bold=_is_bold_font(span),
-                                )
+                                _span_to_feature(span, page_number, page_height, text_snippet_length)
                             )
 
         if show_progress:
@@ -776,33 +800,25 @@ class TOCGenerator:
             for page_number, page_height, insert_idx, spans in remaining_spans_buffer:
                 if page_candidate_count.get(page_number, 0) >= _MAX_HEADING_CANDIDATES_PER_PAGE:
                     continue
-                for span in spans:
-                    bbox = span.get("bbox", None)
-                    y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+                span = _merge_line_spans(spans, text_snippet_length)
+                if not span:
+                    continue
+                bbox = span.get("bbox", None)
+                y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
 
-                    # Use relaxed criteria (Phase 1 ratio) for bottom-of-page spans
-                    # to catch section headings that start late on a page
-                    if y_pos is not None and y_pos > _BOTTOM_OF_PAGE_Y_THRESHOLD:
-                        ratio = _HEADING_FONT_SIZE_RATIO
-                    else:
-                        ratio = _HEADING_FONT_SIZE_RATIO_PHASE2
+                # Use relaxed criteria (Phase 1 ratio) for bottom-of-page spans
+                # to catch section headings that start late on a page
+                if y_pos is not None and y_pos > _BOTTOM_OF_PAGE_Y_THRESHOLD:
+                    ratio = _HEADING_FONT_SIZE_RATIO
+                else:
+                    ratio = _HEADING_FONT_SIZE_RATIO_PHASE2
 
-                    if _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=ratio):
-                        feature = TOCFeature(
-                            page_number=page_number,
-                            font_name=span["font"],
-                            font_size=span["size"],
-                            text_length=len(span["text"]),
-                            text_snippet=span["text"][:text_snippet_length],
-                            y_position=y_pos,
-                            is_bold=_is_bold_font(span),
-                        )
-                        if insert_idx not in candidates_by_index:
-                            candidates_by_index[insert_idx] = []
-                        candidates_by_index[insert_idx].append([[feature]])
-                        page_candidate_count[page_number] = page_candidate_count.get(page_number, 0) + 1
-                        if page_candidate_count[page_number] >= _MAX_HEADING_CANDIDATES_PER_PAGE:
-                            break
+                if _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=ratio):
+                    feature = _span_to_feature(span, page_number, page_height, text_snippet_length)
+                    if insert_idx not in candidates_by_index:
+                        candidates_by_index[insert_idx] = []
+                    candidates_by_index[insert_idx].append([[feature]])
+                    page_candidate_count[page_number] = page_candidate_count.get(page_number, 0) + 1
 
             # Insert heading candidate blocks at the right positions (reverse order to preserve indices)
             for idx in sorted(candidates_by_index.keys(), reverse=True):
@@ -818,7 +834,7 @@ class TOCGenerator:
         num_processes: int,
         max_blocks_per_page: int = 3,
         max_lines_per_block: int = 5,
-        text_snippet_length: int = 25,
+        text_snippet_length: int = DEFAULT_TEXT_SNIPPET_LENGTH,
         show_progress: bool = True,
     ) -> list:
         """Extract features in parallel using multiprocessing.
@@ -843,7 +859,7 @@ class TOCGenerator:
 
         # Prepare arguments for worker processes
         args_list = [
-            (i, num_processes, input_path, max_blocks_per_page, max_lines_per_block, text_snippet_length)
+            (i, num_processes, input_path, max_blocks_per_page, max_lines_per_block, text_snippet_length, page_count)
             for i in range(num_processes)
         ]
 
@@ -896,32 +912,24 @@ class TOCGenerator:
             for page_number, page_height, insert_idx, spans in all_remaining_spans:
                 if page_candidate_count.get(page_number, 0) >= _MAX_HEADING_CANDIDATES_PER_PAGE:
                     continue
-                for span in spans:
-                    bbox = span.get("bbox", None)
-                    y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+                span = _merge_line_spans(spans, text_snippet_length)
+                if not span:
+                    continue
+                bbox = span.get("bbox", None)
+                y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
 
-                    # Use relaxed criteria (Phase 1 ratio) for bottom-of-page spans
-                    if y_pos is not None and y_pos > _BOTTOM_OF_PAGE_Y_THRESHOLD:
-                        ratio = _HEADING_FONT_SIZE_RATIO
-                    else:
-                        ratio = _HEADING_FONT_SIZE_RATIO_PHASE2
+                # Use relaxed criteria (Phase 1 ratio) for bottom-of-page spans
+                if y_pos is not None and y_pos > _BOTTOM_OF_PAGE_Y_THRESHOLD:
+                    ratio = _HEADING_FONT_SIZE_RATIO
+                else:
+                    ratio = _HEADING_FONT_SIZE_RATIO_PHASE2
 
-                    if _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=ratio):
-                        feature = TOCFeature(
-                            page_number=page_number,
-                            font_name=span["font"],
-                            font_size=span["size"],
-                            text_length=len(span["text"]),
-                            text_snippet=span["text"][:text_snippet_length],
-                            y_position=y_pos,
-                            is_bold=_is_bold_font(span),
-                        )
-                        if insert_idx not in candidates_by_index:
-                            candidates_by_index[insert_idx] = []
-                        candidates_by_index[insert_idx].append([[feature]])
-                        page_candidate_count[page_number] = page_candidate_count.get(page_number, 0) + 1
-                        if page_candidate_count[page_number] >= _MAX_HEADING_CANDIDATES_PER_PAGE:
-                            break
+                if _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=ratio):
+                    feature = _span_to_feature(span, page_number, page_height, text_snippet_length)
+                    if insert_idx not in candidates_by_index:
+                        candidates_by_index[insert_idx] = []
+                    candidates_by_index[insert_idx].append([[feature]])
+                    page_candidate_count[page_number] = page_candidate_count.get(page_number, 0) + 1
 
             for idx in sorted(candidates_by_index.keys(), reverse=True):
                 for block in reversed(candidates_by_index[idx]):
@@ -1555,7 +1563,7 @@ must be PDF page numbers (not printed page numbers).
 
             # Check if the title appears in the header zone of this page
             header_text = page_header_text.get(page, "")
-            in_header = entry_text in header_text or header_text.strip() in entry_text
+            in_header = bool(header_text.strip()) and (entry_text in header_text or header_text.strip() in entry_text)
 
             # Check if the title also appears in the body zone of this page
             body_text = page_body_text.get(page, "")
@@ -1619,9 +1627,9 @@ must be PDF page numbers (not printed page numbers).
             title = re.sub(r"[^\w\s]", "", title)  # strip all punctuation
             return re.sub(r"\s+", " ", title.strip().lower())
 
-        original_map: dict[str, tuple[int, int]] = {}  # normalized title -> (page_number, level)
+        original_map: dict[str, list[tuple[int, int]]] = {}  # normalized title -> [(page_number, level)]
         for entry in original_toc.entries:
-            original_map[normalize(entry.title)] = (entry.page_number, entry.level)
+            original_map.setdefault(normalize(entry.title), []).append((entry.page_number, entry.level))
 
         def _fuzzy_match(key: str, level: int) -> int | None:
             """Try multi-strategy matching against original_map.
@@ -1631,30 +1639,33 @@ must be PDF page numbers (not printed page numbers).
             1. Exact normalized match
             2. Best substring containment (same level, min length and coverage ratio)
             """
-            # Strategy 1: exact match (any level — the LLM may change levels)
-            if key in original_map:
-                return original_map[key][0]
+            # Strategy 1: exact match at the same level. Avoid restoring new
+            # same-title child entries to unrelated parent/front-matter pages.
+            for orig_page, orig_level in original_map.get(key, []):
+                if orig_level == level:
+                    return orig_page
 
             # Strategy 2: collect ALL substring matches at the same level,
             # then pick the best one (highest coverage ratio = shorter/longer).
             best_page: int | None = None
             best_ratio: float = 0.0
 
-            for orig_key, (orig_page, orig_level) in original_map.items():
-                if orig_level != level:
-                    continue
-                shorter_len = min(len(key), len(orig_key))
-                longer_len = max(len(key), len(orig_key))
-                if shorter_len < _FUZZY_MIN_SUBSTRING_LEN:
-                    continue
-                if not (orig_key in key or key in orig_key):
-                    continue
-                ratio = shorter_len / longer_len
-                if ratio < _FUZZY_MIN_COVERAGE_RATIO:
-                    continue
-                if ratio > best_ratio:
-                    best_ratio = ratio
-                    best_page = orig_page
+            for orig_key, matches in original_map.items():
+                for orig_page, orig_level in matches:
+                    if orig_level != level:
+                        continue
+                    shorter_len = min(len(key), len(orig_key))
+                    longer_len = max(len(key), len(orig_key))
+                    if shorter_len < _FUZZY_MIN_SUBSTRING_LEN:
+                        continue
+                    if not (orig_key in key or key in orig_key):
+                        continue
+                    ratio = shorter_len / longer_len
+                    if ratio < _FUZZY_MIN_COVERAGE_RATIO:
+                        continue
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_page = orig_page
 
             return best_page
 
