@@ -1893,6 +1893,82 @@ class TestDetectFrontMatterOffset:
         )
         assert generator._detect_front_matter_offset(toc) == 16  # 17 - 1
 
+    def test_prefers_numbered_main_content_over_title_page(self, generator):
+        """Book title pages should not determine the printed-to-PDF offset."""
+        toc = self._make_toc(
+            [
+                ("Decisions with Multiple Objectives", 7, 1),
+                ("Contents", 11, 1),
+                ("Preface", 15, 1),
+                ("1. THE PROBLEM", 25, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 24  # 25 - 1
+
+    def test_skips_title_page_before_front_matter_anchor(self, generator):
+        """When Contents/Preface are present, main content should come after them."""
+        toc = self._make_toc(
+            [
+                ("Decisions with Multiple Objectives", 7, 1),
+                ("Contents", 11, 1),
+                ("Preface to First Edition", 19, 1),
+                ("THE PROBLEM", 25, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 24  # 25 - 1
+
+    def test_reference_toc_consensus_offset_wins(self, generator):
+        """Repeated printed TOC title/page matches are the strongest offset signal."""
+        toc = self._make_toc(
+            [
+                ("Book Title", 7, 1),
+                ("1. The Problem", 25, 1),
+                ("1.1 Sketches of Motivating Examples", 27, 2),
+                ("1.2 Paradigm of Decision Analysis", 30, 2),
+                ("2. The Structuring of Objectives", 55, 1),
+            ]
+        )
+        reference_text = "\n".join(
+            [
+                "The Problem ........ 1",
+                "Sketches of Motivating Examples ........ 3",
+                "Paradigm of Decision Analysis ........ 6",
+                "The Structuring of Objectives ........ 31",
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc, reference_text=reference_text) == 24
+
+    def test_reference_toc_offset_requires_consensus(self, generator):
+        """A single printed TOC match is not enough to override safer fallbacks."""
+        toc = self._make_toc(
+            [
+                ("Book Title", 7, 1),
+                ("Contents", 11, 1),
+                ("THE PROBLEM", 25, 1),
+                ("2. The Structuring of Objectives", 55, 1),
+            ]
+        )
+        reference_text = "The Structuring of Objectives ........ 31"
+        assert generator._detect_front_matter_offset(toc, reference_text=reference_text) == 24
+
+    @pytest.mark.parametrize(
+        "chapter_title",
+        [
+            "Chapter 1 The Problem",
+            "Chapter I The Problem",
+            "I The Problem",
+        ],
+    )
+    def test_numbered_main_content_patterns(self, generator, chapter_title):
+        """Common first-chapter formats determine the front-matter offset."""
+        toc = self._make_toc(
+            [
+                ("Book Title", 7, 1),
+                (chapter_title, 25, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 24
+
     def test_skips_level2_entries(self, generator):
         """Level-2 entries are ignored for offset detection."""
         toc = self._make_toc(
@@ -1955,6 +2031,7 @@ class TestDetectFrontMatterOffset:
         [
             "Acknowledgments for the English Edition",
             "Foreword to the Second Edition",
+            "Preface to First Edition",
             "Preface to the Revised Edition",
             "Contents of Volume II",
         ],
@@ -2183,6 +2260,45 @@ class TestCorrectPostprocessedPageNumbers:
         assert result.entries[1].page_number == 25  # new, offset applied (10 + 15)
         assert result.entries[2].page_number == 35  # new, offset applied (20 + 15)
         assert result.entries[3].page_number == 41  # matched, restored
+
+    def test_numbered_heading_search_requires_section_prefix(self, generator):
+        """Page verification should not match same title text from a different numbered section."""
+        generator.doc._page_texts[296] = "Assessing Multiattribute Utility Functions"
+        generator.doc._page_texts[320] = "6.6 Assessing Multiattribute Utility Functions"
+
+        original = self._make_toc(
+            [
+                ("1. The Problem", 25, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("1. The Problem", 25, 1),
+                ("6.6 Assessing Multiattribute Utility Functions", 297, 2),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[1].page_number == 321
+
+    def test_appendix_heading_search_allows_missing_ocr_prefix(self, generator):
+        """Appendix verification can use the subtitle when OCR mangles the appendix prefix."""
+        generator.doc._page_texts[536] = "Derivation of a Utility Function for Consumption and Lifetime"
+
+        original = self._make_toc(
+            [
+                ("1. The Problem", 25, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("1. The Problem", 25, 1),
+                ("Appendix 9A Derivation of a Utility Function for Consumption and Lifetime", 557, 1),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[1].page_number == 537
 
     def test_empty_refined_toc_returned_as_is(self, generator):
         """Empty refined TOC is returned unchanged."""
@@ -2530,6 +2646,7 @@ class TestFrontMatterTitlePattern:
             # Front matter with qualifying phrases
             ("introduction to the second edition", True),
             ("foreword to the revised edition", True),
+            ("preface to first edition", True),
             ("preface to the third edition", True),
             ("acknowledgments for the english edition", True),
             ("contents of volume ii", True),

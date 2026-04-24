@@ -29,8 +29,9 @@ from pdfalive.prompts import (
 from pdfalive.tokens import TokenUsage, estimate_tokens
 
 
-# Regex to strip font subset prefixes like "ABCDEF+" from font names
-_FONT_SUBSET_PREFIX_PATTERN = re.compile(r"^[A-Z]{6}\+")
+# PDF font subset prefixes are six uppercase letters followed by '+', e.g. "ABCDEF+Times".
+_FONT_SUBSET_PREFIX_LENGTH = 6
+_FONT_SUBSET_PREFIX_PATTERN = re.compile(rf"^[A-Z]{{{_FONT_SUBSET_PREFIX_LENGTH}}}\+")
 
 
 # Suppress PydanticSerializationUnexpectedValue warnings emitted by LangChain's
@@ -58,8 +59,12 @@ _SECTION_NUMBER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_SECTION_PREFIX_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)+)")
+_APPENDIX_PREFIX_PATTERN = re.compile(r"^\s*appendix\s+\S+\s+", re.IGNORECASE)
+
 # Pattern for letter-spaced ALL-CAPS text (e.g. "C H A P T E R  I" or "P R E F A C E")
-_LETTERSPACED_PATTERN = re.compile(r"^[A-Z](\s+[A-Z]){3,}")
+_LETTERSPACED_MIN_ADDITIONAL_CHARS = 3
+_LETTERSPACED_PATTERN = re.compile(rf"^[A-Z](\s+[A-Z]){{{_LETTERSPACED_MIN_ADDITIONAL_CHARS},}}")
 
 # Minimum/maximum text length for heading candidates
 _HEADING_MIN_LENGTH = 3
@@ -85,7 +90,18 @@ _FRONT_MATTER_TITLES = frozenset(
 # while still matching "Introduction to the Second Edition".
 _FRONT_MATTER_TITLE_PATTERN = re.compile(
     r"^(?:" + "|".join(re.escape(t) for t in sorted(_FRONT_MATTER_TITLES)) + r")"
-    r"(?:\s+(?:to the|for the|of the|of volume)\b.*)?$"
+    r"(?:\s+(?:to the\b.*|to\s+.*\bedition\b.*|for the\b.*|of the\b.*|of volume\b.*))?$"
+)
+
+# Strong signal that a level-1 TOC entry is the first main-content chapter.
+_MAIN_CONTENT_START_PATTERN = re.compile(
+    r"^\s*(?:"
+    r"1(?:\.|\s+)"
+    r"|chapter\s+(?:1|i)\b"
+    r"|part\s+(?:1|i)\b"
+    r"|i\s+"
+    r")",
+    re.IGNORECASE,
 )
 
 # Minimum font size ratio vs body text to be considered a heading candidate (Phase 1)
@@ -100,12 +116,29 @@ _MAX_HEADING_CANDIDATES_PER_PAGE = 3
 # Default maximum characters to preserve from each PDF text span.
 DEFAULT_TEXT_SNIPPET_LENGTH = 50
 
+# Default feature extraction limits per page/block.
+DEFAULT_MAX_BLOCKS_PER_PAGE = 3
+DEFAULT_MAX_LINES_PER_BLOCK = 5
+
+# Default maximum TOC hierarchy depth requested from the LLM.
+DEFAULT_MAX_TOC_DEPTH = 2
+
+# PyMuPDF TOC level used for top-level bookmarks.
+_ROOT_TOC_LEVEL = 1
+
 # Normalized y-position threshold: spans below this are in the "bottom of page" zone
 # where relaxed heading detection criteria are applied (Phase 2)
 _BOTTOM_OF_PAGE_Y_THRESHOLD = 0.6
 
 # Running header y-position threshold: features at y < this are likely running headers
 _RUNNING_HEADER_Y_THRESHOLD = 0.05
+
+# Running-header-aware search skips very top/bottom page regions.
+_HEADING_SEARCH_HEADER_Y_THRESHOLD = 0.06
+_HEADING_SEARCH_FOOTER_Y_THRESHOLD = 0.95
+
+# Fallback correction checks the bottom half of the previous page.
+_PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD = 0.5
 
 # Fuzzy match: minimum length of the shorter string for substring matching
 _FUZZY_MIN_SUBSTRING_LEN = 8
@@ -114,6 +147,54 @@ _FUZZY_MIN_SUBSTRING_LEN = 8
 # match to be accepted.  Blocks e.g. "introduction" (12) matching
 # "2 introduction to itocalculus" (29) since 12/29 = 0.41 < 0.5.
 _FUZZY_MIN_COVERAGE_RATIO = 0.5
+
+# Front-matter offset detection ignores early level-1 entries and only treats
+# offsets of this size or larger as meaningful enough to warn/correct.
+_FRONT_MATTER_FIRST_MAIN_ENTRY_MIN_PAGE = 5
+_SIGNIFICANT_FRONT_MATTER_OFFSET = 3
+
+# Feature serialization formatting precision.
+_FONT_SIZE_DECIMAL_PLACES = 1
+_Y_POSITION_DECIMAL_PLACES = 2
+
+# Token estimation should never report an empty feature block as zero tokens.
+_MIN_ESTIMATED_BLOCK_TOKENS = 1
+
+# PyMuPDF span flag bit indicating bold text.
+_PYMUPDF_BOLD_FLAG = 16
+_PYMUPDF_TEXT_BLOCK_TYPE = 0
+
+# Reference text scan defaults for postprocessing.
+DEFAULT_REFERENCE_TOC_MAX_PAGES = 20
+DEFAULT_REFERENCE_TOC_UNFILTERED_PAGES = 3
+
+# Postprocess feature summary defaults.
+DEFAULT_POSTPROCESS_FEATURE_SUMMARY_MAX_ENTRIES = 80
+_POSTPROCESS_HEADING_FONT_SIZE_RATIO = 1.1
+_POSTPROCESS_HEADING_SUMMARY_BUDGET_RATIO = 0.8
+
+# Safe fallback when PyMuPDF page height is unavailable.
+_DEFAULT_PAGE_HEIGHT = 1.0
+
+# Minimum process count when deriving parallelism from CPU count.
+_MIN_PROCESS_COUNT = 1
+
+# HTTP status semantics for retry classification.
+_HTTP_RATE_LIMIT_STATUS = 429
+_HTTP_SERVER_ERROR_MIN_STATUS = 500
+
+# TOC reference-text filtering thresholds.
+_TOC_DOT_LEADER_MIN_RUN_LENGTH = 3
+_TOC_PAGE_NUMBER_MIN_SPACES = 4
+_REFERENCE_TOC_OFFSET_MIN_MATCHES = 3
+_REFERENCE_TOC_OFFSET_MIN_DOMINANCE_RATIO = 0.6
+_REFERENCE_TOC_OFFSET_MAX_TITLE_LENGTH = 200
+
+# Default local search window used for plain text heading checks.
+_DEFAULT_HEADING_SEARCH_WINDOW = 1
+
+# Output/prompt formatting precision.
+_CONFIDENCE_DECIMAL_PLACES = 2
 
 
 def _normalize_snippet(text: str) -> str:
@@ -128,6 +209,57 @@ def _normalize_snippet(text: str) -> str:
     text = re.sub(r"^\d+(?:\.\d+)*[\.\)]*\s*", "", text)  # Strip "1. ", "3.2 ", "1) " prefixes
     text = re.sub(r"[^\w\s]", "", text)
     return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def _normalize_title_for_matching(title: str) -> str:
+    """Normalize a title without dropping leading section numbers."""
+    title = re.sub(r"[^\w\s\.]", "", title.strip().lower())
+    return re.sub(r"\s+", " ", title)
+
+
+def _extract_section_prefix(title: str) -> str | None:
+    """Extract a dotted numeric section prefix such as '6.6' from a title."""
+    match = _SECTION_PREFIX_PATTERN.match(title)
+    return match.group(1) if match else None
+
+
+def _heading_text_matches_title(title: str, candidate_text: str) -> bool:
+    """Match heading text while preserving section-prefix evidence when present."""
+    candidate_normalized = _normalize_snippet(candidate_text)
+    if len(candidate_normalized) < _HEADING_MIN_LENGTH:
+        return False
+
+    search_texts = [_normalize_snippet(title)]
+    appendix_without_prefix = _APPENDIX_PREFIX_PATTERN.sub("", title).strip()
+    if appendix_without_prefix != title:
+        search_texts.append(_normalize_snippet(appendix_without_prefix))
+
+    content_matches = False
+    for search_text in search_texts:
+        if len(search_text) < _HEADING_MIN_LENGTH:
+            continue
+        if search_text in candidate_normalized:
+            content_matches = True
+            break
+
+        shorter_len = min(len(search_text), len(candidate_normalized))
+        longer_len = max(len(search_text), len(candidate_normalized))
+        if (
+            shorter_len >= _FUZZY_MIN_SUBSTRING_LEN
+            and candidate_normalized in search_text
+            and shorter_len / longer_len >= _FUZZY_MIN_COVERAGE_RATIO
+        ):
+            content_matches = True
+            break
+
+    if not content_matches:
+        return False
+
+    section_prefix = _extract_section_prefix(title)
+    if section_prefix is None:
+        return True
+
+    return section_prefix in _normalize_title_for_matching(candidate_text)
 
 
 def apply_toc_to_document(doc: pymupdf.Document, toc: list, output_file: str) -> None:
@@ -189,7 +321,7 @@ def _is_retryable_error(exception: BaseException) -> bool:
     # Check HTTP status code (available on OpenAI / LangChain API errors)
     status_code = getattr(exception, "status_code", None)
     if isinstance(status_code, int):
-        return status_code == 429 or status_code >= 500
+        return status_code == _HTTP_RATE_LIMIT_STATUS or status_code >= _HTTP_SERVER_ERROR_MIN_STATUS
 
     # Fallback: match exception class name for known non-retryable types.
     # Default to True (retry) for transient network errors, timeouts, etc.
@@ -200,11 +332,11 @@ def _is_retryable_error(exception: BaseException) -> bool:
 # Pattern for lines that look like TOC entries: trailing page numbers,
 # dot-leaders, or tab-separated numbers
 _TOC_LINE_TRAILING_NUMBER_PATTERN = re.compile(
-    r"[.\s·…]{3,}\s*\d+\s*$"  # dot-leaders or spaces followed by a page number
+    rf"[.\s·…]{{{_TOC_DOT_LEADER_MIN_RUN_LENGTH},}}\s*\d+\s*$"  # dot-leaders before page number
     r"|"
     r"\t\d+\s*$"  # tab-separated page number
     r"|"
-    r"\s{4,}\d+\s*$"  # multiple spaces followed by a page number
+    rf"\s{{{_TOC_PAGE_NUMBER_MIN_SPACES},}}\d+\s*$"  # multiple spaces followed by a page number
 )
 
 # Maximum line length for short title-like lines in TOC filtering
@@ -310,7 +442,7 @@ def serialize_features_compact(features: list) -> str:
 
                     # Round font_size: 14.0 -> "14", 12.5 -> "12.5"
                     size = span.font_size
-                    size_str = str(int(size)) if size == int(size) else str(round(size, 1))
+                    size_str = str(int(size)) if size == int(size) else str(round(size, _FONT_SIZE_DECIMAL_PLACES))
 
                     parts = [font_id, size_str, span.text_snippet]
 
@@ -318,7 +450,7 @@ def serialize_features_compact(features: list) -> str:
                     # (non-body spans: bold, larger size, or section-numbered)
                     if span.y_position is not None:
                         # Format: ".12" for 0.12, ".0" for 0.0
-                        y_str = f"{span.y_position:.2f}".lstrip("0") or "0"
+                        y_str = f"{span.y_position:.{_Y_POSITION_DECIMAL_PLACES}f}".lstrip("0") or "0"
                         parts.append(y_str)
                     if span.is_bold:
                         parts.append("B")
@@ -364,7 +496,7 @@ def _estimate_block_tokens(block: list) -> int:
         for span in line:
             if isinstance(span, TOCFeature):
                 parts.append(f"F0|12|{span.text_snippet}|.12|B")
-    return max(1, estimate_tokens("\n".join(parts)))
+    return max(_MIN_ESTIMATED_BLOCK_TOKENS, estimate_tokens("\n".join(parts)))
 
 
 def _is_bold_font(span: dict) -> bool:
@@ -380,7 +512,7 @@ def _is_bold_font(span: dict) -> bool:
     """
     flags = span.get("flags", 0)
     font_name = span.get("font", "")
-    return bool(flags & 16) or "bold" in font_name.lower()
+    return bool(flags & _PYMUPDF_BOLD_FLAG) or "bold" in font_name.lower()
 
 
 def _compute_body_font_profile(features: list) -> tuple[str, float]:
@@ -488,7 +620,7 @@ def _merge_line_spans(spans: list[dict], text_snippet_length: int) -> dict:
 def _span_to_feature(span: dict, page_number: int, page_height: float, text_snippet_length: int) -> TOCFeature:
     """Convert a raw or synthetic PyMuPDF span to a TOCFeature."""
     bbox = span.get("bbox")
-    y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+    y_pos = round(bbox[1] / page_height, _Y_POSITION_DECIMAL_PLACES) if bbox and page_height > 0 else None
     text = span.get("text", "")
     return TOCFeature(
         page_number=page_number,
@@ -542,12 +674,12 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list
         page = doc[page_idx]
         page_number = page_idx + 1  # 1-indexed
         page_dict = page.get_text("dict")
-        page_height = page_dict.get("height", page.rect.height) if hasattr(page, "rect") else 1.0
+        page_height = page_dict.get("height", page.rect.height) if hasattr(page, "rect") else _DEFAULT_PAGE_HEIGHT
 
         for block_ix, block in enumerate(page_dict["blocks"]):
             if block_ix >= max_blocks_per_page:
                 # Buffer first span of remaining blocks for heading candidate scanning
-                if block["type"] == 0:
+                if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
                     lines = block.get("lines", [])
                     if lines:
                         spans = lines[0].get("spans", [])
@@ -556,7 +688,7 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list
                 continue
 
             features.append([])
-            if block["type"] == 0:
+            if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
                 # text block
                 for line_ix, line in enumerate(block["lines"]):
                     if line_ix >= max_lines_per_block:
@@ -590,7 +722,7 @@ class TOCGenerator:
         """
         self.doc = doc
         self.llm = llm
-        self.num_processes = num_processes or max(1, cpu_count() - 1)
+        self.num_processes = num_processes or max(_MIN_PROCESS_COUNT, cpu_count() - 1)
 
     def run(
         self,
@@ -652,8 +784,8 @@ class TOCGenerator:
         self,
         doc: pymupdf.Document,
         max_pages: int | None = None,
-        max_blocks_per_page: int = 3,
-        max_lines_per_block: int = 5,
+        max_blocks_per_page: int = DEFAULT_MAX_BLOCKS_PER_PAGE,
+        max_lines_per_block: int = DEFAULT_MAX_LINES_PER_BLOCK,
         text_snippet_length: int = DEFAULT_TEXT_SNIPPET_LENGTH,
         show_progress: bool = True,
     ) -> list:
@@ -684,7 +816,7 @@ class TOCGenerator:
         page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
         num_processes = min(self.num_processes, page_count)
 
-        if num_processes <= 1:
+        if num_processes <= _MIN_PROCESS_COUNT:
             return self._extract_features_sequential(
                 doc, max_pages, max_blocks_per_page, max_lines_per_block, text_snippet_length, show_progress
             )
@@ -703,8 +835,8 @@ class TOCGenerator:
         self,
         doc: pymupdf.Document,
         max_pages: int | None = None,
-        max_blocks_per_page: int = 3,
-        max_lines_per_block: int = 5,
+        max_blocks_per_page: int = DEFAULT_MAX_BLOCKS_PER_PAGE,
+        max_lines_per_block: int = DEFAULT_MAX_LINES_PER_BLOCK,
         text_snippet_length: int = DEFAULT_TEXT_SNIPPET_LENGTH,
         show_progress: bool = True,
     ) -> list:
@@ -734,12 +866,12 @@ class TOCGenerator:
 
         def _process_page(page, page_number: int) -> None:
             page_dict = page.get_text("dict")
-            page_height = page_dict.get("height", page.rect.height) if hasattr(page, "rect") else 1.0
+            page_height = page_dict.get("height", page.rect.height) if hasattr(page, "rect") else _DEFAULT_PAGE_HEIGHT
 
             for block_ix, block in enumerate(page_dict["blocks"]):
                 if block_ix >= max_blocks_per_page:
                     # Buffer first span of remaining blocks for heading candidate scanning
-                    if block["type"] == 0:
+                    if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
                         lines = block.get("lines", [])
                         if lines:
                             spans = lines[0].get("spans", [])
@@ -748,7 +880,7 @@ class TOCGenerator:
                     continue
 
                 features.append([])
-                if block["type"] == 0:
+                if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
                     # text block
                     for line_ix, line in enumerate(block["lines"]):
                         if line_ix >= max_lines_per_block:
@@ -804,7 +936,7 @@ class TOCGenerator:
                 if not span:
                     continue
                 bbox = span.get("bbox", None)
-                y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+                y_pos = round(bbox[1] / page_height, _Y_POSITION_DECIMAL_PLACES) if bbox and page_height > 0 else None
 
                 # Use relaxed criteria (Phase 1 ratio) for bottom-of-page spans
                 # to catch section headings that start late on a page
@@ -832,8 +964,8 @@ class TOCGenerator:
         input_path: str,
         page_count: int,
         num_processes: int,
-        max_blocks_per_page: int = 3,
-        max_lines_per_block: int = 5,
+        max_blocks_per_page: int = DEFAULT_MAX_BLOCKS_PER_PAGE,
+        max_lines_per_block: int = DEFAULT_MAX_LINES_PER_BLOCK,
         text_snippet_length: int = DEFAULT_TEXT_SNIPPET_LENGTH,
         show_progress: bool = True,
     ) -> list:
@@ -916,7 +1048,7 @@ class TOCGenerator:
                 if not span:
                     continue
                 bbox = span.get("bbox", None)
-                y_pos = round(bbox[1] / page_height, 2) if bbox and page_height > 0 else None
+                y_pos = round(bbox[1] / page_height, _Y_POSITION_DECIMAL_PLACES) if bbox and page_height > 0 else None
 
                 # Use relaxed criteria (Phase 1 ratio) for bottom-of-page spans
                 if y_pos is not None and y_pos > _BOTTOM_OF_PAGE_Y_THRESHOLD:
@@ -940,7 +1072,7 @@ class TOCGenerator:
     def _extract_toc(
         self,
         features: list,
-        max_depth: int = 2,
+        max_depth: int = DEFAULT_MAX_TOC_DEPTH,
         max_tokens_per_batch: int = DEFAULT_MAX_TOKENS_PER_BATCH,
         request_delay: float = DEFAULT_REQUEST_DELAY_SECONDS,
     ) -> tuple[TOC, TokenUsage]:
@@ -1068,7 +1200,7 @@ class TOCGenerator:
     def _extract_toc_paginated(
         self,
         features: list,
-        max_depth: int = 2,
+        max_depth: int = DEFAULT_MAX_TOC_DEPTH,
         max_tokens_per_batch: int = DEFAULT_MAX_TOKENS_PER_BATCH,
         overlap_blocks: int = DEFAULT_OVERLAP_BLOCKS,
         request_delay: float = DEFAULT_REQUEST_DELAY_SECONDS,
@@ -1160,8 +1292,8 @@ class TOCGenerator:
 
     def _extract_reference_toc_text(
         self,
-        max_pages: int = 20,
-        unfiltered_pages: int = 3,
+        max_pages: int = DEFAULT_REFERENCE_TOC_MAX_PAGES,
+        unfiltered_pages: int = DEFAULT_REFERENCE_TOC_UNFILTERED_PAGES,
     ) -> str:
         """Extract text from the first few pages that may contain a printed TOC.
 
@@ -1198,7 +1330,7 @@ class TOCGenerator:
         self,
         toc: TOC,
         features: list,
-        max_pages_for_reference_toc: int = 20,
+        max_pages_for_reference_toc: int = DEFAULT_REFERENCE_TOC_MAX_PAGES,
     ) -> tuple[TOC, TokenUsage]:
         """Postprocess a generated TOC using LLM to clean up and improve entries.
 
@@ -1225,7 +1357,8 @@ class TOCGenerator:
 
         # Format the generated TOC for the prompt
         toc_entries_str = "\n".join(
-            f"- {entry.title} (page {entry.page_number}, level {entry.level}, confidence {entry.confidence:.2f})"
+            f"- {entry.title} (page {entry.page_number}, level {entry.level}, "
+            f"confidence {entry.confidence:.{_CONFIDENCE_DECIMAL_PLACES}f})"
             for entry in toc.entries
         )
 
@@ -1275,7 +1408,7 @@ must be PDF page numbers (not printed page numbers).
         refined_toc = self._invoke_with_retry(model, messages, "TOC postprocessing", input_tokens)
 
         # Validate and correct page numbers if the LLM shifted to printed page numbers
-        refined_toc = self._correct_postprocessed_page_numbers(toc, refined_toc)
+        refined_toc = self._correct_postprocessed_page_numbers(toc, refined_toc, reference_text=reference_text)
 
         # Estimate output tokens
         output_tokens = estimate_tokens(str(refined_toc.entries))
@@ -1295,12 +1428,88 @@ must be PDF page numbers (not printed page numbers).
 
         return refined_toc, usage
 
-    def _detect_front_matter_offset(self, toc: TOC) -> int:
+    def _extract_reference_toc_page_entries(self, reference_text: str) -> list[tuple[str, int]]:
+        """Extract printed TOC title/page pairs from reference text.
+
+        This intentionally only accepts lines with an explicit trailing Arabic
+        page number. More ambiguous OCR layouts are left to the LLM/postprocess
+        prompt rather than guessed deterministically.
+        """
+        entries: list[tuple[str, int]] = []
+        for line in reference_text.splitlines():
+            stripped = line.strip()
+            if not stripped or len(stripped) > _REFERENCE_TOC_OFFSET_MAX_TITLE_LENGTH:
+                continue
+
+            match = _TOC_LINE_TRAILING_NUMBER_PATTERN.search(stripped)
+            if not match:
+                continue
+
+            page_match = re.search(r"(\d+)\s*$", stripped)
+            if not page_match:
+                continue
+
+            title = stripped[: page_match.start()].strip(" .·…\t")
+            if len(_normalize_snippet(title)) < _FUZZY_MIN_SUBSTRING_LEN:
+                continue
+            entries.append((title, int(page_match.group(1))))
+
+        return entries
+
+    def _titles_match_for_offset_detection(self, left: str, right: str) -> bool:
+        """Return True when two TOC titles are a strong enough offset signal."""
+        left_norm = _normalize_snippet(left)
+        right_norm = _normalize_snippet(right)
+        if len(left_norm) < _FUZZY_MIN_SUBSTRING_LEN or len(right_norm) < _FUZZY_MIN_SUBSTRING_LEN:
+            return False
+        if left_norm == right_norm:
+            return True
+
+        shorter_len = min(len(left_norm), len(right_norm))
+        longer_len = max(len(left_norm), len(right_norm))
+        if shorter_len < _FUZZY_MIN_SUBSTRING_LEN:
+            return False
+        if not (left_norm in right_norm or right_norm in left_norm):
+            return False
+        return shorter_len / longer_len >= _FUZZY_MIN_COVERAGE_RATIO
+
+    def _detect_reference_toc_offset(self, toc: TOC, reference_text: str) -> int:
+        """Detect printed-to-PDF offset from repeated printed TOC title/page matches."""
+        reference_entries = self._extract_reference_toc_page_entries(reference_text)
+        if not reference_entries or not toc.entries:
+            return 0
+
+        offsets: list[int] = []
+        for reference_title, printed_page in reference_entries:
+            for entry in toc.entries:
+                if self._titles_match_for_offset_detection(reference_title, entry.title):
+                    offset = entry.page_number - printed_page
+                    if offset >= _SIGNIFICANT_FRONT_MATTER_OFFSET:
+                        offsets.append(offset)
+                    break
+
+        if not offsets:
+            return 0
+
+        offset_counts = Counter(offsets)
+        best_offset, best_count = offset_counts.most_common(1)[0]
+        if best_count < _REFERENCE_TOC_OFFSET_MIN_MATCHES:
+            return 0
+        if best_count / len(offsets) < _REFERENCE_TOC_OFFSET_MIN_DOMINANCE_RATIO:
+            return 0
+        return best_offset
+
+    def _detect_front_matter_offset(self, toc: TOC, reference_text: str = "") -> int:
         """Detect the number of front matter pages from Phase 1 TOC data.
 
-        Finds the first level-1 entry past page 5 whose title is not a known
-        front matter title (e.g. "Contents", "Preface") and assumes it
-        corresponds to the start of the main content (approximately printed page 1).
+        First try to infer a high-confidence offset from repeated matches
+        between printed TOC lines and generated entries. If that signal is not
+        available, use generated level-1 entries and front-matter anchors.
+
+        Prefer the first numbered level-1 main-content entry (e.g. "1. ...",
+        "Chapter I ...") because book title pages can look like chapter
+        headings. Fall back to the first non-front-matter level-1 entry past
+        the front-matter threshold.
 
         Args:
             toc: The generated TOC with correct PDF page numbers.
@@ -1308,12 +1517,39 @@ must be PDF page numbers (not printed page numbers).
         Returns:
             Estimated front matter offset (0 if no significant front matter detected).
         """
-        for entry in toc.entries:
-            if entry.level == 1 and entry.page_number > 5:
-                title_clean = re.sub(r"[^\w\s]", "", entry.title.strip().lower())
-                title_clean = re.sub(r"\s+", " ", title_clean)
-                if not _FRONT_MATTER_TITLE_PATTERN.match(title_clean):
-                    return entry.page_number - 1
+        if reference_text:
+            reference_offset = self._detect_reference_toc_offset(toc, reference_text)
+            if reference_offset:
+                return reference_offset
+
+        candidates = [
+            entry
+            for entry in toc.entries
+            if entry.level == _ROOT_TOC_LEVEL and entry.page_number > _FRONT_MATTER_FIRST_MAIN_ENTRY_MIN_PAGE
+        ]
+
+        front_matter_anchor_page = 0
+        for entry in candidates:
+            title_clean = re.sub(r"[^\w\s]", "", entry.title.strip().lower())
+            title_clean = re.sub(r"\s+", " ", title_clean)
+            if _FRONT_MATTER_TITLE_PATTERN.match(title_clean):
+                front_matter_anchor_page = max(front_matter_anchor_page, entry.page_number)
+
+        candidates_after_front_matter = [
+            entry
+            for entry in candidates
+            if not front_matter_anchor_page or entry.page_number > front_matter_anchor_page
+        ]
+
+        for entry in candidates_after_front_matter:
+            if _MAIN_CONTENT_START_PATTERN.match(_normalize_title_for_matching(entry.title)):
+                return entry.page_number - 1
+
+        for entry in candidates_after_front_matter:
+            title_clean = re.sub(r"[^\w\s]", "", entry.title.strip().lower())
+            title_clean = re.sub(r"\s+", " ", title_clean)
+            if not _FRONT_MATTER_TITLE_PATTERN.match(title_clean):
+                return entry.page_number - 1
         return 0
 
     def _detect_page_offset_note(self, toc: TOC, reference_text: str) -> str:
@@ -1330,9 +1566,9 @@ must be PDF page numbers (not printed page numbers).
             A warning string to include in the postprocessor prompt, or empty string
             if no offset is detected.
         """
-        estimated_offset = self._detect_front_matter_offset(toc)
+        estimated_offset = self._detect_front_matter_offset(toc, reference_text=reference_text)
 
-        if estimated_offset < 3:
+        if estimated_offset < _SIGNIFICANT_FRONT_MATTER_OFFSET:
             return ""
 
         first_chapter_page = estimated_offset + 1
@@ -1346,7 +1582,9 @@ must be PDF page numbers (not printed page numbers).
             f"printed page N \u2192 PDF page N + {estimated_offset}."
         )
 
-    def _page_contains_heading(self, page_number: int, title: str, window: int = 1) -> bool:
+    def _page_contains_heading(
+        self, page_number: int, title: str, window: int = _DEFAULT_HEADING_SEARCH_WINDOW
+    ) -> bool:
         """Check if a heading's text appears on or near the given page.
 
         Args:
@@ -1358,8 +1596,7 @@ must be PDF page numbers (not printed page numbers).
             True if the title text is found on or near the page.
         """
         search_text = _normalize_snippet(title)
-
-        if len(search_text) < 3:
+        if len(search_text) < _HEADING_MIN_LENGTH:
             return False  # Too short to match reliably
 
         start = max(0, page_number - 1 - window)
@@ -1367,8 +1604,7 @@ must be PDF page numbers (not printed page numbers).
 
         for page_idx in range(start, end):
             page_text = self.doc[page_idx].get_text("text")
-            page_text_normalized = _normalize_snippet(page_text)
-            if search_text in page_text_normalized:
+            if _heading_text_matches_title(title, page_text):
                 return True
 
         return False
@@ -1379,7 +1615,7 @@ must be PDF page numbers (not printed page numbers).
         """Find the page where a heading appears as an actual heading, not a running header.
 
         Searches pages in [start_page, end_page) for the title text in a
-        non-running-header position (y >= 0.06). Uses block-level text
+        non-running-header position. Uses block-level text
         concatenation to handle OCR text where each word is a separate span.
 
         When hint_page is provided, searches outward from that page so the
@@ -1396,7 +1632,7 @@ must be PDF page numbers (not printed page numbers).
             The 1-indexed page number where the heading is found, or None.
         """
         search_text = _normalize_snippet(title)
-        if len(search_text) < 3:
+        if len(search_text) < _HEADING_MIN_LENGTH:
             return None
 
         start_idx = max(0, start_page - 1)
@@ -1416,10 +1652,10 @@ must be PDF page numbers (not printed page numbers).
         for page_idx in page_order:
             page = self.doc[page_idx]
             page_dict = page.get_text("dict")
-            page_height = page_dict.get("height", 1.0)
+            page_height = page_dict.get("height", _DEFAULT_PAGE_HEIGHT)
 
             for block in page_dict.get("blocks", []):
-                if block.get("type") != 0:
+                if block.get("type") != _PYMUPDF_TEXT_BLOCK_TYPE:
                     continue
                 block_spans = [span for line in block.get("lines", []) for span in line.get("spans", [])]
                 if not block_spans:
@@ -1428,30 +1664,21 @@ must be PDF page numbers (not printed page numbers).
                 if not first_bbox or page_height <= 0:
                     continue
                 y_pos = first_bbox[1] / page_height
-                # Skip running headers (top ~5% of page) and footers (bottom ~5%)
-                if y_pos < 0.06 or y_pos > 0.95:
+                # Skip running headers and footers.
+                if y_pos < _HEADING_SEARCH_HEADER_Y_THRESHOLD or y_pos > _HEADING_SEARCH_FOOTER_Y_THRESHOLD:
                     continue
                 block_text = " ".join(s.get("text", "") for s in block_spans)
-                block_text_normalized = _normalize_snippet(block_text)
-                if len(block_text_normalized) < 3:
-                    continue
-                # Check for substantial match: either the block contains the heading
-                # text, or vice versa with a minimum coverage ratio to prevent short
-                # body text (e.g. "interpolation") from matching long headings.
-                if search_text in block_text_normalized:
-                    return page_idx + 1  # 1-indexed
-                shorter_len = min(len(search_text), len(block_text_normalized))
-                longer_len = max(len(search_text), len(block_text_normalized))
-                if (
-                    shorter_len >= _FUZZY_MIN_SUBSTRING_LEN
-                    and block_text_normalized in search_text
-                    and shorter_len / longer_len >= _FUZZY_MIN_COVERAGE_RATIO
-                ):
+                if _heading_text_matches_title(title, block_text):
                     return page_idx + 1  # 1-indexed
 
         return None
 
-    def _page_has_heading_in_bottom(self, page_number: int, title: str, y_threshold: float = 0.5) -> bool:
+    def _page_has_heading_in_bottom(
+        self,
+        page_number: int,
+        title: str,
+        y_threshold: float = _PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD,
+    ) -> bool:
         """Check if heading text appears in the bottom portion of a given page.
 
         Searches the actual PDF page structure (blocks/spans) for text matching
@@ -1472,14 +1699,14 @@ must be PDF page numbers (not printed page numbers).
 
         page = self.doc[page_idx]
         page_dict = page.get_text("dict")
-        page_height = page_dict.get("height", 1.0)
+        page_height = page_dict.get("height", _DEFAULT_PAGE_HEIGHT)
 
         search_text = _normalize_snippet(title)
-        if len(search_text) < 3:
+        if len(search_text) < _HEADING_MIN_LENGTH:
             return False
 
         for block in page_dict.get("blocks", []):
-            if block.get("type") != 0:
+            if block.get("type") != _PYMUPDF_TEXT_BLOCK_TYPE:
                 continue
             # Concatenate all text in the block and check y-position from the
             # first span. This handles OCR text where headings are split across
@@ -1494,18 +1721,7 @@ must be PDF page numbers (not printed page numbers).
             if y_pos <= y_threshold:
                 continue
             block_text = " ".join(s.get("text", "") for s in block_spans)
-            block_text_normalized = _normalize_snippet(block_text)
-            if len(block_text_normalized) < 3:
-                continue
-            if search_text in block_text_normalized:
-                return True
-            shorter_len = min(len(search_text), len(block_text_normalized))
-            longer_len = max(len(search_text), len(block_text_normalized))
-            if (
-                shorter_len >= _FUZZY_MIN_SUBSTRING_LEN
-                and block_text_normalized in search_text
-                and shorter_len / longer_len >= _FUZZY_MIN_COVERAGE_RATIO
-            ):
+            if _heading_text_matches_title(title, block_text):
                 return True
         return False
 
@@ -1557,7 +1773,7 @@ must be PDF page numbers (not printed page numbers).
             page = entry.page_number
             entry_text = _normalize_snippet(entry.title)
 
-            if len(entry_text) < 3 or page <= 1:
+            if len(entry_text) < _HEADING_MIN_LENGTH or page <= 1:
                 corrected.append(entry)
                 continue
 
@@ -1599,7 +1815,7 @@ must be PDF page numbers (not printed page numbers).
 
         return TOC(entries=corrected)
 
-    def _correct_postprocessed_page_numbers(self, original_toc: TOC, refined_toc: TOC) -> TOC:
+    def _correct_postprocessed_page_numbers(self, original_toc: TOC, refined_toc: TOC, reference_text: str = "") -> TOC:
         """Correct page numbers for entries added or modified by the postprocessor.
 
         Uses a deterministic strategy:
@@ -1620,7 +1836,7 @@ must be PDF page numbers (not printed page numbers).
             return refined_toc
 
         # Step 1: Detect front matter offset from Phase 1 data
-        offset = self._detect_front_matter_offset(original_toc)
+        offset = self._detect_front_matter_offset(original_toc, reference_text=reference_text)
 
         # Step 2: Build map of original entries (normalized title -> page_number)
         def normalize(title: str) -> str:
@@ -1691,7 +1907,7 @@ must be PDF page numbers (not printed page numbers).
         # and new entries (LLM used printed page numbers or guessed incorrectly).
         # Search a window of ±offset around each entry's current page.
         verified_count = 0
-        if offset >= 3:
+        if offset >= _SIGNIFICANT_FRONT_MATTER_OFFSET:
             window = offset
             for i, entry in enumerate(corrected):
                 search_text = _normalize_snippet(entry.title)
@@ -1717,7 +1933,9 @@ must be PDF page numbers (not printed page numbers).
 
         return TOC(entries=corrected)
 
-    def _summarize_features_for_postprocessing(self, features: list, max_entries: int = 80) -> str:
+    def _summarize_features_for_postprocessing(
+        self, features: list, max_entries: int = DEFAULT_POSTPROCESS_FEATURE_SUMMARY_MAX_ENTRIES
+    ) -> str:
         """Create a compact summary of features for postprocessing context.
 
         Prioritizes heading-like spans (bold, larger fonts, section-numbered) and
@@ -1743,7 +1961,10 @@ must be PDF page numbers (not printed page numbers).
                     if isinstance(span, TOCFeature):
                         is_heading = (
                             span.is_bold
-                            or (body_font_size > 0 and span.font_size > body_font_size * 1.1)
+                            or (
+                                body_font_size > 0
+                                and span.font_size > body_font_size * _POSTPROCESS_HEADING_FONT_SIZE_RATIO
+                            )
                             or bool(_SECTION_NUMBER_PATTERN.match(span.text_snippet.strip()))
                         )
                         if is_heading:
@@ -1755,7 +1976,7 @@ must be PDF page numbers (not printed page numbers).
             return "(No features available)"
 
         # Allocate most entries to heading spans, rest to body for context
-        heading_budget = min(len(heading_spans), int(max_entries * 0.8))
+        heading_budget = min(len(heading_spans), int(max_entries * _POSTPROCESS_HEADING_SUMMARY_BUDGET_RATIO))
         body_budget = min(len(body_spans), max_entries - heading_budget)
 
         def _sample(spans: list[TOCFeature], n: int) -> list[TOCFeature]:
@@ -1772,10 +1993,14 @@ must be PDF page numbers (not printed page numbers).
         summary_lines = []
         for span in sampled:
             font = _strip_subset_prefix(span.font_name)
-            size = int(span.font_size) if span.font_size == int(span.font_size) else round(span.font_size, 1)
+            size = (
+                int(span.font_size)
+                if span.font_size == int(span.font_size)
+                else round(span.font_size, _FONT_SIZE_DECIMAL_PLACES)
+            )
             parts = [f"P{span.page_number}"]
             if span.y_position is not None:
-                y_str = f"{span.y_position:.2f}".lstrip("0") or "0"
+                y_str = f"{span.y_position:.{_Y_POSITION_DECIMAL_PLACES}f}".lstrip("0") or "0"
                 parts[0] += f"@{y_str}"
             parts.append(f"{font} {size}")
             if span.is_bold:
