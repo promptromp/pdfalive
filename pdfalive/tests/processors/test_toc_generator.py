@@ -16,6 +16,7 @@ from pdfalive.processors.toc_generator import (
     _MAX_HEADING_CANDIDATES_PER_PAGE,
     _RUNNING_HEADER_Y_THRESHOLD,
     _SECTION_NUMBER_PATTERN,
+    DEFAULT_TEXT_SNIPPET_LENGTH,
     TOCGenerator,
     _compute_body_font_profile,
     _extract_features_from_page_range,
@@ -551,6 +552,27 @@ class TestFeatureExtractionMultiprocessing:
 
             assert actual_ranges == expected_ranges
 
+    def test_extract_features_from_page_range_respects_page_count_limit(self):
+        """Worker should honor the caller-provided page count for max_pages."""
+        mock_page_data = {
+            "height": 800,
+            "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Arial", "size": 12, "text": "Test"}]}]}],
+        }
+
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_doc.page_count = 10
+            mock_page = MagicMock()
+            mock_page.get_text.return_value = mock_page_data
+            mock_doc.__getitem__ = lambda self, idx: mock_page
+            mock_pymupdf.open.return_value = mock_doc
+
+            start, end, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 5, 25, 4))
+
+            assert start == 0
+            assert end == 4
+            assert len(features) == 4
+
     def test_merged_features_maintain_page_order(self):
         """Test that merged features from multiple processes maintain correct page order."""
         with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
@@ -741,6 +763,30 @@ class TestFeatureExtractionMultiprocessing:
             assert features[0][0][0].text_snippet == "This is a "
             # But text_length should reflect full length
             assert features[0][0][0].text_length == len(long_text)
+
+    def test_extract_features_default_snippet_length_uses_constant(self):
+        """Default snippet length should be named and long enough for common headings."""
+        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+            mock_doc = MagicMock()
+            mock_doc.page_count = 1
+
+            long_heading = "Chapter 1: Introduction to Stochastic Differential Equations"
+            page_data = {
+                "height": 800,
+                "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 16, "text": long_heading}]}]}],
+            }
+
+            mock_page = MagicMock()
+            mock_page.get_text.return_value = page_data
+            mock_doc.__getitem__ = lambda self, idx: mock_page
+            mock_pymupdf.open.return_value = mock_doc
+
+            _, _, features, _ = _extract_features_from_page_range(
+                (0, 1, "/fake/path.pdf", 3, 5, DEFAULT_TEXT_SNIPPET_LENGTH)
+            )
+
+            assert features[0][0][0].text_snippet == long_heading[:DEFAULT_TEXT_SNIPPET_LENGTH]
+            assert len(features[0][0][0].text_snippet) == DEFAULT_TEXT_SNIPPET_LENGTH
 
     def test_extract_features_skips_non_text_blocks(self):
         """Test that non-text blocks (type != 0) are skipped."""
@@ -1393,6 +1439,58 @@ class TestHeadingCandidateIntegration:
             f"Mid-page heading not found in features. Got: {all_snippets}"
         )
 
+    def test_overflow_heading_split_across_spans_preserves_line_text(self):
+        """Phase 2 should not reduce a split heading to its first span only."""
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.name = None
+
+        page_height = 800.0
+        page = MagicMock()
+        page.rect.height = page_height
+
+        body_span = {
+            "font": "Times-Roman",
+            "size": 12,
+            "text": "Body paragraph text",
+            "bbox": (50, 50, 400, 65),
+            "flags": 0,
+        }
+        heading_number = {
+            "font": "Times-Bold",
+            "size": 16,
+            "text": "5.2",
+            "bbox": (50, 400, 80, 420),
+            "flags": 16,
+        }
+        heading_title = {
+            "font": "Times-Bold",
+            "size": 16,
+            "text": "Convexity of Functions",
+            "bbox": (85, 400, 400, 420),
+            "flags": 16,
+        }
+
+        page.get_text.return_value = {
+            "height": page_height,
+            "blocks": [
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [body_span]}]},
+                {"type": 0, "lines": [{"spans": [heading_number, heading_title]}]},
+            ],
+        }
+        doc.__iter__ = lambda self: iter([page])
+
+        generator = TOCGenerator(doc=doc, llm=MagicMock())
+        features = generator._extract_features_sequential(doc, max_blocks_per_page=3, show_progress=False)
+
+        all_snippets = [
+            span.text_snippet for block in features for line in block for span in line if isinstance(span, TOCFeature)
+        ]
+
+        assert "5.2 Convexity of Functions" in all_snippets
+
     def test_y_position_is_set_on_features(self):
         """Test that y_position is populated when bbox data is available."""
         doc = MagicMock()
@@ -1795,6 +1893,82 @@ class TestDetectFrontMatterOffset:
         )
         assert generator._detect_front_matter_offset(toc) == 16  # 17 - 1
 
+    def test_prefers_numbered_main_content_over_title_page(self, generator):
+        """Book title pages should not determine the printed-to-PDF offset."""
+        toc = self._make_toc(
+            [
+                ("Decisions with Multiple Objectives", 7, 1),
+                ("Contents", 11, 1),
+                ("Preface", 15, 1),
+                ("1. THE PROBLEM", 25, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 24  # 25 - 1
+
+    def test_skips_title_page_before_front_matter_anchor(self, generator):
+        """When Contents/Preface are present, main content should come after them."""
+        toc = self._make_toc(
+            [
+                ("Decisions with Multiple Objectives", 7, 1),
+                ("Contents", 11, 1),
+                ("Preface to First Edition", 19, 1),
+                ("THE PROBLEM", 25, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 24  # 25 - 1
+
+    def test_reference_toc_consensus_offset_wins(self, generator):
+        """Repeated printed TOC title/page matches are the strongest offset signal."""
+        toc = self._make_toc(
+            [
+                ("Book Title", 7, 1),
+                ("1. The Problem", 25, 1),
+                ("1.1 Sketches of Motivating Examples", 27, 2),
+                ("1.2 Paradigm of Decision Analysis", 30, 2),
+                ("2. The Structuring of Objectives", 55, 1),
+            ]
+        )
+        reference_text = "\n".join(
+            [
+                "The Problem ........ 1",
+                "Sketches of Motivating Examples ........ 3",
+                "Paradigm of Decision Analysis ........ 6",
+                "The Structuring of Objectives ........ 31",
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc, reference_text=reference_text) == 24
+
+    def test_reference_toc_offset_requires_consensus(self, generator):
+        """A single printed TOC match is not enough to override safer fallbacks."""
+        toc = self._make_toc(
+            [
+                ("Book Title", 7, 1),
+                ("Contents", 11, 1),
+                ("THE PROBLEM", 25, 1),
+                ("2. The Structuring of Objectives", 55, 1),
+            ]
+        )
+        reference_text = "The Structuring of Objectives ........ 31"
+        assert generator._detect_front_matter_offset(toc, reference_text=reference_text) == 24
+
+    @pytest.mark.parametrize(
+        "chapter_title",
+        [
+            "Chapter 1 The Problem",
+            "Chapter I The Problem",
+            "I The Problem",
+        ],
+    )
+    def test_numbered_main_content_patterns(self, generator, chapter_title):
+        """Common first-chapter formats determine the front-matter offset."""
+        toc = self._make_toc(
+            [
+                ("Book Title", 7, 1),
+                (chapter_title, 25, 1),
+            ]
+        )
+        assert generator._detect_front_matter_offset(toc) == 24
+
     def test_skips_level2_entries(self, generator):
         """Level-2 entries are ignored for offset detection."""
         toc = self._make_toc(
@@ -1857,6 +2031,7 @@ class TestDetectFrontMatterOffset:
         [
             "Acknowledgments for the English Edition",
             "Foreword to the Second Edition",
+            "Preface to First Edition",
             "Preface to the Revised Edition",
             "Contents of Volume II",
         ],
@@ -2086,6 +2261,45 @@ class TestCorrectPostprocessedPageNumbers:
         assert result.entries[2].page_number == 35  # new, offset applied (20 + 15)
         assert result.entries[3].page_number == 41  # matched, restored
 
+    def test_numbered_heading_search_requires_section_prefix(self, generator):
+        """Page verification should not match same title text from a different numbered section."""
+        generator.doc._page_texts[296] = "Assessing Multiattribute Utility Functions"
+        generator.doc._page_texts[320] = "6.6 Assessing Multiattribute Utility Functions"
+
+        original = self._make_toc(
+            [
+                ("1. The Problem", 25, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("1. The Problem", 25, 1),
+                ("6.6 Assessing Multiattribute Utility Functions", 297, 2),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[1].page_number == 321
+
+    def test_appendix_heading_search_allows_missing_ocr_prefix(self, generator):
+        """Appendix verification can use the subtitle when OCR mangles the appendix prefix."""
+        generator.doc._page_texts[536] = "Derivation of a Utility Function for Consumption and Lifetime"
+
+        original = self._make_toc(
+            [
+                ("1. The Problem", 25, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("1. The Problem", 25, 1),
+                ("Appendix 9A Derivation of a Utility Function for Consumption and Lifetime", 557, 1),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[1].page_number == 537
+
     def test_empty_refined_toc_returned_as_is(self, generator):
         """Empty refined TOC is returned unchanged."""
         empty = TOC(entries=[])
@@ -2248,6 +2462,24 @@ class TestCorrectPostprocessedPageNumbers:
         assert result.entries[0].page_number == 15  # exact match, restored
         assert result.entries[1].page_number == 17  # exact match, restored
         assert result.entries[2].page_number == 136  # no cross-level match, kept as-is
+
+    def test_exact_match_skips_cross_level(self, generator):
+        """Exact same titles at different levels should not be restored across levels."""
+        original = self._make_toc(
+            [
+                ("Introduction", 15, 1),
+                ("Chapter I", 17, 1),
+            ]
+        )
+        refined = self._make_toc(
+            [
+                ("Introduction", 15, 1),
+                ("Chapter I", 17, 1),
+                ("Introduction", 136, 2),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[2].page_number == 136
 
     def test_fuzzy_match_skips_short_substrings(self, generator):
         """Substring matching requires minimum 8 chars for the shorter string."""
@@ -2414,6 +2646,7 @@ class TestFrontMatterTitlePattern:
             # Front matter with qualifying phrases
             ("introduction to the second edition", True),
             ("foreword to the revised edition", True),
+            ("preface to first edition", True),
             ("preface to the third edition", True),
             ("acknowledgments for the english edition", True),
             ("contents of volume ii", True),
@@ -3052,6 +3285,23 @@ class TestCorrectRunningHeaderPages:
             ],
         }
         mock_doc.__getitem__ = lambda self_doc, idx: page4 if idx == 3 else MagicMock()
+
+        result = generator._correct_running_header_pages(toc, features)
+        assert result.entries[0].page_number == 5
+
+    def test_no_correction_when_page_has_no_header_text(self, mock_doc, mock_llm):
+        """Empty header-zone text should not be treated as a substring match."""
+        generator = TOCGenerator(mock_doc, mock_llm)
+
+        features = [
+            [[self._make_feature(4, "Convergence", 0.70, bold=True)]],
+            [[self._make_feature(5, "Regular body text", 0.20)]],
+        ]
+        toc = TOC(
+            entries=[
+                TOCEntry(title="Convergence", page_number=5, level=2, confidence=0.85),
+            ]
+        )
 
         result = generator._correct_running_header_pages(toc, features)
         assert result.entries[0].page_number == 5

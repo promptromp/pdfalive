@@ -47,7 +47,7 @@ Each TOC entry should include:
 - Page Number: The PDF page number where the feature is located (1-indexed from the first physical page of the PDF file). Use this exact page number in your output — do not substitute printed page numbers visible in the text.
 - Confidence: A float between 0 and 1 indicating your confidence that this feature represents a TOC entry.
 
-Return the TOC as a list of entries, where each entry is represented as a dictionary with keys "title", "level", and "page_number".
+Return the TOC as a list of entries, where each entry is represented as a dictionary with keys "title", "level", "page_number", and "confidence".
 
 Example output:
 [
@@ -100,7 +100,7 @@ Each TOC entry should include:
 - Page Number: The PDF page number where the feature is located (1-indexed from the first physical page of the PDF file). Use this exact page number in your output — do not substitute printed page numbers visible in the text.
 - Confidence: A float between 0 and 1 indicating your confidence that this feature represents a TOC entry.
 
-Return the TOC as a list of entries, where each entry is represented as a dictionary with keys "title", "level", and "page_number".
+Return the TOC as a list of entries, where each entry is represented as a dictionary with keys "title", "level", "page_number", and "confidence".
 
 ## Important Instructions
 
