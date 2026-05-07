@@ -223,3 +223,11 @@ __marimo__/
 
 # pdfalive config file
 pdfalive.toml
+
+# Local Claude Code settings (personal, not for repo)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Scratch data and root-level sample PDFs (test fixtures live under pdfalive/tests/)
+data/
+/*.pdf
