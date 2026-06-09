@@ -479,6 +479,81 @@ def serialize_features_compact(features: list) -> str:
     return "\n".join(lines)
 
 
+# Maximum non-heading (body) spans per page kept in the LLM payload. One body span
+# per page preserves page anchoring and the font-size baseline while dropping the
+# bulk of body text, which carries no TOC signal (~60% of payload tokens).
+_MAX_BODY_SPANS_PER_PAGE_FOR_LLM = 1
+
+
+def _is_heading_like_feature(span: TOCFeature, body_font_size: float) -> bool:
+    """Classify an extracted TOCFeature as heading-like (vs body text).
+
+    Mirrors the criteria of _is_heading_candidate, but operates on TOCFeature
+    objects (post-extraction) rather than raw PyMuPDF span dicts.
+    """
+    text = span.text_snippet.strip()
+    if len(text) < _HEADING_MIN_LENGTH or span.text_length > _HEADING_MAX_LENGTH:
+        return False
+
+    if body_font_size > 0 and span.font_size >= body_font_size * _HEADING_FONT_SIZE_RATIO:
+        return True
+
+    if span.is_bold and body_font_size > 0 and span.font_size >= body_font_size:
+        return True
+
+    if _SECTION_NUMBER_PATTERN.match(text):
+        return True
+
+    return bool(_LETTERSPACED_PATTERN.match(text))
+
+
+def filter_features_for_llm(features: list, max_body_spans_per_page: int = _MAX_BODY_SPANS_PER_PAGE_FOR_LLM) -> list:
+    """Reduce the feature payload sent to the LLM by dropping low-signal body spans.
+
+    Keeps all heading-like spans (larger font, bold at body size, section
+    numbering, letter-spaced caps) plus the first `max_body_spans_per_page`
+    body spans per page. The retained body span keeps every page represented
+    in the payload (page anchoring) and gives the LLM a body-font baseline —
+    and is typically the running header or first paragraph line, preserving
+    the y-position guidance in the prompt.
+
+    The full (unfiltered) features must still be used for deterministic
+    corrections and the postprocess summary; this filter only shrinks the
+    LLM payload.
+
+    Args:
+        features: Nested list of TOCFeature objects (blocks > lines > spans).
+        max_body_spans_per_page: Body spans to retain per page.
+
+    Returns:
+        A filtered nested list with the same blocks > lines > spans structure;
+        empty lines and blocks are pruned.
+    """
+    _, body_font_size = _compute_body_font_profile(features)
+
+    body_spans_kept: dict[int, int] = {}
+    filtered: list[list] = []
+
+    for block in features:
+        filtered_block: list[list] = []
+        for line in block:
+            filtered_line = []
+            for span in line:
+                if not isinstance(span, TOCFeature):
+                    continue
+                if _is_heading_like_feature(span, body_font_size):
+                    filtered_line.append(span)
+                elif body_spans_kept.get(span.page_number, 0) < max_body_spans_per_page:
+                    body_spans_kept[span.page_number] = body_spans_kept.get(span.page_number, 0) + 1
+                    filtered_line.append(span)
+            if filtered_line:
+                filtered_block.append(filtered_line)
+        if filtered_block:
+            filtered.append(filtered_block)
+
+    return filtered
+
+
 def _estimate_block_tokens(block: list) -> int:
     """Estimate the token count for a single feature block in compact format.
 
@@ -752,7 +827,12 @@ class TOCGenerator:
             )
 
         features = self._extract_features(self.doc)
-        toc, usage = self._extract_toc(features, request_delay=request_delay)
+
+        # Send a reduced payload to the LLM: body text beyond one span per page
+        # carries no TOC signal. The full features are kept for the deterministic
+        # corrections and postprocess summary below.
+        llm_features = filter_features_for_llm(features)
+        toc, usage = self._extract_toc(llm_features, request_delay=request_delay)
 
         # Deterministic correction: fix entries that point to running headers
         # instead of actual section starts (e.g., when a section starts near the

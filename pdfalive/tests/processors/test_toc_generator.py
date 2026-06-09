@@ -26,6 +26,7 @@ from pdfalive.processors.toc_generator import (
     _is_retryable_error,
     _normalize_snippet,
     _strip_subset_prefix,
+    filter_features_for_llm,
     serialize_features_compact,
 )
 from pdfalive.tokens import TokenUsage
@@ -3710,3 +3711,204 @@ class TestCorrectPostprocessedNewEntries:
         result = gen._correct_postprocessed_page_numbers(original, refined)
         rare_entry = [e for e in result.entries if "Rare Topic" in e.title][0]
         assert rare_entry.page_number == 40  # kept as-is
+
+
+class TestFilterFeaturesForLlm:
+    """Tests for filter_features_for_llm (LLM payload token reduction)."""
+
+    BODY_FONT = "Times-Roman"
+    BODY_SIZE = 12.0
+    HEADING_FONT = "Times-Bold"
+    HEADING_SIZE = 16.0
+
+    @pytest.fixture
+    def make_feature(self):
+        def _make(
+            text: str,
+            page_number: int = 1,
+            font_name: str = self.BODY_FONT,
+            font_size: float = self.BODY_SIZE,
+            is_bold: bool = False,
+            y_position: float = 0.5,
+        ) -> TOCFeature:
+            return TOCFeature(
+                page_number=page_number,
+                font_name=font_name,
+                font_size=font_size,
+                text_length=len(text),
+                text_snippet=text,
+                y_position=y_position,
+                is_bold=is_bold,
+            )
+
+        return _make
+
+    @pytest.fixture
+    def make_block(self):
+        def _make(*spans: TOCFeature) -> list:
+            return [[span] for span in spans]  # one line per span
+
+        return _make
+
+    def heading(self, make_feature, text: str, page_number: int = 1) -> TOCFeature:
+        return make_feature(
+            text,
+            page_number=page_number,
+            font_name=self.HEADING_FONT,
+            font_size=self.HEADING_SIZE,
+            is_bold=True,
+            y_position=0.1,
+        )
+
+    @staticmethod
+    def flatten(features: list) -> list[TOCFeature]:
+        return [span for block in features for line in block for span in line]
+
+    def test_keeps_heading_and_first_body_span_drops_rest(self, make_feature, make_block) -> None:
+        features = [
+            make_block(self.heading(make_feature, "Chapter 1: Introduction")),
+            make_block(
+                make_feature("First body line on the page."),
+                make_feature("Second body line on the page."),
+                make_feature("Third body line on the page."),
+            ),
+        ]
+
+        filtered = filter_features_for_llm(features)
+
+        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        assert kept_texts == ["Chapter 1: Introduction", "First body line on the page."]
+
+    @pytest.mark.parametrize(
+        ("font_size", "is_bold", "text"),
+        [
+            (16.0, False, "Larger font heading text"),  # size-based
+            (12.0, True, "Bold heading at body size"),  # bold at body size
+            (12.0, False, "3.2 Numbered section title"),  # section numbering
+            (12.0, False, "C H A P T E R  O N E"),  # letter-spaced caps
+        ],
+    )
+    def test_heading_like_variants_are_kept(self, make_feature, make_block, font_size, is_bold, text) -> None:
+        body_blocks = [make_block(make_feature(f"Body filler line {ix}.", page_number=1)) for ix in range(5)]
+        candidate = make_feature(text, page_number=2, font_size=font_size, is_bold=is_bold)
+        features = body_blocks + [make_block(candidate)]
+
+        filtered = filter_features_for_llm(features, max_body_spans_per_page=0)
+
+        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        assert kept_texts == [text]
+
+    def test_body_span_budget_is_per_page_across_blocks(self, make_feature, make_block) -> None:
+        features = [
+            make_block(make_feature("Page 1 body A."), make_feature("Page 1 body B.")),
+            make_block(make_feature("Page 1 body C.")),
+            make_block(make_feature("Page 2 body A.", page_number=2)),
+            make_block(make_feature("Page 2 body B.", page_number=2)),
+        ]
+
+        filtered = filter_features_for_llm(features)
+
+        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        assert kept_texts == ["Page 1 body A.", "Page 2 body A."]
+
+    def test_body_span_budget_is_configurable(self, make_feature, make_block) -> None:
+        features = [
+            make_block(
+                make_feature("Body line one."),
+                make_feature("Body line two."),
+                make_feature("Body line three."),
+            )
+        ]
+
+        filtered = filter_features_for_llm(features, max_body_spans_per_page=2)
+
+        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        assert kept_texts == ["Body line one.", "Body line two."]
+
+    def test_empty_blocks_and_lines_are_pruned(self, make_feature, make_block) -> None:
+        features = [
+            make_block(make_feature("Kept body line.")),
+            make_block(make_feature("Dropped body line.")),
+        ]
+
+        filtered = filter_features_for_llm(features)
+
+        assert all(block for block in filtered)
+        assert all(line for block in filtered for line in block)
+        assert len(self.flatten(filtered)) == 1
+
+    def test_filtered_output_remains_serializable(self, make_feature, make_block) -> None:
+        features = [
+            make_block(self.heading(make_feature, "Chapter 1: Introduction")),
+            make_block(make_feature("Body line one."), make_feature("Body line two.")),
+        ]
+
+        serialized = serialize_features_compact(filter_features_for_llm(features))
+
+        assert "Chapter 1: Introduction" in serialized
+        assert "Body line one." in serialized
+        assert "Body line two." not in serialized
+
+    def test_empty_features_yield_empty_list(self) -> None:
+        assert filter_features_for_llm([]) == []
+
+    def test_run_sends_filtered_payload_to_llm(self, mock_llm) -> None:
+        """Integration: run() must send the filtered features to the LLM."""
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.get_toc.return_value = []
+        doc.name = None
+
+        page_height = 800.0
+        body_line = {
+            "font": self.BODY_FONT,
+            "size": self.BODY_SIZE,
+            "bbox": (50, 300, 400, 320),
+            "flags": 0,
+        }
+        page = MagicMock()
+        page.rect.height = page_height
+        page.get_text.return_value = {
+            "height": page_height,
+            "blocks": [
+                {
+                    "type": 0,
+                    "lines": [
+                        {
+                            "spans": [
+                                {
+                                    "font": self.HEADING_FONT,
+                                    "size": self.HEADING_SIZE,
+                                    "text": "Chapter 1: Introduction",
+                                    "bbox": (50, 100, 400, 120),
+                                    "flags": 16,
+                                }
+                            ]
+                        },
+                        {"spans": [{**body_line, "text": "First body line here."}]},
+                        {"spans": [{**body_line, "text": "Second body line here."}]},
+                        {"spans": [{**body_line, "text": "Third body line here."}]},
+                    ],
+                }
+            ],
+        }
+        doc.__iter__ = lambda self: iter([page])
+
+        captured_messages = []
+        mock_structured = MagicMock()
+
+        def capture(messages):
+            captured_messages.append(messages)
+            return TOC(entries=[TOCEntry(title="Chapter 1: Introduction", page_number=1, level=1, confidence=0.9)])
+
+        mock_structured.invoke.side_effect = capture
+        mock_llm.with_structured_output.return_value = mock_structured
+
+        generator = TOCGenerator(doc=doc, llm=mock_llm)
+        generator.run(output_file="/tmp/test_filter_output.pdf", force=True, request_delay=0)
+
+        user_content = captured_messages[0][1].content
+        assert "Chapter 1: Introduction" in user_content
+        assert "First body line here." in user_content
+        assert "Second body line here." not in user_content
+        assert "Third body line here." not in user_content
