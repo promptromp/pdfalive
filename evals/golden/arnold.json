@@ -1,0 +1,1113 @@
+{
+  "name": "arnold",
+  "source_pdf": "data/ocr/arnold.pdf",
+  "postprocess": true,
+  "description": "CANDIDATE golden seeded from the existing bookmarks in the data/ PDF (likely a prior pdfalive run). Pending human verification (2026-06-09). Pipeline runs against the pre-OCRed copy in data/ocr/.",
+  "entries": [
+    {
+      "level": 1,
+      "title": "Graduate Texts in Mathematics",
+      "page_number": 2
+    },
+    {
+      "level": 1,
+      "title": "Mathematical Methods of Classical Mechanics",
+      "page_number": 4
+    },
+    {
+      "level": 1,
+      "title": "Preface",
+      "page_number": 6
+    },
+    {
+      "level": 1,
+      "title": "Preface to the second edition",
+      "page_number": 8
+    },
+    {
+      "level": 1,
+      "title": "Translator’s preface to the second edition",
+      "page_number": 12
+    },
+    {
+      "level": 1,
+      "title": "Contents",
+      "page_number": 14
+    },
+    {
+      "level": 1,
+      "title": "PART I NEWTONIAN MECHANICS",
+      "page_number": 18
+    },
+    {
+      "level": 1,
+      "title": "Chapter 1 Experimental facts",
+      "page_number": 20
+    },
+    {
+      "level": 2,
+      "title": "1. The principles of relativity and determinacy",
+      "page_number": 20
+    },
+    {
+      "level": 2,
+      "title": "2. The galilean group and Newton’s equations",
+      "page_number": 21
+    },
+    {
+      "level": 2,
+      "title": "3. Examples of mechanical systems",
+      "page_number": 28
+    },
+    {
+      "level": 1,
+      "title": "Chapter 2 Investigation of the equations of motion",
+      "page_number": 32
+    },
+    {
+      "level": 2,
+      "title": "4. Systems with one degree of freedom",
+      "page_number": 32
+    },
+    {
+      "level": 2,
+      "title": "5. Systems with two degrees of freedom",
+      "page_number": 39
+    },
+    {
+      "level": 2,
+      "title": "6. Conservative force fields",
+      "page_number": 45
+    },
+    {
+      "level": 2,
+      "title": "7. Angular momentum",
+      "page_number": 48
+    },
+    {
+      "level": 2,
+      "title": "8. Investigation of motion in a central field",
+      "page_number": 50
+    },
+    {
+      "level": 2,
+      "title": "9. The motion of a point in three-space",
+      "page_number": 59
+    },
+    {
+      "level": 2,
+      "title": "10. Motions of a system of n points",
+      "page_number": 62
+    },
+    {
+      "level": 2,
+      "title": "11. The method of similarity",
+      "page_number": 67
+    },
+    {
+      "level": 1,
+      "title": "PART II LAGRANGIAN MECHANICS",
+      "page_number": 70
+    },
+    {
+      "level": 1,
+      "title": "Chapter 3 Variational principles",
+      "page_number": 72
+    },
+    {
+      "level": 2,
+      "title": "12. Calculus of variations",
+      "page_number": 72
+    },
+    {
+      "level": 2,
+      "title": "13. Lagrange’s equations",
+      "page_number": 76
+    },
+    {
+      "level": 2,
+      "title": "14. Legendre transformations",
+      "page_number": 78
+    },
+    {
+      "level": 2,
+      "title": "15. Hamilton’s equations",
+      "page_number": 82
+    },
+    {
+      "level": 2,
+      "title": "16. Liouville’s theorem",
+      "page_number": 86
+    },
+    {
+      "level": 1,
+      "title": "Chapter 4 Lagrangian mechanics on manifolds",
+      "page_number": 92
+    },
+    {
+      "level": 2,
+      "title": "17. Holonomic constraints",
+      "page_number": 92
+    },
+    {
+      "level": 2,
+      "title": "18. Differentiable manifolds",
+      "page_number": 94
+    },
+    {
+      "level": 2,
+      "title": "19. Lagrangian dynamical systems",
+      "page_number": 100
+    },
+    {
+      "level": 2,
+      "title": "20. E. Noether’s theorem",
+      "page_number": 105
+    },
+    {
+      "level": 2,
+      "title": "21. D’Alembert’s principle",
+      "page_number": 108
+    },
+    {
+      "level": 1,
+      "title": "Chapter 5 Oscillations",
+      "page_number": 115
+    },
+    {
+      "level": 2,
+      "title": "22. Linearization",
+      "page_number": 115
+    },
+    {
+      "level": 2,
+      "title": "23. Small oscillations",
+      "page_number": 119
+    },
+    {
+      "level": 2,
+      "title": "24. Behavior of characteristic frequencies",
+      "page_number": 127
+    },
+    {
+      "level": 2,
+      "title": "25. Parametric resonance",
+      "page_number": 130
+    },
+    {
+      "level": 1,
+      "title": "Chapter 6 Rigid Bodies",
+      "page_number": 140
+    },
+    {
+      "level": 2,
+      "title": "26. Motion in a moving coordinate system",
+      "page_number": 140
+    },
+    {
+      "level": 2,
+      "title": "27. Inertial forces and the Coriolis force",
+      "page_number": 146
+    },
+    {
+      "level": 2,
+      "title": "28. Rigid bodies",
+      "page_number": 150
+    },
+    {
+      "level": 2,
+      "title": "29. Euler’s equations. Poinsot’s description of the motion",
+      "page_number": 159
+    },
+    {
+      "level": 2,
+      "title": "30. Lagrange’s top",
+      "page_number": 165
+    },
+    {
+      "level": 2,
+      "title": "31. Sleeping tops and fast tops",
+      "page_number": 171
+    },
+    {
+      "level": 1,
+      "title": "PART III HAMILTONIAN MECHANICS",
+      "page_number": 178
+    },
+    {
+      "level": 2,
+      "title": "32. Exterior forms",
+      "page_number": 180
+    },
+    {
+      "level": 2,
+      "title": "33. Exterior multiplication",
+      "page_number": 187
+    },
+    {
+      "level": 1,
+      "title": "Chapter 7 Differential forms",
+      "page_number": 191
+    },
+    {
+      "level": 2,
+      "title": "34. Differential forms",
+      "page_number": 191
+    },
+    {
+      "level": 2,
+      "title": "35. Integration of differential forms",
+      "page_number": 198
+    },
+    {
+      "level": 3,
+      "title": "A. The integral of a 1-form along a path",
+      "page_number": 198
+    },
+    {
+      "level": 3,
+      "title": "B. The integral of a k-form on oriented euclidean space",
+      "page_number": 199
+    },
+    {
+      "level": 3,
+      "title": "C. The behavior of differential forms under maps",
+      "page_number": 200
+    },
+    {
+      "level": 3,
+      "title": "D. Integration of a k-form on an n-dimensional manifold",
+      "page_number": 201
+    },
+    {
+      "level": 3,
+      "title": "E. Chains",
+      "page_number": 202
+    },
+    {
+      "level": 3,
+      "title": "F. Example: the boundary of a polyhedron",
+      "page_number": 202
+    },
+    {
+      "level": 3,
+      "title": "G. The integral of a form over a chain",
+      "page_number": 203
+    },
+    {
+      "level": 2,
+      "title": "36. Exterior differentiation",
+      "page_number": 205
+    },
+    {
+      "level": 3,
+      "title": "A. Example: the divergence of a vector field",
+      "page_number": 205
+    },
+    {
+      "level": 3,
+      "title": "B. Definition of the exterior derivative",
+      "page_number": 206
+    },
+    {
+      "level": 3,
+      "title": "C. A theorem on exterior derivatives",
+      "page_number": 207
+    },
+    {
+      "level": 3,
+      "title": "D. Stokes’ formula",
+      "page_number": 209
+    },
+    {
+      "level": 3,
+      "title": "E. Example 2: vector analysis",
+      "page_number": 211
+    },
+    {
+      "level": 3,
+      "title": "F. Appendix 1: Vector operations in triply orthogonal systems",
+      "page_number": 212
+    },
+    {
+      "level": 3,
+      "title": "G. Appendix 2: Closed forms and cycles",
+      "page_number": 213
+    },
+    {
+      "level": 3,
+      "title": "H. Appendix 3: Cohomology and homology",
+      "page_number": 216
+    },
+    {
+      "level": 1,
+      "title": "Chapter 8 Symplectic manifolds",
+      "page_number": 218
+    },
+    {
+      "level": 2,
+      "title": "37. Symplectic structures on manifolds",
+      "page_number": 218
+    },
+    {
+      "level": 3,
+      "title": "A. Definition",
+      "page_number": 218
+    },
+    {
+      "level": 3,
+      "title": "B. The cotangent bundle and its symplectic structure",
+      "page_number": 219
+    },
+    {
+      "level": 3,
+      "title": "C. Hamiltonian vector fields",
+      "page_number": 220
+    },
+    {
+      "level": 2,
+      "title": "38. Hamiltonian phase flows and their integral invariants",
+      "page_number": 221
+    },
+    {
+      "level": 3,
+      "title": "A. Hamiltonian phase flows preserve the symplectic structure",
+      "page_number": 221
+    },
+    {
+      "level": 3,
+      "title": "B. Integral invariants",
+      "page_number": 223
+    },
+    {
+      "level": 3,
+      "title": "C. The law of conservation of energy",
+      "page_number": 224
+    },
+    {
+      "level": 2,
+      "title": "39. The Lie algebra of vector fields",
+      "page_number": 225
+    },
+    {
+      "level": 3,
+      "title": "A. Lie algebras",
+      "page_number": 225
+    },
+    {
+      "level": 3,
+      "title": "B. Vector fields and differential operators",
+      "page_number": 225
+    },
+    {
+      "level": 3,
+      "title": "C. The Poisson bracket of vector fields",
+      "page_number": 226
+    },
+    {
+      "level": 3,
+      "title": "D. The Jacobi identity",
+      "page_number": 228
+    },
+    {
+      "level": 3,
+      "title": "F. Appendix: Lie algebras and Lie groups",
+      "page_number": 230
+    },
+    {
+      "level": 2,
+      "title": "40. The Lie algebra of hamiltonian functions",
+      "page_number": 231
+    },
+    {
+      "level": 3,
+      "title": "A. The Poisson bracket of two functions",
+      "page_number": 231
+    },
+    {
+      "level": 3,
+      "title": "B. The Jacobi identity",
+      "page_number": 233
+    },
+    {
+      "level": 3,
+      "title": "C. The Lie algebras of hamiltonian fields",
+      "page_number": 234
+    },
+    {
+      "level": 3,
+      "title": "D. Locally hamiltonian vector fields",
+      "page_number": 235
+    },
+    {
+      "level": 2,
+      "title": "41. Symplectic geometry",
+      "page_number": 236
+    },
+    {
+      "level": 3,
+      "title": "A. Symplectic vector spaces",
+      "page_number": 236
+    },
+    {
+      "level": 3,
+      "title": "B. The symplectic basis",
+      "page_number": 237
+    },
+    {
+      "level": 3,
+      "title": "C. The symplectic group",
+      "page_number": 238
+    },
+    {
+      "level": 3,
+      "title": "D. Planes in symplectic space",
+      "page_number": 239
+    },
+    {
+      "level": 3,
+      "title": "E. Symplectic structure and complex structure",
+      "page_number": 241
+    },
+    {
+      "level": 2,
+      "title": "42. Parametric resonance in systems with many degrees of freedom",
+      "page_number": 242
+    },
+    {
+      "level": 3,
+      "title": "A. Symplectic matrices",
+      "page_number": 242
+    },
+    {
+      "level": 3,
+      "title": "B. Symmetry of the spectrum of a symplectic matrix",
+      "page_number": 243
+    },
+    {
+      "level": 3,
+      "title": "C. Stability",
+      "page_number": 244
+    },
+    {
+      "level": 2,
+      "title": "43. A symplectic atlas",
+      "page_number": 246
+    },
+    {
+      "level": 3,
+      "title": "A. Symplectic coordinates",
+      "page_number": 246
+    },
+    {
+      "level": 3,
+      "title": "B. Darboux’s theorem",
+      "page_number": 247
+    },
+    {
+      "level": 3,
+      "title": "C. Construction of the coordinates p_i and q_i",
+      "page_number": 247
+    },
+    {
+      "level": 3,
+      "title": "D. Construction of symplectic coordinates by induction on n",
+      "page_number": 248
+    },
+    {
+      "level": 3,
+      "title": "E. Proof that the coordinates constructed are symplectic",
+      "page_number": 248
+    },
+    {
+      "level": 1,
+      "title": "Chapter 9 Canonical formalism",
+      "page_number": 250
+    },
+    {
+      "level": 2,
+      "title": "44. The integral invariant of Poincaré-Cartan",
+      "page_number": 250
+    },
+    {
+      "level": 3,
+      "title": "A. A hydrodynamical lemma",
+      "page_number": 250
+    },
+    {
+      "level": 3,
+      "title": "B. The multi-dimensional Stokes’ lemma",
+      "page_number": 251
+    },
+    {
+      "level": 3,
+      "title": "C. Hamilton’s equations",
+      "page_number": 253
+    },
+    {
+      "level": 3,
+      "title": "D. A theorem on the integral invariant of Poincaré-Cartan",
+      "page_number": 254
+    },
+    {
+      "level": 3,
+      "title": "E. Canonical transformations",
+      "page_number": 256
+    },
+    {
+      "level": 2,
+      "title": "45. Applications of the integral invariant of Poincaré-Cartan",
+      "page_number": 257
+    },
+    {
+      "level": 3,
+      "title": "A. Changes of variables in the canonical equations",
+      "page_number": 257
+    },
+    {
+      "level": 3,
+      "title": "C. The principle of least action in phase space",
+      "page_number": 260
+    },
+    {
+      "level": 3,
+      "title": "D. The principle of least action in the canonical equations",
+      "page_number": 262
+    },
+    {
+      "level": 2,
+      "title": "46. Huygens’ principle",
+      "page_number": 265
+    },
+    {
+      "level": 3,
+      "title": "A. Wave fronts",
+      "page_number": 266
+    },
+    {
+      "level": 3,
+      "title": "B. The optical-mechanical analogy",
+      "page_number": 269
+    },
+    {
+      "level": 3,
+      "title": "C. Action as a function of coordinates and time",
+      "page_number": 270
+    },
+    {
+      "level": 3,
+      "title": "D. The Hamilton-Jacobi equation",
+      "page_number": 272
+    },
+    {
+      "level": 2,
+      "title": "47. The Hamilton-Jacobi method for integrating Hamilton’s canonical equations",
+      "page_number": 275
+    },
+    {
+      "level": 3,
+      "title": "A. Generating functions",
+      "page_number": 275
+    },
+    {
+      "level": 3,
+      "title": "B. The Hamilton-Jacobi equation for generating functions",
+      "page_number": 277
+    },
+    {
+      "level": 3,
+      "title": "C. Examples",
+      "page_number": 278
+    },
+    {
+      "level": 2,
+      "title": "48. Generating functions",
+      "page_number": 283
+    },
+    {
+      "level": 3,
+      "title": "A. The generating function S_i(P, q)",
+      "page_number": 283
+    },
+    {
+      "level": 3,
+      "title": "C. Infinitesimal canonical transformations",
+      "page_number": 286
+    },
+    {
+      "level": 1,
+      "title": "Chapter 10 Introduction to perturbation theory",
+      "page_number": 288
+    },
+    {
+      "level": 2,
+      "title": "49. Integrable systems",
+      "page_number": 288
+    },
+    {
+      "level": 3,
+      "title": "A. Liouville’s theorem on integrable systems",
+      "page_number": 288
+    },
+    {
+      "level": 3,
+      "title": "B. Beginning of the proof of Liouville’s theorem",
+      "page_number": 290
+    },
+    {
+      "level": 3,
+      "title": "C. Manifolds on which the action of the group is defined",
+      "page_number": 291
+    },
+    {
+      "level": 2,
+      "title": "50. Action-angle variables",
+      "page_number": 296
+    },
+    {
+      "level": 3,
+      "title": "A. Description of action-angle variables",
+      "page_number": 296
+    },
+    {
+      "level": 3,
+      "title": "B. Construction of action-angle variables in the neighborhood of a torus",
+      "page_number": 297
+    },
+    {
+      "level": 3,
+      "title": "C. Construction of action-angle variables in R^n",
+      "page_number": 299
+    },
+    {
+      "level": 2,
+      "title": "51. Averaging",
+      "page_number": 302
+    },
+    {
+      "level": 3,
+      "title": "A. Conditionally-periodic motion",
+      "page_number": 302
+    },
+    {
+      "level": 3,
+      "title": "B. Space average and time average",
+      "page_number": 303
+    },
+    {
+      "level": 3,
+      "title": "C. Proof of the theorem on averages",
+      "page_number": 304
+    },
+    {
+      "level": 3,
+      "title": "D. Degeneracies",
+      "page_number": 306
+    },
+    {
+      "level": 2,
+      "title": "52. Averaging of perturbations",
+      "page_number": 308
+    },
+    {
+      "level": 3,
+      "title": "A. Systems close to integrable ones",
+      "page_number": 308
+    },
+    {
+      "level": 3,
+      "title": "B. The averaging principle",
+      "page_number": 308
+    },
+    {
+      "level": 3,
+      "title": "C. Averaging in a single-frequency system",
+      "page_number": 310
+    },
+    {
+      "level": 3,
+      "title": "F. Proof of the adiabatic invariance of action",
+      "page_number": 316
+    },
+    {
+      "level": 1,
+      "title": "Appendix 1 Riemannian curvature",
+      "page_number": 318
+    },
+    {
+      "level": 2,
+      "title": "A. Parallel translation on surfaces",
+      "page_number": 318
+    },
+    {
+      "level": 2,
+      "title": "B. The curvature form",
+      "page_number": 320
+    },
+    {
+      "level": 2,
+      "title": "D. Higher-dimensional parallel translation",
+      "page_number": 322
+    },
+    {
+      "level": 2,
+      "title": "F. Curvature in a two-dimensional direction",
+      "page_number": 325
+    },
+    {
+      "level": 2,
+      "title": "G. Covariant differentiation",
+      "page_number": 325
+    },
+    {
+      "level": 2,
+      "title": "I. Investigation of the Jacobi equation",
+      "page_number": 328
+    },
+    {
+      "level": 1,
+      "title": "Appendix 2 Geodesics of left-invariant metrics on Lie groups and the hydrodynamics of ideal fluids",
+      "page_number": 335
+    },
+    {
+      "level": 2,
+      "title": "A. Notation: The adjoint and co-adjoint representations",
+      "page_number": 336
+    },
+    {
+      "level": 2,
+      "title": "B. Left-invariant metrics",
+      "page_number": 339
+    },
+    {
+      "level": 2,
+      "title": "C. Example",
+      "page_number": 340
+    },
+    {
+      "level": 2,
+      "title": "D. Euler’s equation",
+      "page_number": 342
+    },
+    {
+      "level": 2,
+      "title": "E. Stationary rotations and their stability",
+      "page_number": 345
+    },
+    {
+      "level": 1,
+      "title": "Appendix 3 Symplectic structures on algebraic manifolds",
+      "page_number": 360
+    },
+    {
+      "level": 1,
+      "title": "Appendix 4 Contact structures",
+      "page_number": 366
+    },
+    {
+      "level": 2,
+      "title": "Frobenius’ integrability condition",
+      "page_number": 367
+    },
+    {
+      "level": 2,
+      "title": "Nondegenerate fields of hyperplanes",
+      "page_number": 370
+    },
+    {
+      "level": 2,
+      "title": "The manifold of contact elements",
+      "page_number": 371
+    },
+    {
+      "level": 2,
+      "title": "Symplectification of a contact manifold",
+      "page_number": 373
+    },
+    {
+      "level": 2,
+      "title": "Contact hamiltonians",
+      "page_number": 380
+    },
+    {
+      "level": 2,
+      "title": "Contactification",
+      "page_number": 385
+    },
+    {
+      "level": 2,
+      "title": "Integration of first-order partial differential equations",
+      "page_number": 386
+    },
+    {
+      "level": 1,
+      "title": "Appendix 5 Dynamical systems with symmetries",
+      "page_number": 388
+    },
+    {
+      "level": 2,
+      "title": "A. Poisson action of Lie groups",
+      "page_number": 388
+    },
+    {
+      "level": 2,
+      "title": "The reduced phase space",
+      "page_number": 391
+    },
+    {
+      "level": 2,
+      "title": "Applications to the study of stationary rotations",
+      "page_number": 395
+    },
+    {
+      "level": 1,
+      "title": "Appendix 6 Normal forms of quadratic hamiltonians",
+      "page_number": 398
+    },
+    {
+      "level": 2,
+      "title": "Nonremovable Jordan blocks",
+      "page_number": 399
+    },
+    {
+      "level": 1,
+      "title": "Appendix 7 Normal forms of hamiltonian systems near stationary points and closed trajectories",
+      "page_number": 402
+    },
+    {
+      "level": 2,
+      "title": "Normal form of a conservative system near a stationary point",
+      "page_number": 403
+    },
+    {
+      "level": 2,
+      "title": "Normal form of a canonical transformation near a stationary point",
+      "page_number": 405
+    },
+    {
+      "level": 2,
+      "title": "Normal form of an equation with periodic coefficients",
+      "page_number": 405
+    },
+    {
+      "level": 2,
+      "title": "Example: Resonance of order 3",
+      "page_number": 407
+    },
+    {
+      "level": 2,
+      "title": "Splitting of separatrices",
+      "page_number": 411
+    },
+    {
+      "level": 2,
+      "title": "Resonances of higher order",
+      "page_number": 413
+    },
+    {
+      "level": 1,
+      "title": "Appendix 8 Theory of perturbations of conditionally periodic motion, and Kolmogorov’s theorem",
+      "page_number": 416
+    },
+    {
+      "level": 2,
+      "title": "Invariant tori in a perturbed system",
+      "page_number": 422
+    },
+    {
+      "level": 2,
+      "title": "Zones of instability",
+      "page_number": 423
+    },
+    {
+      "level": 2,
+      "title": "Applications of the theorem on invariant tori",
+      "page_number": 429
+    },
+    {
+      "level": 1,
+      "title": "Appendix 9 Poincaré’s geometric theorem, its generalizations and applications",
+      "page_number": 433
+    },
+    {
+      "level": 2,
+      "title": "Fixed points of mappings of the annulus to itself",
+      "page_number": 433
+    },
+    {
+      "level": 2,
+      "title": "The connection between fixed points of a mapping and critical points of the generating function",
+      "page_number": 434
+    },
+    {
+      "level": 2,
+      "title": "Symplectic diffeomorphisms of the torus",
+      "page_number": 435
+    },
+    {
+      "level": 2,
+      "title": "Intersections of lagrangian manifolds",
+      "page_number": 436
+    },
+    {
+      "level": 2,
+      "title": "Applications to determining fixed points and periodic points",
+      "page_number": 438
+    },
+    {
+      "level": 1,
+      "title": "Appendix 10 Multiplicities of characteristic frequencies, and ellipsoids depending on parameters",
+      "page_number": 442
+    },
+    {
+      "level": 2,
+      "title": "A. The manifold of ellipsoids of revolution",
+      "page_number": 442
+    },
+    {
+      "level": 2,
+      "title": "B. Application to the study of oscillations of continuous systems",
+      "page_number": 447
+    },
+    {
+      "level": 2,
+      "title": "D. The behavior of frequencies of a symmetric system depending on parameters",
+      "page_number": 451
+    },
+    {
+      "level": 1,
+      "title": "Appendix 11 Short wave asymptotics",
+      "page_number": 455
+    },
+    {
+      "level": 2,
+      "title": "A. Quasi-classical approximation for solutions",
+      "page_number": 456
+    },
+    {
+      "level": 2,
+      "title": "B. The Morse and Maslov indices",
+      "page_number": 459
+    },
+    {
+      "level": 2,
+      "title": "C. Indices of closed curves",
+      "page_number": 461
+    },
+    {
+      "level": 1,
+      "title": "Appendix 12 Lagrangian singularities",
+      "page_number": 463
+    },
+    {
+      "level": 2,
+      "title": "B. Singularities of projection of lagrangian manifolds",
+      "page_number": 465
+    },
+    {
+      "level": 2,
+      "title": "C. Tables of normal forms of typical singularities of projections of lagrangian manifolds of dimension n < 5",
+      "page_number": 466
+    },
+    {
+      "level": 2,
+      "title": "D. Discussion of the normal forms",
+      "page_number": 467
+    },
+    {
+      "level": 2,
+      "title": "E. Lagrangian equivalence",
+      "page_number": 467
+    },
+    {
+      "level": 1,
+      "title": "Appendix 13 The Korteweg-de Vries equation",
+      "page_number": 470
+    },
+    {
+      "level": 2,
+      "title": "A. Poisson manifolds",
+      "page_number": 473
+    },
+    {
+      "level": 1,
+      "title": "Appendix 14 Poisson structures",
+      "page_number": 474
+    },
+    {
+      "level": 2,
+      "title": "B. Poisson mappings",
+      "page_number": 475
+    },
+    {
+      "level": 2,
+      "title": "C. Poisson structures in the plane",
+      "page_number": 476
+    },
+    {
+      "level": 2,
+      "title": "D. Powers of volume forms",
+      "page_number": 478
+    },
+    {
+      "level": 2,
+      "title": "E. The quasi-homogeneous case",
+      "page_number": 479
+    },
+    {
+      "level": 1,
+      "title": "Appendix 15 On elliptic coordinates",
+      "page_number": 486
+    },
+    {
+      "level": 2,
+      "title": "A. Elliptic coordinates and confocal quadrics",
+      "page_number": 487
+    },
+    {
+      "level": 2,
+      "title": "B. Magnetic analogues of the theorems of Newton and Ivory",
+      "page_number": 492
+    },
+    {
+      "level": 1,
+      "title": "Appendix 16 Singularities of ray systems",
+      "page_number": 497
+    },
+    {
+      "level": 2,
+      "title": "B. Submanifolds of symplectic manifolds",
+      "page_number": 499
+    },
+    {
+      "level": 2,
+      "title": "C. Lagrangian submanifolds in the theory of ray systems",
+      "page_number": 500
+    },
+    {
+      "level": 2,
+      "title": "D. Contact geometry and systems of rays and wave fronts",
+      "page_number": 503
+    },
+    {
+      "level": 2,
+      "title": "E. Applications of contact geometry to symplectic geometry",
+      "page_number": 505
+    },
+    {
+      "level": 2,
+      "title": "F. Tangential singularities",
+      "page_number": 508
+    },
+    {
+      "level": 2,
+      "title": "G. The obstacle problem",
+      "page_number": 512
+    },
+    {
+      "level": 1,
+      "title": "Index",
+      "page_number": 529
+    }
+  ]
+}

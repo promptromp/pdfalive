@@ -205,6 +205,8 @@ exits with code 1 if any case falls below the thresholds.
 
 **Adding a new case:** generate a TOC with `generate-toc`, verify the bookmarks by hand (fix any errors — this is your ground truth), then save the verified entries as a golden file and record a cassette with `--mode record`.
 
+**Scanned PDFs:** the eval runner does not perform OCR (it would dominate every run's wall-clock). Pre-OCR the document once with `pdfalive extract-text scanned.pdf ocr-copy.pdf` and point the golden file's `source_pdf` at the OCR'd copy.
+
 
 ## Configuration
 
