@@ -21,6 +21,7 @@ from pdfalive.processors.toc_generator import (
     _compute_body_font_profile,
     _extract_features_from_page_range,
     _extract_toc_like_lines,
+    _heading_text_matches_title,
     _is_bold_font,
     _is_heading_candidate,
     _is_retryable_error,
@@ -3997,3 +3998,105 @@ class TestRealTokenAccounting:
         assert toc.entries == parsed_toc.entries
         assert usage.input_tokens > 0  # tiktoken estimate
         assert usage.llm_calls == 1
+
+
+class TestAnchoredHeadingMatching:
+    """Anchored matching mode: heading evidence must start the candidate block.
+
+    Guards against identity confusion between sections whose titles overlap:
+    leading-word variants ("Translator's preface..." vs "Preface..."), and
+    same-named chapter/subsection pairs ("Chapter 7 Differential forms" vs
+    "34. Differential forms").
+    """
+
+    @pytest.mark.parametrize(
+        ("title", "candidate", "expected"),
+        [
+            # Anchored: title matching at block start is accepted
+            ("Preface to the second edition", "Preface to the second edition The main part of this book", True),
+            ("Appendix 14 Poisson structures", "Appendix 14: Poisson structures Along with the classical", True),
+            # Leading-word variant is a DIFFERENT section: reject
+            ("Preface to the second edition", "Translator's preface to the second edition This edition", False),
+            # Title buried mid-block is weak evidence: reject
+            ("Appendix 14 Poisson structures", "Jacobi realized that Appendix 14 Poisson structures covers", False),
+            # Candidate with a conflicting leading designator is a different section
+            ("Chapter 7 Differential forms", "34. Differential forms Here we define exterior k-forms", False),
+            ("Chapter 7 Differential forms", "34: Differential forms", False),
+            # Bare same-title block without conflicting designator: accept (chapter opening page)
+            ("Chapter 7 Differential forms", "Differential forms", True),
+            # Candidate's leading number agreeing with the title is fine
+            ("Chapter 7 Differential forms", "7 Differential forms", True),
+            # Existing dotted-section-prefix discipline is preserved
+            ("6.6 Term Structure Models", "6.6 Term Structure Models In this section", True),
+            ("6.6 Term Structure Models", "6.7 Term Structure Models In this section", False),
+            # A short title core must not anchor onto a LONGER different heading
+            # ("Distance" is not "Distance and Angles")
+            ("1, §2. Distance", "Chapter 1: Distance and Angles", False),
+            ("1, §2. Distance", "2. DISTANCE", True),
+        ],
+    )
+    def test_anchored_mode(self, title: str, candidate: str, expected: bool) -> None:
+        assert _heading_text_matches_title(title, candidate, anchored=True) is expected
+
+    @pytest.mark.parametrize(
+        ("title", "candidate"),
+        [
+            # Default (unanchored) mode keeps mid-text containment for whole-page checks
+            ("Preface to the second edition", "Some running header Preface to the second edition body text"),
+        ],
+    )
+    def test_unanchored_mode_still_matches_mid_text(self, title: str, candidate: str) -> None:
+        assert _heading_text_matches_title(title, candidate) is True
+
+
+class TestFuzzyRestorePrefixAlignment:
+    """Postprocess page restore must not conflate leading-word title variants."""
+
+    @pytest.fixture
+    def generator(self, mock_llm):
+        doc = MagicMock()
+        doc.page_count = 20
+        doc.name = None
+        page = MagicMock()
+        page.get_text.return_value = {"height": 800.0, "blocks": []}
+        doc.__getitem__ = lambda self, ix: page
+        doc.__iter__ = lambda self: iter([page] * 20)
+        return TOCGenerator(doc=doc, llm=mock_llm)
+
+    def test_leading_word_variant_titles_are_not_conflated(self, generator) -> None:
+        original = TOC(
+            entries=[
+                TOCEntry(title="Translator's preface to the second edition", page_number=12, level=1, confidence=0.9),
+            ]
+        )
+        refined = TOC(
+            entries=[
+                TOCEntry(title="Preface to the second edition", page_number=8, level=1, confidence=0.9),
+                TOCEntry(title="Translator's preface to the second edition", page_number=12, level=1, confidence=0.9),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        preface = next(e for e in result.entries if e.title == "Preface to the second edition")
+        translators = next(e for e in result.entries if "Translator" in e.title)
+        assert preface.page_number == 8  # NOT restored onto the translator's preface page
+        assert translators.page_number == 12
+
+    def test_end_truncated_titles_still_restore(self, generator) -> None:
+        """Feature snippets truncate title ends; those must keep matching."""
+        original = TOC(entries=[TOCEntry(title="Chapter 3: Risk Manag", page_number=55, level=1, confidence=0.9)])
+        refined = TOC(entries=[TOCEntry(title="Chapter 3: Risk Management", page_number=70, level=1, confidence=0.9)])
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert result.entries[0].page_number == 55  # restored from the truncated original
+
+    def test_designator_dropped_by_printed_toc_still_restores(self, generator) -> None:
+        """Printed TOCs often omit the section designator the extraction kept."""
+        original = TOC(entries=[TOCEntry(title="1, §2. Distance", page_number=21, level=2, confidence=0.9)])
+        refined = TOC(entries=[TOCEntry(title="Distance", page_number=33, level=2, confidence=0.9)])
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert result.entries[0].page_number == 21

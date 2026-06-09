@@ -223,8 +223,54 @@ def _extract_section_prefix(title: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _heading_text_matches_title(title: str, candidate_text: str) -> bool:
-    """Match heading text while preserving section-prefix evidence when present."""
+# Leading designator tokens in normalized (punctuation-free, lowercased) titles:
+# bare numbers ("34", "1 2") and label words with an optional short identifier
+# ("chapter 7", "appendix b", "part iii", or a bare "chapter" when OCR loses
+# the number glyph).
+_LEADING_DESIGNATOR_PATTERN = re.compile(r"^(?:(?:chapter|part|appendix|section)\s+(?:\S{1,4}\s+)?|\d+\s+)")
+
+_LEADING_NUMBER_PATTERN = re.compile(r"^\s*(\d+)")
+
+
+def _strip_leading_designators(normalized_title: str) -> str:
+    """Strip leading numbering/label designators from a normalized title.
+
+    Section identity lives in the title's core text: "chapter 3 risk management"
+    and "risk management" name the same section, while "translators preface" and
+    "preface" do not. Never strips down to an empty string.
+    """
+    stripped = normalized_title
+    while True:
+        match = _LEADING_DESIGNATOR_PATTERN.match(stripped)
+        if not match or match.end() >= len(stripped):
+            return stripped
+        stripped = stripped[match.end() :]
+
+
+def _extract_leading_number(text: str) -> str | None:
+    """Extract a leading integer designator from raw (unnormalized) text."""
+    match = _LEADING_NUMBER_PATTERN.match(text)
+    return match.group(1) if match else None
+
+
+def _heading_text_matches_title(title: str, candidate_text: str, anchored: bool = False) -> bool:
+    """Match heading text while preserving section-prefix evidence when present.
+
+    In anchored mode (used when *locating* a heading's page), evidence must be
+    structural, not incidental:
+    - The title must match at the START of the candidate text. Headings begin
+      blocks; a title appearing mid-block ("...see Preface to the second
+      edition...") or behind extra leading words ("Translator's preface to the
+      second edition") is a different or merely-referenced section.
+    - A candidate that is a sub-phrase of the title (e.g. block "Differential
+      forms" for title "Chapter 7 Differential forms") is accepted only if the
+      candidate's own leading number designator, when present, agrees with the
+      title's numbering — block "34. Differential forms" must not satisfy a
+      title designated chapter 7.
+
+    The default (unanchored) mode keeps loose containment for presence checks
+    over large text spans (whole pages, page zones).
+    """
     candidate_normalized = _normalize_snippet(candidate_text)
     if len(candidate_normalized) < _HEADING_MIN_LENGTH:
         return False
@@ -234,14 +280,48 @@ def _heading_text_matches_title(title: str, candidate_text: str) -> bool:
     if appendix_without_prefix != title:
         search_texts.append(_normalize_snippet(appendix_without_prefix))
 
+    candidate_leading_number = _extract_leading_number(candidate_text)
+    title_numbers = re.findall(r"\d+", title)
+    candidate_consistent = (
+        candidate_leading_number is None or candidate_leading_number in title_numbers or not title_numbers
+    )
+
+    # Anchoring compares designator-stripped cores: a heading block may carry a
+    # designator the title lacks ("Chapter 4: Numerical Differentiation" for
+    # title "Numerical Differentiation") and vice versa.
+    candidate_core = _strip_leading_designators(candidate_normalized)
+
     content_matches = False
     for search_text in search_texts:
         if len(search_text) < _HEADING_MIN_LENGTH:
             continue
-        if search_text in candidate_normalized:
+
+        # Forward: title contained in the candidate (anchored: at its start only).
+        if anchored:
+            if candidate_consistent:
+                # Full title at the candidate's start: heading may continue into
+                # merged body text.
+                if candidate_core.startswith(search_text):
+                    content_matches = True
+                    break
+                # Relaxed variant: both sides reduced to designator-stripped
+                # cores. With designators gone the cores carry all remaining
+                # identity, so they must match EXACTLY — a prefix match would
+                # conflate a short title with a longer different heading
+                # ("Distance" vs "Distance and Angles").
+                search_core = _strip_leading_designators(search_text)
+                if (
+                    search_core != search_text
+                    and len(search_core) >= _FUZZY_MIN_SUBSTRING_LEN
+                    and candidate_core == search_core
+                ):
+                    content_matches = True
+                    break
+        elif search_text in candidate_normalized:
             content_matches = True
             break
 
+        # Reverse: candidate is a sub-phrase of the title (short heading block).
         shorter_len = min(len(search_text), len(candidate_normalized))
         longer_len = max(len(search_text), len(candidate_normalized))
         if (
@@ -249,6 +329,8 @@ def _heading_text_matches_title(title: str, candidate_text: str) -> bool:
             and candidate_normalized in search_text
             and shorter_len / longer_len >= _FUZZY_MIN_COVERAGE_RATIO
         ):
+            if anchored and not candidate_consistent:
+                continue
             content_matches = True
             break
 
@@ -1781,7 +1863,8 @@ must be PDF page numbers (not printed page numbers).
                 if y_pos < _HEADING_SEARCH_HEADER_Y_THRESHOLD or y_pos > _HEADING_SEARCH_FOOTER_Y_THRESHOLD:
                     continue
                 block_text = " ".join(s.get("text", "") for s in block_spans)
-                if _heading_text_matches_title(title, block_text):
+                # Anchored: only structural heading evidence may relocate a page.
+                if _heading_text_matches_title(title, block_text, anchored=True):
                     return page_idx + 1  # 1-indexed
 
         return None
@@ -1974,8 +2057,15 @@ must be PDF page numbers (not printed page numbers).
                 if orig_level == level:
                     return orig_page
 
-            # Strategy 2: collect ALL substring matches at the same level,
+            # Strategy 2: collect ALL prefix-aligned matches at the same level,
             # then pick the best one (highest coverage ratio = shorter/longer).
+            # Titles are compared on their designator-stripped cores, and the
+            # shorter core must be a PREFIX of the longer one: this accepts
+            # end-truncated snippets ("Chapter 3 Risk Manag") and printed-TOC
+            # designator drops ("Distance" vs "1, §2. Distance"), but rejects
+            # leading-word variants ("Preface..." vs "Translator's preface...")
+            # which name different sections.
+            key_core = _strip_leading_designators(key)
             best_page: int | None = None
             best_ratio: float = 0.0
 
@@ -1983,13 +2073,13 @@ must be PDF page numbers (not printed page numbers).
                 for orig_page, orig_level in matches:
                     if orig_level != level:
                         continue
-                    shorter_len = min(len(key), len(orig_key))
-                    longer_len = max(len(key), len(orig_key))
-                    if shorter_len < _FUZZY_MIN_SUBSTRING_LEN:
+                    orig_core = _strip_leading_designators(orig_key)
+                    shorter, longer = sorted((key_core, orig_core), key=len)
+                    if len(shorter) < _FUZZY_MIN_SUBSTRING_LEN:
                         continue
-                    if not (orig_key in key or key in orig_key):
+                    if not longer.startswith(shorter):
                         continue
-                    ratio = shorter_len / longer_len
+                    ratio = len(shorter) / len(longer)
                     if ratio < _FUZZY_MIN_COVERAGE_RATIO:
                         continue
                     if ratio > best_ratio:
