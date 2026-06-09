@@ -155,6 +155,57 @@ The input file should contain one path per line. Lines starting with `#` are tre
 4. Files are renamed in place (same directory)
 
 
+### eval
+
+Evaluate TOC generation quality against golden (ground truth) data. This is primarily a development tool: it lets you change feature-extraction heuristics, prompts, or correction logic and measure the impact on real documents before shipping.
+
+Each evaluation case is a golden file at `evals/golden/<name>.json`:
+
+	{
+	  "name": "geometry",
+	  "source_pdf": "data/My Book.pdf",
+	  "postprocess": true,
+	  "description": "Provenance notes for humans",
+	  "entries": [
+	    {"level": 1, "title": "Chapter 1: Distance and Angles", "page_number": 14},
+	    ...
+	  ]
+	}
+
+The `source_pdf` path is resolved relative to the parent of the evals directory (typically the repository root). The matching LLM cassette is stored at `evals/cassettes/<name>.json`.
+
+**Record once, replay for free (VCR-style):**
+
+	# One-time: run the live LLM and record its responses to a cassette
+	pdfalive eval --mode record --case geometry
+
+	# From then on: free, deterministic evaluation runs (no LLM calls)
+	pdfalive eval --mode replay
+
+Replay mode runs the full pipeline (feature extraction, batching, deterministic corrections, postprocess fixups) but serves LLM responses from the cassette. This makes it ideal for iterating on everything *around* the LLM calls. In strict replay (the default), a change that alters the prompts raises an error telling you to re-record; pass `--loose-replay` to replay by call order anyway (useful when a prompt change is intentional and you want a quick signal before re-recording).
+
+**Reported metrics** (per case): precision / recall / F1 of matched titles (fuzzy matching tolerant to typos and punctuation), page accuracy (exact and within ±1 page), and hierarchy level accuracy. Missing and spurious entries are listed explicitly.
+
+**CI / regression gating:**
+
+	pdfalive eval --mode replay --min-f1 0.9 --min-page-accuracy 0.9
+
+exits with code 1 if any case falls below the thresholds.
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--evals-dir` | Directory containing `golden/` and `cassettes/` (default: `evals`) |
+| `--mode` | `replay` (default, free), `record` (live LLM, writes cassette), or `live` |
+| `--case` | Run only the named case(s); may be repeated |
+| `--model-identifier` | LLM for record/live modes (default: `gpt-5.5`) |
+| `--loose-replay` | Replay by call order even if prompts drifted since recording |
+| `--min-f1`, `--min-page-accuracy` | Fail (exit 1) if any case scores below threshold |
+
+**Adding a new case:** generate a TOC with `generate-toc`, verify the bookmarks by hand (fix any errors — this is your ground truth), then save the verified entries as a golden file and record a cassette with `--mode record`.
+
+
 ## Configuration
 
 pdfalive supports TOML configuration files for setting default CLI options. This is especially useful for frequently-used settings like the `--query` argument for rename.
@@ -192,6 +243,11 @@ pdfalive supports TOML configuration files for setting default CLI options. This
 	[rename]
 	query = "Rename to \"[Author Last Name] Book Title, Edition (Year).pdf\""
 	yes = false
+
+	# Settings for eval command (development tool)
+	[eval]
+	evals-dir = "evals"
+	mode = "replay"
 
 **Using a specific config file:**
 

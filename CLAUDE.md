@@ -33,6 +33,9 @@ uv run mypy pdfalive
 
 # Run tests
 uv run pytest
+
+# Evaluate TOC quality against golden data (free, replays recorded LLM responses)
+uv run pdfalive eval --mode replay
 ```
 
 ## Architecture
@@ -48,6 +51,10 @@ pdfalive/
 │   ├── __init__.py        # Config module exports
 │   ├── models.py          # Pydantic models for config validation
 │   └── loader.py          # TOML loading, path resolution, default_map conversion
+├── evaluation/
+│   ├── metrics.py         # Pure scoring functions (precision/recall/F1, page/level accuracy)
+│   ├── cassette.py        # VCR-style LLM record/replay (RecordingChatModel, ReplayChatModel)
+│   └── runner.py          # Eval case discovery and pipeline execution
 ├── models/
 │   ├── toc.py             # TOC, TOCEntry, TOCFeature models
 │   ├── page_content.py    # PageContent model
@@ -58,12 +65,17 @@ pdfalive/
 │   ├── ocr_detection.py   # OCR detection strategies
 │   └── rename_processor.py # RenameProcessor for file renaming
 └── tests/                 # Unit tests
+
+evals/                     # Evaluation data (repo root)
+├── golden/<name>.json     # Ground-truth TOC per case (defines the case: pdf path, postprocess flag, entries)
+└── cassettes/<name>.json  # Recorded LLM responses for replay
 ```
 
 **CLI Commands:**
 - `generate-toc` - Main command for TOC generation (with optional automatic OCR). Supports `--inplace` for modifying the input file directly, `--postprocess` for LLM-based TOC refinement, and `--ocr-output` to include the OCR text layer in the output PDF.
 - `extract-text` - OCR-only command for text extraction from scanned PDFs. Supports `--inplace` for modifying the input file directly.
 - `rename` - Intelligent file renaming using LLM inference. Supports reading paths from a file via `-f`/`--input-file` option for handling many files or long filenames. Use `-y`/`--yes` to skip the confirmation prompt.
+- `eval` - Evaluate TOC generation quality against golden data in `evals/golden/`. Modes: `replay` (default; serves LLM responses from a recorded cassette — free and deterministic), `record` (live LLM, writes the cassette), `live`. `--min-f1` / `--min-page-accuracy` provide CI threshold gating (exit code 1 on failure). Strict replay raises `CassetteMissError` when prompts have drifted since recording; `--loose-replay` replays by call order instead.
 
 **Processor Classes:**
 - `TOCGenerator` - Extracts font/text features from PDF pages, sends to LLM for TOC inference, writes bookmarks back to PDF. Supports multiprocessing, intelligent batching for large documents, retry logic with exponential backoff, and optional postprocessing to refine the TOC using reference text from the document's first pages.
@@ -102,6 +114,9 @@ The CLI supports TOML configuration files (`pdfalive.toml` or `.pdfalive.toml`) 
 
 The config is loaded via an eager callback on the `--config` option in `cli.py`. Global settings apply to all LLM-using commands, and command-specific settings override globals. CLI arguments always take precedence over config file values.
 
+**Evaluation Harness:**
+The `pdfalive/evaluation/` package measures TOC generation quality against golden (ground truth) data. A case is fully defined by `evals/golden/<name>.json` (source PDF path resolved relative to the evals dir's parent, a `postprocess` flag, and the expected entries). `metrics.py` contains pure scoring functions: golden and generated entries are greedily matched by normalized-title similarity (threshold 0.8, page distance as tiebreaker for repeated titles like "Exercises"), yielding precision/recall/F1, page accuracy (exact and within ±N pages), and level accuracy. `cassette.py` provides VCR-style record/replay: `RecordingChatModel` wraps a real LLM and persists each structured response (with a SHA-256 request fingerprint) to `evals/cassettes/<name>.json` after every call; `ReplayChatModel` serves them back in order with zero network calls. Both duck-type the `with_structured_output(schema).invoke(messages)` interface that processors use. Strict replay (default) fails loudly on prompt drift — re-record the cassette when prompts/features change intentionally. The golden TOC for the `geometry` case was human-verified from a real run.
+
 ## Development Guidelines
 
 - After making major changes to functionality, CLI options, or project architecture, always review and update all documentation to stay in sync: `README.md`, `docs/usage.md`, and `CLAUDE.md`. Docs should accurately reflect current defaults, option names, and feature descriptions.
@@ -109,4 +124,5 @@ The config is loaded via an eager callback on the `--config` option in `cli.py`.
 - always prefer placing imports at top of files rather than inline. Especially when writing unit-test. only do otherwise to avoid circular dependencies in rare cases. In those cases, mention explicitly why you are doing this in a comment on the relevant code line.
 - When writing unit-tests, use variables and/or pytest fixtures (e.g. via conftest.py and `@pytest.fixture` decorator) for fixture values and objects, rather than repeating literal values in test setup and assertions. Prefer using pytest's `@pytest.mark.parametrize` decorator when you wish to test different values or combinations of values rather than creating repetitive standalone test cases.
 - When making changes, always make sure formatting, linting, type checks, and tests work afterwards. We use ruff, mypy and pytest for these, and can run them via uv, e.g. `uv run ruff ...`, `uv run mypy`, etc.
+- When changing TOC generation heuristics, feature extraction, prompts, or correction logic, run the evaluation harness (`uv run pdfalive eval --mode replay`) and compare metrics before/after. If a change intentionally alters LLM prompts, re-record cassettes with `--mode record` (costs real LLM calls) and re-verify the golden data still scores well.
 - When finished making substantial changes to functionality and/or API (e.g. CLI usage) make sure to update documentation - README.md, CLAUDE.md and docs/ markdown files should all be kept up to date. Changing any CLI configuration options should also result in update the config/ submodule which lets us use TOML configuration files for defaults.

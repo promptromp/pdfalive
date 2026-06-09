@@ -145,6 +145,20 @@ def _config_to_default_map(config: PdfAliveConfig) -> dict[str, dict[str, Any]]:
     if rename_defaults:
         default_map["rename"] = rename_defaults
 
+    # Process eval command (model-identifier from global applies; no token usage display)
+    eval_defaults: dict[str, Any] = {}
+    if config.global_.model_identifier is not None:
+        eval_defaults["model_identifier"] = config.global_.model_identifier
+    eval_config = config.eval
+    if eval_config.evals_dir is not None:
+        eval_defaults["evals_dir"] = eval_config.evals_dir
+    if eval_config.mode is not None:
+        eval_defaults["mode"] = eval_config.mode
+    if eval_config.model_identifier is not None:
+        eval_defaults["model_identifier"] = eval_config.model_identifier
+    if eval_defaults:
+        default_map["eval"] = eval_defaults
+
     return default_map
 
 
