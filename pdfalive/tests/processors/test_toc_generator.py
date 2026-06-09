@@ -4033,6 +4033,10 @@ class TestAnchoredHeadingMatching:
             # ("Distance" is not "Distance and Angles")
             ("1, §2. Distance", "Chapter 1: Distance and Angles", False),
             ("1, §2. Distance", "2. DISTANCE", True),
+            # A title WITH designator must match a block carrying the same
+            # designator plus merged body text (heading + first paragraph in one block)
+            ("Chapter 7 Differential forms", "Chapter 7: Differential forms It is often useful to", True),
+            ("Chapter 34 Differential forms", "Chapter 7: Differential forms It is often useful to", False),
         ],
     )
     def test_anchored_mode(self, title: str, candidate: str, expected: bool) -> None:
@@ -4091,6 +4095,25 @@ class TestFuzzyRestorePrefixAlignment:
         result = generator._correct_postprocessed_page_numbers(original, refined)
 
         assert result.entries[0].page_number == 55  # restored from the truncated original
+
+    def test_cross_numbered_sections_are_not_conflated(self, generator) -> None:
+        """'2.9 Exercises' must not restore onto '1.8 Exercises' just because cores match."""
+        original = TOC(entries=[TOCEntry(title="1.8 Exercises", page_number=30, level=2, confidence=0.9)])
+        refined = TOC(
+            entries=[
+                TOCEntry(title="1.8 Exercises", page_number=30, level=2, confidence=0.9),
+                TOCEntry(title="2.9 Exercises", page_number=95, level=2, confidence=0.9),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        chapter2_exercises = next(e for e in result.entries if e.title == "2.9 Exercises")
+        assert chapter2_exercises.page_number == 95  # NOT restored to chapter 1's page
+
+    def test_unpack_missing_parsed_without_error_raises(self) -> None:
+        with pytest.raises(ValueError, match="parsed"):
+            _unpack_structured_response({"raw": MagicMock(), "parsed": None, "parsing_error": None})
 
     def test_designator_dropped_by_printed_toc_still_restores(self, generator) -> None:
         """Printed TOCs often omit the section designator the extraction kept."""

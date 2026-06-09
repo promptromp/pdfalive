@@ -191,3 +191,39 @@ class TestIncludeRawSupport:
 
         assert response == toc_batch_1
         mock_llm.with_structured_output.assert_called_once_with(TOC)
+
+
+class TestRecordingFailureSafety:
+    def test_parsing_error_response_is_not_recorded_and_passes_through(
+        self, cassette_path: Path, toc_batch_1: TOC
+    ) -> None:
+        llm = MagicMock()
+        structured = MagicMock()
+        error_response = {
+            "raw": SimpleNamespace(usage_metadata=None),
+            "parsed": None,
+            "parsing_error": ValueError("bad"),
+        }
+        structured.invoke.return_value = error_response
+        llm.with_structured_output.return_value = structured
+
+        model = RecordingChatModel(llm=llm, cassette_path=cassette_path).with_structured_output(TOC, include_raw=True)
+        response = model.invoke(make_messages(USER_PROMPT_BATCH_1))
+
+        assert response is error_response  # passed through for the caller's retry/raise logic
+        assert not cassette_path.exists()  # nothing recorded for a failed parse
+
+    def test_existing_cassette_is_backed_up_before_recording(
+        self, mock_llm: MagicMock, cassette_path: Path, toc_batch_1: TOC
+    ) -> None:
+        cassette_path.write_text(
+            '{"entries": [{"request_hash": "old", "schema_name": "TOC", "response": {"entries": []}}]}'
+        )
+
+        model = RecordingChatModel(llm=mock_llm, cassette_path=cassette_path).with_structured_output(TOC)
+        model.invoke(make_messages(USER_PROMPT_BATCH_1))
+
+        backup = cassette_path.with_suffix(".json.bak")
+        assert backup.exists()
+        assert "old" in backup.read_text()  # prior recording preserved
+        assert Cassette.load(cassette_path).entries[0].response == toc_batch_1.model_dump()

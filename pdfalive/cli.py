@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from pdfalive.config import load_config_as_default_map
+from pdfalive.evaluation.metrics import SUMMARY_PAGE_TOLERANCE, EvalReport
 from pdfalive.evaluation.runner import EvalCase, EvalMode, discover_cases, run_eval_case
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
@@ -454,7 +455,7 @@ def eval_command(
         raise click.UsageError(f"No evaluation cases found under {evals_dir}/golden/.")
 
     eval_mode = cast(EvalMode, mode)
-    reports: list[tuple[EvalCase, Any]] = []
+    reports: list[tuple[EvalCase, EvalReport]] = []
     for case in cases:
         console.print(f"Evaluating case [bold cyan]{case.name}[/bold cyan] ([magenta]{eval_mode}[/magenta] mode)...")
         report = run_eval_case(
@@ -504,16 +505,20 @@ def eval_command(
                 console.print(f"  - {entry.title} (page {entry.page_number}, level {entry.level})")
         if report.spurious:
             console.print(f"\n[yellow]{case.name}: {len(report.spurious)} spurious generated entries:[/yellow]")
-            for entry in report.spurious:
-                console.print(f"  - {entry.title} (page {entry.page_number}, level {entry.level})")
+            for spurious_entry in report.spurious:
+                console.print(
+                    f"  - {spurious_entry.title} (page {spurious_entry.page_number}, level {spurious_entry.level})"
+                )
 
     failures = []
     for case, report in reports:
         if min_f1 is not None and report.f1 < min_f1:
             failures.append(f"{case.name}: F1 {report.f1:.2f} < {min_f1:.2f}")
-        if min_page_accuracy is not None and report.page_accuracy(tolerance=1) < min_page_accuracy:
+        # Gate on the same tolerance the summary table's "Page ±N" column uses.
+        page_accuracy = report.page_accuracy(tolerance=SUMMARY_PAGE_TOLERANCE)
+        if min_page_accuracy is not None and page_accuracy < min_page_accuracy:
             failures.append(
-                f"{case.name}: page accuracy (±1) {report.page_accuracy(tolerance=1):.2f} < {min_page_accuracy:.2f}"
+                f"{case.name}: page accuracy (±{SUMMARY_PAGE_TOLERANCE}) {page_accuracy:.2f} < {min_page_accuracy:.2f}"
             )
 
     if failures:

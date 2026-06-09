@@ -127,10 +127,11 @@ class TestRunEvalCase:
 
         assert mock_llm.with_structured_output.return_value.invoke.call_count == calls_before
 
-    def test_replay_detects_missing_golden_entries(self, case: EvalCase) -> None:
+    def test_replay_detects_missing_golden_entries(self, case: EvalCase, recorded_evals_dir: Path) -> None:
         golden = json.loads(case.golden_path.read_text())
         golden["entries"].append({"title": "Appendix A: Extra Material", "page_number": 3, "level": 1})
         case.golden_path.write_text(json.dumps(golden))
+        case = discover_cases(recorded_evals_dir)[0]  # golden data is parsed at discovery time
 
         report = run_eval_case(case, mode="replay", num_processes=1)
 
@@ -183,3 +184,12 @@ class TestEvalCommand:
 
         assert result.exit_code != 0
         assert "nonexistent" in result.output
+
+
+class TestMissingSourcePdf:
+    def test_missing_pdf_raises_clear_error_naming_the_case(self, evals_dir: Path, synthetic_pdf_path: Path) -> None:
+        synthetic_pdf_path.unlink()
+        case = discover_cases(evals_dir)[0]
+
+        with pytest.raises(FileNotFoundError, match=CASE_NAME):
+            run_eval_case(case, mode="replay", num_processes=1)

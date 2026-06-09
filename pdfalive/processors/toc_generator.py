@@ -300,8 +300,10 @@ def _heading_text_matches_title(title: str, candidate_text: str, anchored: bool 
         if anchored:
             if candidate_consistent:
                 # Full title at the candidate's start: heading may continue into
-                # merged body text.
-                if candidate_core.startswith(search_text):
+                # merged body text. Checked against both the normalized candidate
+                # (block carries the same designator as the title) and its
+                # designator-stripped core (block omits the designator).
+                if candidate_normalized.startswith(search_text) or candidate_core.startswith(search_text):
                     content_matches = True
                     break
                 # Relaxed variant: both sides reduced to designator-stripped
@@ -406,10 +408,31 @@ def _unpack_structured_response(response) -> tuple[TOC, dict | None]:
         parsing_error = response.get("parsing_error")
         if parsing_error is not None:
             raise parsing_error
+        parsed = response["parsed"]
+        if parsed is None:
+            # Empty/refusal completions can yield parsed=None without a recorded
+            # error; raise so the retry policy can absorb a transient flake.
+            raise ValueError("Structured output response contained no parsed result")
         raw = response.get("raw")
         usage_metadata = getattr(raw, "usage_metadata", None) if raw is not None else None
-        return response["parsed"], usage_metadata
+        return parsed, usage_metadata
     return response, getattr(response, "usage_metadata", None)
+
+
+def _resolve_token_counts(usage_metadata: dict | None, estimated_input: int, parsed: TOC) -> tuple[int, int]:
+    """Resolve (input, output) token counts for a structured LLM call.
+
+    Prefers the provider's actual usage_metadata (which includes reasoning
+    tokens); falls back to tiktoken estimates when unavailable (legacy cassette
+    replays, providers without usage reporting).
+    """
+    estimated_output = estimate_tokens(str(parsed.entries))
+    if not usage_metadata:
+        return estimated_input, estimated_output
+    return (
+        usage_metadata.get("input_tokens") or estimated_input,
+        usage_metadata.get("output_tokens") or estimated_output,
+    )
 
 
 def _is_retryable_error(exception: BaseException) -> bool:
@@ -589,23 +612,16 @@ _MAX_BODY_SPANS_PER_PAGE_FOR_LLM = 1
 def _is_heading_like_feature(span: TOCFeature, body_font_size: float) -> bool:
     """Classify an extracted TOCFeature as heading-like (vs body text).
 
-    Mirrors the criteria of _is_heading_candidate, but operates on TOCFeature
-    objects (post-extraction) rather than raw PyMuPDF span dicts.
+    Applies the same shared criteria as _is_heading_candidate, but on
+    TOCFeature objects (post-extraction) rather than raw PyMuPDF span dicts.
     """
-    text = span.text_snippet.strip()
-    if len(text) < _HEADING_MIN_LENGTH or span.text_length > _HEADING_MAX_LENGTH:
-        return False
-
-    if body_font_size > 0 and span.font_size >= body_font_size * _HEADING_FONT_SIZE_RATIO:
-        return True
-
-    if span.is_bold and body_font_size > 0 and span.font_size >= body_font_size:
-        return True
-
-    if _SECTION_NUMBER_PATTERN.match(text):
-        return True
-
-    return bool(_LETTERSPACED_PATTERN.match(text))
+    return _passes_heading_criteria(
+        text=span.text_snippet.strip(),
+        full_text_length=span.text_length,
+        font_size=span.font_size,
+        is_bold=bool(span.is_bold),
+        body_font_size=body_font_size,
+    )
 
 
 def filter_features_for_llm(features: list, max_body_spans_per_page: int = _MAX_BODY_SPANS_PER_PAGE_FOR_LLM) -> list:
@@ -716,19 +732,47 @@ def _compute_body_font_profile(features: list) -> tuple[str, float]:
     return counter.most_common(1)[0][0]
 
 
+def _passes_heading_criteria(
+    text: str,
+    full_text_length: int,
+    font_size: float,
+    is_bold: bool,
+    body_font_size: float,
+    font_size_ratio: float = _HEADING_FONT_SIZE_RATIO,
+) -> bool:
+    """Shared heading classification core used for both raw spans and TOCFeatures.
+
+    A text run is heading-like when its length is within heading bounds AND:
+    - font size >= font_size_ratio * body font size, OR
+    - bold at >= body font size, OR
+    - it matches the section numbering pattern, OR
+    - it is letter-spaced ALL-CAPS (e.g. "C H A P T E R  I").
+
+    The bold-based check always uses the true body_font_size; only the
+    size-based check uses font_size_ratio.
+    """
+    if len(text) < _HEADING_MIN_LENGTH or full_text_length > _HEADING_MAX_LENGTH:
+        return False
+
+    if body_font_size > 0 and font_size >= body_font_size * font_size_ratio:
+        return True
+
+    if is_bold and body_font_size > 0 and font_size >= body_font_size:
+        return True
+
+    if _SECTION_NUMBER_PATTERN.match(text):
+        return True
+
+    return bool(_LETTERSPACED_PATTERN.match(text))
+
+
 def _is_heading_candidate(
     span: dict,
     body_font_name: str,
     body_font_size: float,
     font_size_ratio: float = _HEADING_FONT_SIZE_RATIO,
 ) -> bool:
-    """Determine if a span is likely a heading based on font characteristics.
-
-    A span is a heading candidate if:
-    - Font size >= font_size_ratio * body font size, OR
-    - Bold font AND font size >= body font size, OR
-    - Text matches section numbering pattern (e.g. "1.", "Chapter", "Section")
-    AND text length is between 3-200 chars.
+    """Determine if a raw PyMuPDF span is likely a heading (see _passes_heading_criteria).
 
     Args:
         span: A PyMuPDF span dict.
@@ -737,34 +781,16 @@ def _is_heading_candidate(
         font_size_ratio: Minimum font size ratio vs body text for size-based detection.
             Defaults to _HEADING_FONT_SIZE_RATIO (1.15). Pass a higher value
             (e.g. _HEADING_FONT_SIZE_RATIO_PHASE2) for stricter Phase 2 scanning.
-            This does NOT affect the bold-based check, which always uses body_font_size.
-
-    Returns:
-        True if the span looks like a heading.
     """
     text = span.get("text", "").strip()
-    text_len = len(text)
-
-    if text_len < _HEADING_MIN_LENGTH or text_len > _HEADING_MAX_LENGTH:
-        return False
-
-    font_size = span.get("size", 0.0)
-    is_bold = _is_bold_font(span)
-
-    # Size-based: significantly larger than body text
-    if body_font_size > 0 and font_size >= body_font_size * font_size_ratio:
-        return True
-
-    # Bold + at least body size
-    if is_bold and body_font_size > 0 and font_size >= body_font_size:
-        return True
-
-    # Section numbering pattern
-    if _SECTION_NUMBER_PATTERN.match(text):
-        return True
-
-    # Letter-spaced ALL-CAPS text (e.g. "C H A P T E R  I")
-    return bool(_LETTERSPACED_PATTERN.match(text))
+    return _passes_heading_criteria(
+        text=text,
+        full_text_length=len(text),
+        font_size=span.get("size", 0.0),
+        is_bold=_is_bold_font(span),
+        body_font_size=body_font_size,
+        font_size_ratio=font_size_ratio,
+    )
 
 
 def _merge_line_spans(spans: list[dict], text_snippet_length: int) -> dict:
@@ -902,7 +928,7 @@ class TOCGenerator:
 
     def run(
         self,
-        output_file: str,
+        output_file: str | None,
         force: bool = False,
         request_delay: float = DEFAULT_REQUEST_DELAY_SECONDS,
         postprocess: bool = False,
@@ -910,7 +936,8 @@ class TOCGenerator:
         """Generate the table of contents.
 
         Args:
-            output_file: Path to save the modified PDF with TOC.
+            output_file: Path to save the modified PDF with TOC, or None to only
+                set the TOC on the in-memory document without saving.
             force: If True, overwrite existing TOC. Otherwise raise if TOC exists.
             request_delay: Delay in seconds between LLM calls to avoid rate limiting.
             postprocess: If True, run a postprocessing step to clean up and improve the TOC.
@@ -953,7 +980,8 @@ class TOCGenerator:
         toc = toc.sort_by_page()
         toc = toc.sanitize_hierarchy()
         self.doc.set_toc(toc.to_list())
-        self.doc.save(output_file)
+        if output_file is not None:
+            self.doc.save(output_file)
 
         return usage
 
@@ -1454,14 +1482,7 @@ class TOCGenerator:
             # Make LLM call with retry logic
             batch_toc, usage_metadata = self._invoke_with_retry(model, messages, batch_description, input_tokens)
 
-            # Prefer the provider's actual token usage; fall back to estimates
-            # (e.g. cassette replay of legacy recordings, providers without usage).
-            if usage_metadata:
-                actual_input = usage_metadata.get("input_tokens") or input_tokens
-                actual_output = usage_metadata.get("output_tokens") or estimate_tokens(str(batch_toc.entries))
-            else:
-                actual_input = input_tokens
-                actual_output = estimate_tokens(str(batch_toc.entries))
+            actual_input, actual_output = _resolve_token_counts(usage_metadata, input_tokens, batch_toc)
 
             usage.add_call(
                 input_tokens=actual_input,
@@ -1601,13 +1622,7 @@ must be PDF page numbers (not printed page numbers).
         # Validate and correct page numbers if the LLM shifted to printed page numbers
         refined_toc = self._correct_postprocessed_page_numbers(toc, refined_toc, reference_text=reference_text)
 
-        # Prefer the provider's actual token usage; fall back to estimates.
-        if usage_metadata:
-            actual_input = usage_metadata.get("input_tokens") or input_tokens
-            actual_output = usage_metadata.get("output_tokens") or estimate_tokens(str(refined_toc.entries))
-        else:
-            actual_input = input_tokens
-            actual_output = estimate_tokens(str(refined_toc.entries))
+        actual_input, actual_output = _resolve_token_counts(usage_metadata, input_tokens, refined_toc)
 
         usage.add_call(
             input_tokens=actual_input,
@@ -2066,21 +2081,29 @@ must be PDF page numbers (not printed page numbers).
             # leading-word variants ("Preface..." vs "Translator's preface...")
             # which name different sections.
             key_core = _strip_leading_designators(key)
+            key_digits = re.findall(r"\d+", key)
             best_page: int | None = None
             best_ratio: float = 0.0
 
             for orig_key, matches in original_map.items():
+                # Numbering is identity: when BOTH titles carry numbers and they
+                # disagree, they are different sections even if their cores
+                # match ("1.8 Exercises" vs "2.9 Exercises"). A missing number
+                # on one side is fine (printed TOCs often drop designators).
+                orig_digits = re.findall(r"\d+", orig_key)
+                if key_digits and orig_digits and key_digits != orig_digits:
+                    continue
+                orig_core = _strip_leading_designators(orig_key)
+                shorter, longer = sorted((key_core, orig_core), key=len)
+                if len(shorter) < _FUZZY_MIN_SUBSTRING_LEN:
+                    continue
+                if not longer.startswith(shorter):
+                    continue
+                ratio = len(shorter) / len(longer)
+                if ratio < _FUZZY_MIN_COVERAGE_RATIO:
+                    continue
                 for orig_page, orig_level in matches:
                     if orig_level != level:
-                        continue
-                    orig_core = _strip_leading_designators(orig_key)
-                    shorter, longer = sorted((key_core, orig_core), key=len)
-                    if len(shorter) < _FUZZY_MIN_SUBSTRING_LEN:
-                        continue
-                    if not longer.startswith(shorter):
-                        continue
-                    ratio = len(shorter) / len(longer)
-                    if ratio < _FUZZY_MIN_COVERAGE_RATIO:
                         continue
                     if ratio > best_ratio:
                         best_ratio = ratio

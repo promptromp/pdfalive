@@ -79,6 +79,11 @@ class _RecordingStructuredModel:
         # Record the parsed model plus the provider's actual token usage.
         if isinstance(response, dict) and "parsed" in response:
             parsed = response["parsed"]
+            if parsed is None or response.get("parsing_error") is not None:
+                # Failed parse: nothing to record. Pass the response through so
+                # the caller's error handling and retry policy see the real
+                # parsing error rather than a crash inside the recorder.
+                return response
             raw = response.get("raw")
             usage_metadata = getattr(raw, "usage_metadata", None) if raw is not None else None
         else:
@@ -99,12 +104,20 @@ class _RecordingStructuredModel:
 
 
 class RecordingChatModel:
-    """Chat-model wrapper that records structured responses to a cassette file."""
+    """Chat-model wrapper that records structured responses to a cassette file.
+
+    If a cassette already exists at the target path, it is copied to a
+    ``.json.bak`` sibling before the first overwrite, so an interrupted or
+    failed recording run cannot destroy the last good recording.
+    """
 
     def __init__(self, llm, cassette_path: Path) -> None:
         self._llm = llm
         self._cassette_path = Path(cassette_path)
         self._cassette = Cassette()
+        if self._cassette_path.exists():
+            backup_path = self._cassette_path.with_suffix(".json.bak")
+            backup_path.write_bytes(self._cassette_path.read_bytes())
 
     def with_structured_output(self, schema: type[BaseModel], include_raw: bool = False) -> _RecordingStructuredModel:
         structured_model = (

@@ -17,7 +17,6 @@ The matching cassette lives at ``<evals_dir>/cassettes/<name>.json``. Modes:
 - ``live``: call the real LLM without touching the cassette.
 """
 
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -61,7 +60,11 @@ class EvalCase:
     pdf_path: Path
     golden_path: Path
     cassette_path: Path
-    postprocess: bool
+    golden: GoldenFile
+
+    @property
+    def postprocess(self) -> bool:
+        return self.golden.postprocess
 
 
 def load_golden_file(golden_path: Path) -> GoldenFile:
@@ -95,7 +98,7 @@ def discover_cases(evals_dir: Path) -> list[EvalCase]:
                 pdf_path=pdf_path,
                 golden_path=golden_path,
                 cassette_path=evals_dir / _CASSETTE_SUBDIR / f"{golden.name}.json",
-                postprocess=golden.postprocess,
+                golden=golden,
             )
         )
     return cases
@@ -135,7 +138,12 @@ def run_eval_case(
     Returns:
         The EvalReport scoring the generated TOC against the golden entries.
     """
-    golden = load_golden_file(case.golden_path)
+    if not case.pdf_path.exists():
+        raise FileNotFoundError(
+            f"Source PDF for case '{case.name}' not found: {case.pdf_path}. "
+            "Eval PDFs are local-only (not committed); see the golden file's description for how to obtain it."
+        )
+
     llm = _build_llm(case, mode, model_identifier, strict_replay)
 
     if request_delay is None:
@@ -144,15 +152,16 @@ def run_eval_case(
     doc = pymupdf.open(case.pdf_path)
     try:
         generator = TOCGenerator(doc=doc, llm=llm, num_processes=num_processes)
-        with tempfile.NamedTemporaryFile(suffix=".pdf") as output:
-            generator.run(
-                output_file=output.name,
-                force=True,
-                request_delay=request_delay,
-                postprocess=case.postprocess,
-            )
+        # No output_file: evaluation only needs the in-memory TOC, so skip
+        # serializing a multi-hundred-MB PDF per case.
+        generator.run(
+            output_file=None,
+            force=True,
+            request_delay=request_delay,
+            postprocess=case.postprocess,
+        )
         generated = TOC(entries=[TOCEntry.from_list(item) for item in doc.get_toc()])
     finally:
         doc.close()
 
-    return evaluate_toc(golden.entries, generated)
+    return evaluate_toc(case.golden.entries, generated)

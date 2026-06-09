@@ -16,8 +16,8 @@ from pdfalive.models.toc import TOC, TOCEntry
 # Minimum normalized-title similarity for a golden/generated pair to count as a match.
 DEFAULT_SIMILARITY_THRESHOLD = 0.8
 
-# Default page tolerance used by the within-tolerance accuracy in summaries.
-_SUMMARY_PAGE_TOLERANCE = 1
+# Page tolerance used by the within-tolerance accuracy in summaries and CLI gates.
+SUMMARY_PAGE_TOLERANCE = 1
 
 _PUNCTUATION_PATTERN = re.compile(r"[^\w\s]")
 _WHITESPACE_PATTERN = re.compile(r"\s+")
@@ -42,13 +42,16 @@ def normalize_title(title: str) -> str:
     return _WHITESPACE_PATTERN.sub(" ", title).strip()
 
 
-def title_similarity(left: str, right: str) -> float:
-    """Similarity ratio in [0, 1] between two titles after normalization."""
-    left_norm = normalize_title(left)
-    right_norm = normalize_title(right)
+def _normalized_similarity(left_norm: str, right_norm: str) -> float:
+    """Similarity ratio in [0, 1] between two already-normalized titles."""
     if left_norm == right_norm:
         return 1.0
     return SequenceMatcher(None, left_norm, right_norm).ratio()
+
+
+def title_similarity(left: str, right: str) -> float:
+    """Similarity ratio in [0, 1] between two titles after normalization."""
+    return _normalized_similarity(normalize_title(left), normalize_title(right))
 
 
 @dataclass(frozen=True)
@@ -108,16 +111,22 @@ class EvalReport:
             return 0.0
         return 2 * self.precision * self.recall / (self.precision + self.recall)
 
+    def _matched_fraction(self, agreeing: int) -> float:
+        if not self.matched:
+            # No matches: perfect only for the truly empty case. Otherwise these
+            # accuracies must not read 1.0 (a threshold gate would pass a case
+            # where the pipeline matched nothing at all).
+            return 1.0 if self.golden_count == 0 and self.generated_count == 0 else 0.0
+        return agreeing / len(self.matched)
+
     def page_accuracy(self, tolerance: int = 0) -> float:
         """Fraction of matched pairs whose page numbers agree within tolerance."""
-        within = sum(1 for pair in self.matched if pair.page_delta <= tolerance)
-        return self._ratio(within, len(self.matched))
+        return self._matched_fraction(sum(1 for pair in self.matched if pair.page_delta <= tolerance))
 
     @property
     def level_accuracy(self) -> float:
         """Fraction of matched pairs whose hierarchy levels agree."""
-        agreeing = sum(1 for pair in self.matched if pair.level_matches)
-        return self._ratio(agreeing, len(self.matched))
+        return self._matched_fraction(sum(1 for pair in self.matched if pair.level_matches))
 
     def summary(self) -> dict[str, float | int]:
         """Flat metric dictionary, suitable for tabular display or JSON output."""
@@ -129,7 +138,7 @@ class EvalReport:
             "recall": self.recall,
             "f1": self.f1,
             "page_accuracy_exact": self.page_accuracy(),
-            "page_accuracy_within_1": self.page_accuracy(tolerance=_SUMMARY_PAGE_TOLERANCE),
+            "page_accuracy_within_1": self.page_accuracy(tolerance=SUMMARY_PAGE_TOLERANCE),
             "level_accuracy": self.level_accuracy,
         }
 
@@ -156,26 +165,36 @@ def evaluate_toc(
         An EvalReport with matched pairs, missing golden entries, and spurious
         generated entries.
     """
-    candidates: list[tuple[float, int, int, int]] = []  # (similarity, page_delta, golden_idx, generated_idx)
+    # Normalize once per entry, not once per pair.
+    golden_norms = [normalize_title(entry.title) for entry in golden]
+    generated_norms = [normalize_title(entry.title) for entry in generated.entries]
+
+    # Candidates sort naturally: similarity stored negated so plain tuple order
+    # ranks by (similarity desc, page_delta asc, stable indices).
+    candidates: list[tuple[float, int, int, int]] = []  # (-similarity, page_delta, golden_idx, generated_idx)
     for golden_idx, golden_entry in enumerate(golden):
         for generated_idx, generated_entry in enumerate(generated.entries):
-            similarity = title_similarity(golden_entry.title, generated_entry.title)
+            similarity = _normalized_similarity(golden_norms[golden_idx], generated_norms[generated_idx])
             if similarity >= similarity_threshold:
                 page_delta = abs(golden_entry.page_number - generated_entry.page_number)
-                candidates.append((similarity, page_delta, golden_idx, generated_idx))
+                candidates.append((-similarity, page_delta, golden_idx, generated_idx))
 
-    candidates.sort(key=lambda c: (-c[0], c[1], c[2], c[3]))
+    candidates.sort()
 
     matched: list[MatchedPair] = []
     used_golden: set[int] = set()
     used_generated: set[int] = set()
-    for similarity, _, golden_idx, generated_idx in candidates:
+    for negated_similarity, _, golden_idx, generated_idx in candidates:
         if golden_idx in used_golden or generated_idx in used_generated:
             continue
         used_golden.add(golden_idx)
         used_generated.add(generated_idx)
         matched.append(
-            MatchedPair(golden=golden[golden_idx], generated=generated.entries[generated_idx], similarity=similarity)
+            MatchedPair(
+                golden=golden[golden_idx],
+                generated=generated.entries[generated_idx],
+                similarity=-negated_similarity,
+            )
         )
 
     missing = [entry for idx, entry in enumerate(golden) if idx not in used_golden]

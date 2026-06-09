@@ -197,3 +197,18 @@ class TestGoldenEntry:
         golden = GoldenEntry.from_toc_entry(toc_entry)
 
         assert golden == GoldenEntry(title="Index", page_number=404, level=1)
+
+
+class TestZeroMatchAccuracies:
+    def test_page_and_level_accuracy_are_zero_when_nothing_matched(
+        self, make_golden_entry: Callable[..., GoldenEntry], make_toc: Callable[..., TOC]
+    ) -> None:
+        """A case with golden entries but no matches must not report perfect accuracies."""
+        golden = [make_golden_entry(title="Chapter 1: Distance and Angles")]
+        generated = make_toc(("Completely Unrelated Heading", 99, 1))
+
+        report = evaluate_toc(golden, generated)
+
+        assert report.page_accuracy() == 0.0
+        assert report.page_accuracy(tolerance=1) == 0.0
+        assert report.level_accuracy == 0.0
