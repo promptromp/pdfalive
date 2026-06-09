@@ -2,6 +2,8 @@
 
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -123,3 +125,69 @@ class TestReplay:
     def test_missing_cassette_file_raises_with_guidance(self, tmp_path: Path) -> None:
         with pytest.raises(CassetteMissError, match="record"):
             ReplayChatModel(cassette_path=tmp_path / "does_not_exist.json")
+
+
+class TestIncludeRawSupport:
+    """Recording/replaying structured responses obtained with include_raw=True."""
+
+    USAGE = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+
+    @pytest.fixture
+    def raw_mock_llm(self, toc_batch_1: TOC) -> MagicMock:
+        llm = MagicMock()
+        structured = MagicMock()
+        raw = SimpleNamespace(usage_metadata=dict(self.USAGE))
+        structured.invoke.return_value = {"raw": raw, "parsed": toc_batch_1, "parsing_error": None}
+        llm.with_structured_output.return_value = structured
+        return llm
+
+    def test_recording_stores_parsed_response_and_usage(
+        self, raw_mock_llm: MagicMock, cassette_path: Path, toc_batch_1: TOC
+    ) -> None:
+        model = RecordingChatModel(llm=raw_mock_llm, cassette_path=cassette_path).with_structured_output(
+            TOC, include_raw=True
+        )
+
+        response = cast(dict, model.invoke(make_messages(USER_PROMPT_BATCH_1)))
+
+        assert response["parsed"] == toc_batch_1  # raw dict passed through unchanged
+        entry = Cassette.load(cassette_path).entries[0]
+        assert entry.response == toc_batch_1.model_dump()
+        assert entry.usage_metadata == self.USAGE
+
+    def test_replay_with_include_raw_returns_dict_with_recorded_usage(
+        self, raw_mock_llm: MagicMock, cassette_path: Path, toc_batch_1: TOC
+    ) -> None:
+        recorder = RecordingChatModel(llm=raw_mock_llm, cassette_path=cassette_path)
+        recorder.with_structured_output(TOC, include_raw=True).invoke(make_messages(USER_PROMPT_BATCH_1))
+
+        model = ReplayChatModel(cassette_path=cassette_path).with_structured_output(TOC, include_raw=True)
+        replayed = cast(dict, model.invoke(make_messages(USER_PROMPT_BATCH_1)))
+
+        assert replayed["parsed"] == toc_batch_1
+        assert replayed["parsing_error"] is None
+        assert replayed["raw"].usage_metadata == self.USAGE
+
+    def test_replay_include_raw_from_legacy_cassette_has_no_raw(
+        self, mock_llm: MagicMock, cassette_path: Path, toc_batch_1: TOC
+    ) -> None:
+        """Cassettes recorded without include_raw still replay under include_raw=True."""
+        RecordingChatModel(llm=mock_llm, cassette_path=cassette_path).with_structured_output(TOC).invoke(
+            make_messages(USER_PROMPT_BATCH_1)
+        )
+
+        model = ReplayChatModel(cassette_path=cassette_path).with_structured_output(TOC, include_raw=True)
+        replayed = cast(dict, model.invoke(make_messages(USER_PROMPT_BATCH_1)))
+
+        assert replayed["parsed"] == toc_batch_1
+        assert replayed["raw"] is None
+
+    def test_recording_without_include_raw_keeps_plain_interface(
+        self, mock_llm: MagicMock, cassette_path: Path, toc_batch_1: TOC
+    ) -> None:
+        model = RecordingChatModel(llm=mock_llm, cassette_path=cassette_path).with_structured_output(TOC)
+
+        response = model.invoke(make_messages(USER_PROMPT_BATCH_1))
+
+        assert response == toc_batch_1
+        mock_llm.with_structured_output.assert_called_once_with(TOC)

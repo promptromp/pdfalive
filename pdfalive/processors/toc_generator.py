@@ -311,6 +311,25 @@ RETRY_MAX_WAIT_SECONDS = 120  # Maximum wait time between retries
 _NON_RETRYABLE_PATTERNS = ("ContextOverflow", "BadRequest", "InvalidRequest", "ValidationError")
 
 
+def _unpack_structured_response(response) -> tuple[TOC, dict | None]:
+    """Unpack a structured-output response into (parsed, usage_metadata).
+
+    Handles both shapes:
+    - include_raw=True dicts: {"raw": AIMessage, "parsed": model, "parsing_error": ...}
+      — raises the recorded parsing error if present (so retry logic applies),
+      and reads the provider's actual token usage from the raw message.
+    - plain parsed models (legacy/mocked paths) — no usage metadata available.
+    """
+    if isinstance(response, dict) and "parsed" in response:
+        parsing_error = response.get("parsing_error")
+        if parsing_error is not None:
+            raise parsing_error
+        raw = response.get("raw")
+        usage_metadata = getattr(raw, "usage_metadata", None) if raw is not None else None
+        return response["parsed"], usage_metadata
+    return response, getattr(response, "usage_metadata", None)
+
+
 def _is_retryable_error(exception: BaseException) -> bool:
     """Determine if an LLM API exception is retryable.
 
@@ -1222,17 +1241,17 @@ class TOCGenerator:
         if current_batch:
             yield current_batch
 
-    def _invoke_with_retry(self, model, messages, batch_description: str, input_tokens: int) -> TOC:
+    def _invoke_with_retry(self, model, messages, batch_description: str, input_tokens: int) -> tuple[TOC, dict | None]:
         """Invoke the LLM with retry logic for rate limiting.
 
         Args:
-            model: The LLM model with structured output.
+            model: The LLM model with structured output (include_raw supported).
             messages: The messages to send.
             batch_description: Description of the current batch for logging.
             input_tokens: Estimated input tokens for logging.
 
         Returns:
-            The TOC response from the LLM.
+            Tuple of (parsed TOC, provider usage_metadata or None when unavailable).
         """
 
         def _log_retry(retry_state) -> None:
@@ -1264,18 +1283,21 @@ class TOCGenerator:
             before_sleep=_log_retry,
             reraise=True,
         )
-        def _invoke():
-            return model.invoke(messages)
+        def _invoke() -> tuple[TOC, dict | None]:
+            # Unpack inside the retried call so structured-output parsing
+            # errors participate in the retry policy.
+            parsed, usage_metadata = _unpack_structured_response(model.invoke(messages))
+            return cast(TOC, parsed), usage_metadata
 
         console.print(f"  [dim]Invoking LLM for {batch_description} (~{input_tokens:,} input tokens)...[/dim]")
         start_time = time.time()
 
-        response = _invoke()
+        parsed, usage_metadata = _invoke()
 
         elapsed = time.time() - start_time
         console.print(f"  [green]Completed {batch_description} in {elapsed:.1f}s[/green]")
 
-        return cast(TOC, response)
+        return parsed, usage_metadata
 
     def _extract_toc_paginated(
         self,
@@ -1302,7 +1324,9 @@ class TOCGenerator:
         """
         usage = TokenUsage()
         merged_toc = TOC(entries=[])
-        model = self.llm.with_structured_output(TOC)
+        # include_raw=True exposes the provider's actual token usage (including
+        # reasoning tokens) on the raw message instead of relying on estimates.
+        model = self.llm.with_structured_output(TOC, include_raw=True)
 
         batches = list(self._batch_features(features, max_tokens_per_batch, overlap_blocks))
         total_batches = len(batches)
@@ -1346,15 +1370,20 @@ class TOCGenerator:
             input_tokens = estimate_tokens(input_text)
 
             # Make LLM call with retry logic
-            batch_toc = self._invoke_with_retry(model, messages, batch_description, input_tokens)
+            batch_toc, usage_metadata = self._invoke_with_retry(model, messages, batch_description, input_tokens)
 
-            # Estimate output tokens (rough estimate based on response)
-            output_tokens = estimate_tokens(str(batch_toc.entries))
+            # Prefer the provider's actual token usage; fall back to estimates
+            # (e.g. cassette replay of legacy recordings, providers without usage).
+            if usage_metadata:
+                actual_input = usage_metadata.get("input_tokens") or input_tokens
+                actual_output = usage_metadata.get("output_tokens") or estimate_tokens(str(batch_toc.entries))
+            else:
+                actual_input = input_tokens
+                actual_output = estimate_tokens(str(batch_toc.entries))
 
-            # Record token usage
             usage.add_call(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                input_tokens=actual_input,
+                output_tokens=actual_output,
                 description=f"Batch {batch_idx + 1}/{total_batches}",
             )
 
@@ -1430,7 +1459,7 @@ class TOCGenerator:
             A tuple of (refined TOC, TokenUsage) with the improved TOC.
         """
         usage = TokenUsage()
-        model = self.llm.with_structured_output(TOC)
+        model = self.llm.with_structured_output(TOC, include_raw=True)
 
         # Extract reference text from first pages (may contain printed TOC)
         reference_text = self._extract_reference_toc_text(max_pages=max_pages_for_reference_toc)
@@ -1485,18 +1514,22 @@ must be PDF page numbers (not printed page numbers).
 
         # Make LLM call with retry logic
         console.print("[bold]Postprocessing TOC...[/bold]")
-        refined_toc = self._invoke_with_retry(model, messages, "TOC postprocessing", input_tokens)
+        refined_toc, usage_metadata = self._invoke_with_retry(model, messages, "TOC postprocessing", input_tokens)
 
         # Validate and correct page numbers if the LLM shifted to printed page numbers
         refined_toc = self._correct_postprocessed_page_numbers(toc, refined_toc, reference_text=reference_text)
 
-        # Estimate output tokens
-        output_tokens = estimate_tokens(str(refined_toc.entries))
+        # Prefer the provider's actual token usage; fall back to estimates.
+        if usage_metadata:
+            actual_input = usage_metadata.get("input_tokens") or input_tokens
+            actual_output = usage_metadata.get("output_tokens") or estimate_tokens(str(refined_toc.entries))
+        else:
+            actual_input = input_tokens
+            actual_output = estimate_tokens(str(refined_toc.entries))
 
-        # Record token usage
         usage.add_call(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
+            input_tokens=actual_input,
+            output_tokens=actual_output,
             description="TOC postprocessing",
         )
 

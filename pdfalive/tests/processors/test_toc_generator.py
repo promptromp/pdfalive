@@ -26,6 +26,7 @@ from pdfalive.processors.toc_generator import (
     _is_retryable_error,
     _normalize_snippet,
     _strip_subset_prefix,
+    _unpack_structured_response,
     filter_features_for_llm,
     serialize_features_compact,
 )
@@ -3912,3 +3913,87 @@ class TestFilterFeaturesForLlm:
         assert "First body line here." in user_content
         assert "Second body line here." not in user_content
         assert "Third body line here." not in user_content
+
+
+class TestRealTokenAccounting:
+    """Tests for reading actual usage_metadata instead of tiktoken estimates."""
+
+    USAGE = {"input_tokens": 1234, "output_tokens": 567, "total_tokens": 1801}
+
+    @pytest.fixture
+    def small_features(self):
+        return [
+            [
+                [
+                    TOCFeature(
+                        page_number=1,
+                        font_name="Times-Bold",
+                        font_size=16,
+                        text_length=23,
+                        text_snippet="Chapter 1: Introduction",
+                        y_position=0.1,
+                        is_bold=True,
+                    )
+                ]
+            ]
+        ]
+
+    @pytest.fixture
+    def parsed_toc(self):
+        return TOC(entries=[TOCEntry(title="Chapter 1: Introduction", page_number=1, level=1, confidence=0.9)])
+
+    def test_unpack_include_raw_dict_returns_parsed_and_usage(self, parsed_toc) -> None:
+        raw = MagicMock()
+        raw.usage_metadata = dict(self.USAGE)
+
+        parsed, usage = _unpack_structured_response({"raw": raw, "parsed": parsed_toc, "parsing_error": None})
+
+        assert parsed == parsed_toc
+        assert usage == self.USAGE
+
+    def test_unpack_plain_response_has_no_usage(self, parsed_toc) -> None:
+        parsed, usage = _unpack_structured_response(parsed_toc)
+
+        assert parsed == parsed_toc
+        assert usage is None
+
+    def test_unpack_raises_recorded_parsing_error(self) -> None:
+        parsing_error = ValueError("malformed structured output")
+
+        with pytest.raises(ValueError, match="malformed structured output"):
+            _unpack_structured_response({"raw": MagicMock(), "parsed": None, "parsing_error": parsing_error})
+
+    def test_unpack_include_raw_dict_without_raw_message(self, parsed_toc) -> None:
+        parsed, usage = _unpack_structured_response({"raw": None, "parsed": parsed_toc, "parsing_error": None})
+
+        assert parsed == parsed_toc
+        assert usage is None
+
+    def test_extraction_records_real_usage_when_available(self, mock_llm, small_features, parsed_toc) -> None:
+        raw = MagicMock()
+        raw.usage_metadata = dict(self.USAGE)
+        structured = MagicMock()
+        structured.invoke.return_value = {"raw": raw, "parsed": parsed_toc, "parsing_error": None}
+        mock_llm.with_structured_output.return_value = structured
+
+        generator = TOCGenerator(doc=MagicMock(), llm=mock_llm)
+        toc, usage = generator._extract_toc_paginated(small_features, request_delay=0)
+
+        assert toc.entries == parsed_toc.entries
+        assert usage.input_tokens == self.USAGE["input_tokens"]
+        assert usage.output_tokens == self.USAGE["output_tokens"]
+        mock_llm.with_structured_output.assert_called_once_with(TOC, include_raw=True)
+
+    def test_extraction_falls_back_to_estimates_without_usage_metadata(
+        self, mock_llm, small_features, parsed_toc
+    ) -> None:
+        structured = MagicMock()
+        structured.invoke.return_value = parsed_toc  # plain response, no raw message
+        mock_llm.with_structured_output.return_value = structured
+
+        generator = TOCGenerator(doc=MagicMock(), llm=mock_llm)
+        toc, usage = generator._extract_toc_paginated(small_features, request_delay=0)
+
+        assert toc.entries == parsed_toc.entries
+        assert usage.input_tokens > 0  # tiktoken estimate
+        assert usage.llm_calls == 1
