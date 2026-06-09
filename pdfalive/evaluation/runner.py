@@ -47,6 +47,7 @@ class GoldenFile(BaseModel):
 
     name: str = Field(description="Case name; must match the file stem")
     source_pdf: str = Field(description="PDF path, absolute or relative to the evals dir's parent")
+    book_title: str = Field(default="", description="Logical title of the source document, for humans")
     postprocess: bool = Field(default=True, description="Whether the pipeline runs with postprocessing")
     description: str = Field(default="", description="Human-readable provenance notes")
     entries: list[GoldenEntry] = Field(description="Ground-truth TOC entries")

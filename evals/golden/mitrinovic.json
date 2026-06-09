@@ -1,8 +1,9 @@
 {
   "name": "mitrinovic",
   "source_pdf": "data/ocr/mitrinovic.pdf",
+  "book_title": "Analytic Inequalities by D.S. Mitrinovic",
   "postprocess": true,
-  "description": "CANDIDATE golden seeded from the existing bookmarks in the data/ PDF (likely a prior pdfalive run). Pending human verification (2026-06-09). Pipeline runs against the pre-OCRed copy in data/ocr/.",
+  "description": "Golden seeded from pre-existing bookmarks, which the pipeline reproduces exactly. Scanned book: pipeline runs against a locally pre-OCRed copy (recreate via: pdfalive extract-text data/mitrinovic.pdf data/ocr/mitrinovic.pdf).",
   "entries": [
     {
       "level": 1,

@@ -1,8 +1,9 @@
 {
   "name": "geometry",
   "source_pdf": "data/geometry.pdf",
+  "book_title": "Geometry (2nd Edition) by S. Lang and G. Murrow",
   "postprocess": true,
-  "description": "Geometry (2nd Edition) by S. Lang and G. Murrow. Golden TOC verified by hand (2026-06-09) from a gpt-5.5 run with postprocess enabled.",
+  "description": "Golden TOC human-verified (2026-06-09) from a gpt-5.5 run with postprocess enabled.",
   "entries": [
     {
       "level": 1,
