@@ -21,11 +21,14 @@ from pdfalive.processors.toc_generator import (
     _compute_body_font_profile,
     _extract_features_from_page_range,
     _extract_toc_like_lines,
+    _heading_text_matches_title,
     _is_bold_font,
     _is_heading_candidate,
     _is_retryable_error,
     _normalize_snippet,
     _strip_subset_prefix,
+    _unpack_structured_response,
+    filter_features_for_llm,
     serialize_features_compact,
 )
 from pdfalive.tokens import TokenUsage
@@ -3710,3 +3713,413 @@ class TestCorrectPostprocessedNewEntries:
         result = gen._correct_postprocessed_page_numbers(original, refined)
         rare_entry = [e for e in result.entries if "Rare Topic" in e.title][0]
         assert rare_entry.page_number == 40  # kept as-is
+
+
+class TestFilterFeaturesForLlm:
+    """Tests for filter_features_for_llm (LLM payload token reduction)."""
+
+    BODY_FONT = "Times-Roman"
+    BODY_SIZE = 12.0
+    HEADING_FONT = "Times-Bold"
+    HEADING_SIZE = 16.0
+
+    @pytest.fixture
+    def make_feature(self):
+        def _make(
+            text: str,
+            page_number: int = 1,
+            font_name: str = self.BODY_FONT,
+            font_size: float = self.BODY_SIZE,
+            is_bold: bool = False,
+            y_position: float = 0.5,
+        ) -> TOCFeature:
+            return TOCFeature(
+                page_number=page_number,
+                font_name=font_name,
+                font_size=font_size,
+                text_length=len(text),
+                text_snippet=text,
+                y_position=y_position,
+                is_bold=is_bold,
+            )
+
+        return _make
+
+    @pytest.fixture
+    def make_block(self):
+        def _make(*spans: TOCFeature) -> list:
+            return [[span] for span in spans]  # one line per span
+
+        return _make
+
+    def heading(self, make_feature, text: str, page_number: int = 1) -> TOCFeature:
+        return make_feature(
+            text,
+            page_number=page_number,
+            font_name=self.HEADING_FONT,
+            font_size=self.HEADING_SIZE,
+            is_bold=True,
+            y_position=0.1,
+        )
+
+    @staticmethod
+    def flatten(features: list) -> list[TOCFeature]:
+        return [span for block in features for line in block for span in line]
+
+    def test_keeps_heading_and_first_body_span_drops_rest(self, make_feature, make_block) -> None:
+        features = [
+            make_block(self.heading(make_feature, "Chapter 1: Introduction")),
+            make_block(
+                make_feature("First body line on the page."),
+                make_feature("Second body line on the page."),
+                make_feature("Third body line on the page."),
+            ),
+        ]
+
+        filtered = filter_features_for_llm(features)
+
+        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        assert kept_texts == ["Chapter 1: Introduction", "First body line on the page."]
+
+    @pytest.mark.parametrize(
+        ("font_size", "is_bold", "text"),
+        [
+            (16.0, False, "Larger font heading text"),  # size-based
+            (12.0, True, "Bold heading at body size"),  # bold at body size
+            (12.0, False, "3.2 Numbered section title"),  # section numbering
+            (12.0, False, "C H A P T E R  O N E"),  # letter-spaced caps
+        ],
+    )
+    def test_heading_like_variants_are_kept(self, make_feature, make_block, font_size, is_bold, text) -> None:
+        body_blocks = [make_block(make_feature(f"Body filler line {ix}.", page_number=1)) for ix in range(5)]
+        candidate = make_feature(text, page_number=2, font_size=font_size, is_bold=is_bold)
+        features = body_blocks + [make_block(candidate)]
+
+        filtered = filter_features_for_llm(features, max_body_spans_per_page=0)
+
+        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        assert kept_texts == [text]
+
+    def test_body_span_budget_is_per_page_across_blocks(self, make_feature, make_block) -> None:
+        features = [
+            make_block(make_feature("Page 1 body A."), make_feature("Page 1 body B.")),
+            make_block(make_feature("Page 1 body C.")),
+            make_block(make_feature("Page 2 body A.", page_number=2)),
+            make_block(make_feature("Page 2 body B.", page_number=2)),
+        ]
+
+        filtered = filter_features_for_llm(features)
+
+        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        assert kept_texts == ["Page 1 body A.", "Page 2 body A."]
+
+    def test_body_span_budget_is_configurable(self, make_feature, make_block) -> None:
+        features = [
+            make_block(
+                make_feature("Body line one."),
+                make_feature("Body line two."),
+                make_feature("Body line three."),
+            )
+        ]
+
+        filtered = filter_features_for_llm(features, max_body_spans_per_page=2)
+
+        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        assert kept_texts == ["Body line one.", "Body line two."]
+
+    def test_empty_blocks_and_lines_are_pruned(self, make_feature, make_block) -> None:
+        features = [
+            make_block(make_feature("Kept body line.")),
+            make_block(make_feature("Dropped body line.")),
+        ]
+
+        filtered = filter_features_for_llm(features)
+
+        assert all(block for block in filtered)
+        assert all(line for block in filtered for line in block)
+        assert len(self.flatten(filtered)) == 1
+
+    def test_filtered_output_remains_serializable(self, make_feature, make_block) -> None:
+        features = [
+            make_block(self.heading(make_feature, "Chapter 1: Introduction")),
+            make_block(make_feature("Body line one."), make_feature("Body line two.")),
+        ]
+
+        serialized = serialize_features_compact(filter_features_for_llm(features))
+
+        assert "Chapter 1: Introduction" in serialized
+        assert "Body line one." in serialized
+        assert "Body line two." not in serialized
+
+    def test_empty_features_yield_empty_list(self) -> None:
+        assert filter_features_for_llm([]) == []
+
+    def test_run_sends_filtered_payload_to_llm(self, mock_llm) -> None:
+        """Integration: run() must send the filtered features to the LLM."""
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.get_toc.return_value = []
+        doc.name = None
+
+        page_height = 800.0
+        body_line = {
+            "font": self.BODY_FONT,
+            "size": self.BODY_SIZE,
+            "bbox": (50, 300, 400, 320),
+            "flags": 0,
+        }
+        page = MagicMock()
+        page.rect.height = page_height
+        page.get_text.return_value = {
+            "height": page_height,
+            "blocks": [
+                {
+                    "type": 0,
+                    "lines": [
+                        {
+                            "spans": [
+                                {
+                                    "font": self.HEADING_FONT,
+                                    "size": self.HEADING_SIZE,
+                                    "text": "Chapter 1: Introduction",
+                                    "bbox": (50, 100, 400, 120),
+                                    "flags": 16,
+                                }
+                            ]
+                        },
+                        {"spans": [{**body_line, "text": "First body line here."}]},
+                        {"spans": [{**body_line, "text": "Second body line here."}]},
+                        {"spans": [{**body_line, "text": "Third body line here."}]},
+                    ],
+                }
+            ],
+        }
+        doc.__iter__ = lambda self: iter([page])
+
+        captured_messages = []
+        mock_structured = MagicMock()
+
+        def capture(messages):
+            captured_messages.append(messages)
+            return TOC(entries=[TOCEntry(title="Chapter 1: Introduction", page_number=1, level=1, confidence=0.9)])
+
+        mock_structured.invoke.side_effect = capture
+        mock_llm.with_structured_output.return_value = mock_structured
+
+        generator = TOCGenerator(doc=doc, llm=mock_llm)
+        generator.run(output_file="/tmp/test_filter_output.pdf", force=True, request_delay=0)
+
+        user_content = captured_messages[0][1].content
+        assert "Chapter 1: Introduction" in user_content
+        assert "First body line here." in user_content
+        assert "Second body line here." not in user_content
+        assert "Third body line here." not in user_content
+
+
+class TestRealTokenAccounting:
+    """Tests for reading actual usage_metadata instead of tiktoken estimates."""
+
+    USAGE = {"input_tokens": 1234, "output_tokens": 567, "total_tokens": 1801}
+
+    @pytest.fixture
+    def small_features(self):
+        return [
+            [
+                [
+                    TOCFeature(
+                        page_number=1,
+                        font_name="Times-Bold",
+                        font_size=16,
+                        text_length=23,
+                        text_snippet="Chapter 1: Introduction",
+                        y_position=0.1,
+                        is_bold=True,
+                    )
+                ]
+            ]
+        ]
+
+    @pytest.fixture
+    def parsed_toc(self):
+        return TOC(entries=[TOCEntry(title="Chapter 1: Introduction", page_number=1, level=1, confidence=0.9)])
+
+    def test_unpack_include_raw_dict_returns_parsed_and_usage(self, parsed_toc) -> None:
+        raw = MagicMock()
+        raw.usage_metadata = dict(self.USAGE)
+
+        parsed, usage = _unpack_structured_response({"raw": raw, "parsed": parsed_toc, "parsing_error": None})
+
+        assert parsed == parsed_toc
+        assert usage == self.USAGE
+
+    def test_unpack_plain_response_has_no_usage(self, parsed_toc) -> None:
+        parsed, usage = _unpack_structured_response(parsed_toc)
+
+        assert parsed == parsed_toc
+        assert usage is None
+
+    def test_unpack_raises_recorded_parsing_error(self) -> None:
+        parsing_error = ValueError("malformed structured output")
+
+        with pytest.raises(ValueError, match="malformed structured output"):
+            _unpack_structured_response({"raw": MagicMock(), "parsed": None, "parsing_error": parsing_error})
+
+    def test_unpack_include_raw_dict_without_raw_message(self, parsed_toc) -> None:
+        parsed, usage = _unpack_structured_response({"raw": None, "parsed": parsed_toc, "parsing_error": None})
+
+        assert parsed == parsed_toc
+        assert usage is None
+
+    def test_extraction_records_real_usage_when_available(self, mock_llm, small_features, parsed_toc) -> None:
+        raw = MagicMock()
+        raw.usage_metadata = dict(self.USAGE)
+        structured = MagicMock()
+        structured.invoke.return_value = {"raw": raw, "parsed": parsed_toc, "parsing_error": None}
+        mock_llm.with_structured_output.return_value = structured
+
+        generator = TOCGenerator(doc=MagicMock(), llm=mock_llm)
+        toc, usage = generator._extract_toc_paginated(small_features, request_delay=0)
+
+        assert toc.entries == parsed_toc.entries
+        assert usage.input_tokens == self.USAGE["input_tokens"]
+        assert usage.output_tokens == self.USAGE["output_tokens"]
+        mock_llm.with_structured_output.assert_called_once_with(TOC, include_raw=True)
+
+    def test_extraction_falls_back_to_estimates_without_usage_metadata(
+        self, mock_llm, small_features, parsed_toc
+    ) -> None:
+        structured = MagicMock()
+        structured.invoke.return_value = parsed_toc  # plain response, no raw message
+        mock_llm.with_structured_output.return_value = structured
+
+        generator = TOCGenerator(doc=MagicMock(), llm=mock_llm)
+        toc, usage = generator._extract_toc_paginated(small_features, request_delay=0)
+
+        assert toc.entries == parsed_toc.entries
+        assert usage.input_tokens > 0  # tiktoken estimate
+        assert usage.llm_calls == 1
+
+
+class TestAnchoredHeadingMatching:
+    """Anchored matching mode: heading evidence must start the candidate block.
+
+    Guards against identity confusion between sections whose titles overlap:
+    leading-word variants ("Translator's preface..." vs "Preface..."), and
+    same-named chapter/subsection pairs ("Chapter 7 Differential forms" vs
+    "34. Differential forms").
+    """
+
+    @pytest.mark.parametrize(
+        ("title", "candidate", "expected"),
+        [
+            # Anchored: title matching at block start is accepted
+            ("Preface to the second edition", "Preface to the second edition The main part of this book", True),
+            ("Appendix 14 Poisson structures", "Appendix 14: Poisson structures Along with the classical", True),
+            # Leading-word variant is a DIFFERENT section: reject
+            ("Preface to the second edition", "Translator's preface to the second edition This edition", False),
+            # Title buried mid-block is weak evidence: reject
+            ("Appendix 14 Poisson structures", "Jacobi realized that Appendix 14 Poisson structures covers", False),
+            # Candidate with a conflicting leading designator is a different section
+            ("Chapter 7 Differential forms", "34. Differential forms Here we define exterior k-forms", False),
+            ("Chapter 7 Differential forms", "34: Differential forms", False),
+            # Bare same-title block without conflicting designator: accept (chapter opening page)
+            ("Chapter 7 Differential forms", "Differential forms", True),
+            # Candidate's leading number agreeing with the title is fine
+            ("Chapter 7 Differential forms", "7 Differential forms", True),
+            # Existing dotted-section-prefix discipline is preserved
+            ("6.6 Term Structure Models", "6.6 Term Structure Models In this section", True),
+            ("6.6 Term Structure Models", "6.7 Term Structure Models In this section", False),
+            # A short title core must not anchor onto a LONGER different heading
+            # ("Distance" is not "Distance and Angles")
+            ("1, §2. Distance", "Chapter 1: Distance and Angles", False),
+            ("1, §2. Distance", "2. DISTANCE", True),
+            # A title WITH designator must match a block carrying the same
+            # designator plus merged body text (heading + first paragraph in one block)
+            ("Chapter 7 Differential forms", "Chapter 7: Differential forms It is often useful to", True),
+            ("Chapter 34 Differential forms", "Chapter 7: Differential forms It is often useful to", False),
+        ],
+    )
+    def test_anchored_mode(self, title: str, candidate: str, expected: bool) -> None:
+        assert _heading_text_matches_title(title, candidate, anchored=True) is expected
+
+    @pytest.mark.parametrize(
+        ("title", "candidate"),
+        [
+            # Default (unanchored) mode keeps mid-text containment for whole-page checks
+            ("Preface to the second edition", "Some running header Preface to the second edition body text"),
+        ],
+    )
+    def test_unanchored_mode_still_matches_mid_text(self, title: str, candidate: str) -> None:
+        assert _heading_text_matches_title(title, candidate) is True
+
+
+class TestFuzzyRestorePrefixAlignment:
+    """Postprocess page restore must not conflate leading-word title variants."""
+
+    @pytest.fixture
+    def generator(self, mock_llm):
+        doc = MagicMock()
+        doc.page_count = 20
+        doc.name = None
+        page = MagicMock()
+        page.get_text.return_value = {"height": 800.0, "blocks": []}
+        doc.__getitem__ = lambda self, ix: page
+        doc.__iter__ = lambda self: iter([page] * 20)
+        return TOCGenerator(doc=doc, llm=mock_llm)
+
+    def test_leading_word_variant_titles_are_not_conflated(self, generator) -> None:
+        original = TOC(
+            entries=[
+                TOCEntry(title="Translator's preface to the second edition", page_number=12, level=1, confidence=0.9),
+            ]
+        )
+        refined = TOC(
+            entries=[
+                TOCEntry(title="Preface to the second edition", page_number=8, level=1, confidence=0.9),
+                TOCEntry(title="Translator's preface to the second edition", page_number=12, level=1, confidence=0.9),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        preface = next(e for e in result.entries if e.title == "Preface to the second edition")
+        translators = next(e for e in result.entries if "Translator" in e.title)
+        assert preface.page_number == 8  # NOT restored onto the translator's preface page
+        assert translators.page_number == 12
+
+    def test_end_truncated_titles_still_restore(self, generator) -> None:
+        """Feature snippets truncate title ends; those must keep matching."""
+        original = TOC(entries=[TOCEntry(title="Chapter 3: Risk Manag", page_number=55, level=1, confidence=0.9)])
+        refined = TOC(entries=[TOCEntry(title="Chapter 3: Risk Management", page_number=70, level=1, confidence=0.9)])
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert result.entries[0].page_number == 55  # restored from the truncated original
+
+    def test_cross_numbered_sections_are_not_conflated(self, generator) -> None:
+        """'2.9 Exercises' must not restore onto '1.8 Exercises' just because cores match."""
+        original = TOC(entries=[TOCEntry(title="1.8 Exercises", page_number=30, level=2, confidence=0.9)])
+        refined = TOC(
+            entries=[
+                TOCEntry(title="1.8 Exercises", page_number=30, level=2, confidence=0.9),
+                TOCEntry(title="2.9 Exercises", page_number=95, level=2, confidence=0.9),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        chapter2_exercises = next(e for e in result.entries if e.title == "2.9 Exercises")
+        assert chapter2_exercises.page_number == 95  # NOT restored to chapter 1's page
+
+    def test_unpack_missing_parsed_without_error_raises(self) -> None:
+        with pytest.raises(ValueError, match="parsed"):
+            _unpack_structured_response({"raw": MagicMock(), "parsed": None, "parsing_error": None})
+
+    def test_designator_dropped_by_printed_toc_still_restores(self, generator) -> None:
+        """Printed TOCs often omit the section designator the extraction kept."""
+        original = TOC(entries=[TOCEntry(title="1, §2. Distance", page_number=21, level=2, confidence=0.9)])
+        refined = TOC(entries=[TOCEntry(title="Distance", page_number=33, level=2, confidence=0.9)])
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert result.entries[0].page_number == 21

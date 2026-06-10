@@ -4,7 +4,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import click
 import pymupdf
@@ -14,6 +14,8 @@ from rich.console import Console
 from rich.table import Table
 
 from pdfalive.config import load_config_as_default_map
+from pdfalive.evaluation.metrics import SUMMARY_PAGE_TOLERANCE, EvalReport
+from pdfalive.evaluation.runner import EvalCase, EvalMode, discover_cases, run_eval_case
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
 from pdfalive.processors.rename_processor import RenameProcessor
@@ -373,6 +375,157 @@ def extract_text(
         if inplace and os.path.exists(actual_output_file):
             os.unlink(actual_output_file)
         raise
+
+
+@cli.command("eval")
+@click.option(
+    "--evals-dir",
+    type=click.Path(exists=True, file_okay=False),
+    default="evals",
+    help="Directory containing golden/ case files and cassettes/.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["replay", "record", "live"]),
+    default="replay",
+    help="replay: recorded LLM responses (free); record: live LLM, writes cassette; live: live LLM only.",
+)
+@click.option(
+    "--case",
+    "case_names",
+    multiple=True,
+    help="Run only the named case(s). May be repeated. Defaults to all cases.",
+)
+@click.option("--model-identifier", type=str, default="gpt-5.5", help="LLM model for record/live modes.")
+@click.option(
+    "--loose-replay",
+    is_flag=True,
+    default=False,
+    help="Replay responses by call order even if prompts have drifted since recording.",
+)
+@click.option(
+    "--request-delay",
+    type=float,
+    default=None,
+    help="Delay in seconds between LLM calls. Defaults to 0 for replay, pipeline default otherwise.",
+)
+@click.option(
+    "--num-processes",
+    type=int,
+    default=None,
+    help="Parallel processes for feature extraction. Defaults to CPU count - 1.",
+)
+@click.option("--min-f1", type=float, default=None, help="Exit with code 1 if any case's F1 falls below this.")
+@click.option(
+    "--min-page-accuracy",
+    type=float,
+    default=None,
+    help="Exit with code 1 if any case's page accuracy (±1 page) falls below this.",
+)
+@traceable
+def eval_command(
+    evals_dir: str,
+    mode: str,
+    case_names: tuple[str, ...],
+    model_identifier: str,
+    loose_replay: bool,
+    request_delay: float | None,
+    num_processes: int | None,
+    min_f1: float | None,
+    min_page_accuracy: float | None,
+) -> None:
+    """Evaluate TOC generation quality against golden (ground truth) data.
+
+    Discovers cases from golden files under EVALS_DIR/golden/ and scores the
+    pipeline's output against them. Use --mode record once (live LLM) to create
+    a cassette, then --mode replay for free, deterministic evaluation runs.
+    """
+    cases = discover_cases(Path(evals_dir))
+
+    if case_names:
+        cases_by_name = {case.name: case for case in cases}
+        unknown = [name for name in case_names if name not in cases_by_name]
+        if unknown:
+            raise click.UsageError(
+                f"Unknown case(s): {', '.join(unknown)}. Available: {', '.join(sorted(cases_by_name)) or '(none)'}"
+            )
+        cases = [cases_by_name[name] for name in case_names]
+
+    if not cases:
+        raise click.UsageError(f"No evaluation cases found under {evals_dir}/golden/.")
+
+    eval_mode = cast(EvalMode, mode)
+    reports: list[tuple[EvalCase, EvalReport]] = []
+    for case in cases:
+        console.print(f"Evaluating case [bold cyan]{case.name}[/bold cyan] ([magenta]{eval_mode}[/magenta] mode)...")
+        report = run_eval_case(
+            case,
+            mode=eval_mode,
+            model_identifier=model_identifier,
+            strict_replay=not loose_replay,
+            request_delay=request_delay,
+            num_processes=num_processes,
+        )
+        reports.append((case, report))
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Case", style="cyan")
+    table.add_column("Golden", justify="right")
+    table.add_column("Generated", justify="right")
+    table.add_column("Matched", justify="right")
+    table.add_column("Precision", justify="right")
+    table.add_column("Recall", justify="right")
+    table.add_column("F1", justify="right")
+    table.add_column("Page =", justify="right")
+    table.add_column("Page ±1", justify="right")
+    table.add_column("Level", justify="right")
+
+    for case, report in reports:
+        summary = report.summary()
+        table.add_row(
+            case.name,
+            str(summary["golden_entries"]),
+            str(summary["generated_entries"]),
+            str(summary["matched"]),
+            f"{summary['precision']:.2f}",
+            f"{summary['recall']:.2f}",
+            f"{summary['f1']:.2f}",
+            f"{summary['page_accuracy_exact']:.2f}",
+            f"{summary['page_accuracy_within_1']:.2f}",
+            f"{summary['level_accuracy']:.2f}",
+        )
+
+    console.print()
+    console.print(table)
+
+    for case, report in reports:
+        if report.missing:
+            console.print(f"\n[yellow]{case.name}: {len(report.missing)} missing golden entries:[/yellow]")
+            for entry in report.missing:
+                console.print(f"  - {entry.title} (page {entry.page_number}, level {entry.level})")
+        if report.spurious:
+            console.print(f"\n[yellow]{case.name}: {len(report.spurious)} spurious generated entries:[/yellow]")
+            for spurious_entry in report.spurious:
+                console.print(
+                    f"  - {spurious_entry.title} (page {spurious_entry.page_number}, level {spurious_entry.level})"
+                )
+
+    failures = []
+    for case, report in reports:
+        if min_f1 is not None and report.f1 < min_f1:
+            failures.append(f"{case.name}: F1 {report.f1:.2f} < {min_f1:.2f}")
+        # Gate on the same tolerance the summary table's "Page ±N" column uses.
+        page_accuracy = report.page_accuracy(tolerance=SUMMARY_PAGE_TOLERANCE)
+        if min_page_accuracy is not None and page_accuracy < min_page_accuracy:
+            failures.append(
+                f"{case.name}: page accuracy (±{SUMMARY_PAGE_TOLERANCE}) {page_accuracy:.2f} < {min_page_accuracy:.2f}"
+            )
+
+    if failures:
+        console.print()
+        for failure in failures:
+            console.print(f"[bold red]Threshold failure:[/bold red] {failure}")
+        raise SystemExit(1)
 
 
 @cli.command("rename")

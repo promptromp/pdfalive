@@ -1,0 +1,439 @@
+{
+  "name": "arnold",
+  "source_pdf": "data/ocr/arnold.pdf",
+  "book_title": "Mathematical Methods of Classical Mechanics (2nd Edition) by V.I. Arnold",
+  "postprocess": true,
+  "description": "Golden TOC human-verified (2026-06-09): pipeline output (86 entries) with 3 corrections verified against page text (Appendix 14 -> p473, Chapter 7 -> p180 [same-title-as-subsection-34 confusion], Preface to 2nd ed -> p8) and one level fix (s32 -> L3). An earlier 221-entry bookmark set had systematically late-by-one pages; its lettered subsections remain a future coverage target. Scanned book: pipeline runs against a locally pre-OCRed copy (recreate via: pdfalive extract-text data/arnold.pdf data/ocr/arnold.pdf).",
+  "entries": [
+    {
+      "level": 1,
+      "title": "Preface",
+      "page_number": 6
+    },
+    {
+      "level": 1,
+      "title": "Preface to the second edition",
+      "page_number": 8
+    },
+    {
+      "level": 1,
+      "title": "Translator’s preface to the second edition",
+      "page_number": 12
+    },
+    {
+      "level": 1,
+      "title": "Contents",
+      "page_number": 14
+    },
+    {
+      "level": 1,
+      "title": "PART I NEWTONIAN MECHANICS",
+      "page_number": 18
+    },
+    {
+      "level": 2,
+      "title": "Chapter 1 Experimental facts",
+      "page_number": 20
+    },
+    {
+      "level": 3,
+      "title": "1. The principles of relativity and determinacy",
+      "page_number": 20
+    },
+    {
+      "level": 3,
+      "title": "2. The Galilean group and Newton’s equations",
+      "page_number": 21
+    },
+    {
+      "level": 3,
+      "title": "3. Examples of mechanical systems",
+      "page_number": 28
+    },
+    {
+      "level": 2,
+      "title": "Chapter 2 Investigation of the equations of motion",
+      "page_number": 32
+    },
+    {
+      "level": 3,
+      "title": "4. Systems with one degree of freedom",
+      "page_number": 32
+    },
+    {
+      "level": 3,
+      "title": "5. Systems with two degrees of freedom",
+      "page_number": 39
+    },
+    {
+      "level": 3,
+      "title": "6. Conservative force fields",
+      "page_number": 45
+    },
+    {
+      "level": 3,
+      "title": "7. Angular momentum",
+      "page_number": 47
+    },
+    {
+      "level": 3,
+      "title": "8. Investigation of motion in a central field",
+      "page_number": 50
+    },
+    {
+      "level": 3,
+      "title": "9. The motion of a point in three-space",
+      "page_number": 59
+    },
+    {
+      "level": 3,
+      "title": "10. Motions of a system of n points",
+      "page_number": 61
+    },
+    {
+      "level": 3,
+      "title": "11. The method of similarity",
+      "page_number": 67
+    },
+    {
+      "level": 1,
+      "title": "PART II LAGRANGIAN MECHANICS",
+      "page_number": 70
+    },
+    {
+      "level": 2,
+      "title": "Chapter 3 Variational principles",
+      "page_number": 72
+    },
+    {
+      "level": 3,
+      "title": "12. Calculus of variations",
+      "page_number": 72
+    },
+    {
+      "level": 3,
+      "title": "13. Lagrange’s equations",
+      "page_number": 76
+    },
+    {
+      "level": 3,
+      "title": "14. Legendre transformations",
+      "page_number": 78
+    },
+    {
+      "level": 3,
+      "title": "15. Hamilton’s equations",
+      "page_number": 82
+    },
+    {
+      "level": 3,
+      "title": "16. Liouville’s theorem",
+      "page_number": 85
+    },
+    {
+      "level": 2,
+      "title": "Chapter 4 Lagrangian mechanics on manifolds",
+      "page_number": 92
+    },
+    {
+      "level": 3,
+      "title": "17. Holonomic constraints",
+      "page_number": 92
+    },
+    {
+      "level": 3,
+      "title": "18. Differentiable manifolds",
+      "page_number": 94
+    },
+    {
+      "level": 3,
+      "title": "19. Lagrangian dynamical systems",
+      "page_number": 100
+    },
+    {
+      "level": 3,
+      "title": "20. E. Noether’s theorem",
+      "page_number": 105
+    },
+    {
+      "level": 3,
+      "title": "21. D’Alembert’s principle",
+      "page_number": 108
+    },
+    {
+      "level": 2,
+      "title": "Chapter 5 Oscillations",
+      "page_number": 115
+    },
+    {
+      "level": 3,
+      "title": "22. Linearization",
+      "page_number": 115
+    },
+    {
+      "level": 3,
+      "title": "23. Small oscillations",
+      "page_number": 120
+    },
+    {
+      "level": 3,
+      "title": "24. Behavior of characteristic frequencies",
+      "page_number": 127
+    },
+    {
+      "level": 3,
+      "title": "25. Parametric resonance",
+      "page_number": 130
+    },
+    {
+      "level": 2,
+      "title": "Chapter 6 Rigid Bodies",
+      "page_number": 140
+    },
+    {
+      "level": 3,
+      "title": "26. Motion in a moving coordinate system",
+      "page_number": 140
+    },
+    {
+      "level": 3,
+      "title": "27. Inertial forces and the Coriolis force",
+      "page_number": 146
+    },
+    {
+      "level": 3,
+      "title": "28. Rigid bodies",
+      "page_number": 150
+    },
+    {
+      "level": 3,
+      "title": "29. Euler’s equations. Poinsot’s description of the motion",
+      "page_number": 159
+    },
+    {
+      "level": 3,
+      "title": "30. Lagrange’s top",
+      "page_number": 165
+    },
+    {
+      "level": 3,
+      "title": "31. Sleeping tops and fast tops",
+      "page_number": 171
+    },
+    {
+      "level": 1,
+      "title": "PART III HAMILTONIAN MECHANICS",
+      "page_number": 178
+    },
+    {
+      "level": 2,
+      "title": "Chapter 7 Differential forms",
+      "page_number": 180
+    },
+    {
+      "level": 3,
+      "title": "32. Exterior forms",
+      "page_number": 180
+    },
+    {
+      "level": 3,
+      "title": "33. Exterior multiplication",
+      "page_number": 187
+    },
+    {
+      "level": 3,
+      "title": "34. Differential forms",
+      "page_number": 191
+    },
+    {
+      "level": 3,
+      "title": "35. Integration of differential forms",
+      "page_number": 198
+    },
+    {
+      "level": 3,
+      "title": "36. Exterior differentiation",
+      "page_number": 205
+    },
+    {
+      "level": 2,
+      "title": "Chapter 8 Symplectic manifolds",
+      "page_number": 218
+    },
+    {
+      "level": 3,
+      "title": "37. Symplectic structures on manifolds",
+      "page_number": 218
+    },
+    {
+      "level": 3,
+      "title": "38. Hamiltonian phase flows and their integral invariants",
+      "page_number": 221
+    },
+    {
+      "level": 3,
+      "title": "39. The Lie algebra of vector fields",
+      "page_number": 225
+    },
+    {
+      "level": 3,
+      "title": "40. The Lie algebra of hamiltonian functions",
+      "page_number": 231
+    },
+    {
+      "level": 3,
+      "title": "41. Symplectic geometry",
+      "page_number": 236
+    },
+    {
+      "level": 3,
+      "title": "42. Parametric resonance in systems with many degrees of freedom",
+      "page_number": 242
+    },
+    {
+      "level": 3,
+      "title": "43. A symplectic atlas",
+      "page_number": 246
+    },
+    {
+      "level": 2,
+      "title": "Chapter 9 Canonical formalism",
+      "page_number": 250
+    },
+    {
+      "level": 3,
+      "title": "44. The integral invariant of Poincaré-Cartan",
+      "page_number": 250
+    },
+    {
+      "level": 3,
+      "title": "45. Applications of the integral invariant of Poincaré-Cartan",
+      "page_number": 257
+    },
+    {
+      "level": 3,
+      "title": "46. Huygens’ principle",
+      "page_number": 265
+    },
+    {
+      "level": 3,
+      "title": "47. The Hamilton-Jacobi method for integrating Hamilton’s canonical equations",
+      "page_number": 275
+    },
+    {
+      "level": 3,
+      "title": "48. Generating functions",
+      "page_number": 283
+    },
+    {
+      "level": 2,
+      "title": "Chapter 10 Introduction to perturbation theory",
+      "page_number": 288
+    },
+    {
+      "level": 3,
+      "title": "49. Integrable systems",
+      "page_number": 288
+    },
+    {
+      "level": 3,
+      "title": "50. Action-angle variables",
+      "page_number": 296
+    },
+    {
+      "level": 3,
+      "title": "51. Averaging",
+      "page_number": 302
+    },
+    {
+      "level": 3,
+      "title": "52. Averaging of perturbations",
+      "page_number": 308
+    },
+    {
+      "level": 1,
+      "title": "Appendix 1 Riemannian curvature",
+      "page_number": 318
+    },
+    {
+      "level": 1,
+      "title": "Appendix 2 Geodesics of left-invariant metrics on Lie groups and the hydrodynamics of ideal fluids",
+      "page_number": 335
+    },
+    {
+      "level": 1,
+      "title": "Appendix 3 Symplectic structures on algebraic manifolds",
+      "page_number": 360
+    },
+    {
+      "level": 1,
+      "title": "Appendix 4 Contact structures",
+      "page_number": 366
+    },
+    {
+      "level": 1,
+      "title": "Appendix 5 Dynamical systems with symmetries",
+      "page_number": 388
+    },
+    {
+      "level": 1,
+      "title": "Appendix 6 Normal forms of quadratic hamiltonians",
+      "page_number": 398
+    },
+    {
+      "level": 1,
+      "title": "Appendix 7 Normal forms of hamiltonian systems near stationary points and closed trajectories",
+      "page_number": 402
+    },
+    {
+      "level": 1,
+      "title": "Appendix 8 Theory of perturbations of conditionally periodic motion, and Kolmogorov’s theorem",
+      "page_number": 416
+    },
+    {
+      "level": 1,
+      "title": "Appendix 9 Poincaré’s geometric theorem, its generalizations and applications",
+      "page_number": 433
+    },
+    {
+      "level": 1,
+      "title": "Appendix 10 Multiplicities of characteristic frequencies, and ellipsoids depending on parameters",
+      "page_number": 442
+    },
+    {
+      "level": 1,
+      "title": "Appendix 11 Short wave asymptotics",
+      "page_number": 455
+    },
+    {
+      "level": 1,
+      "title": "Appendix 12 Lagrangian singularities",
+      "page_number": 463
+    },
+    {
+      "level": 1,
+      "title": "Appendix 13 The Korteweg-de Vries equation",
+      "page_number": 470
+    },
+    {
+      "level": 1,
+      "title": "Appendix 14 Poisson structures",
+      "page_number": 473
+    },
+    {
+      "level": 1,
+      "title": "Appendix 15 On elliptic coordinates",
+      "page_number": 486
+    },
+    {
+      "level": 1,
+      "title": "Appendix 16 Singularities of ray systems",
+      "page_number": 497
+    },
+    {
+      "level": 1,
+      "title": "Index",
+      "page_number": 528
+    }
+  ]
+}

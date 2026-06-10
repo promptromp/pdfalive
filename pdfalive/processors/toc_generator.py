@@ -223,8 +223,54 @@ def _extract_section_prefix(title: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _heading_text_matches_title(title: str, candidate_text: str) -> bool:
-    """Match heading text while preserving section-prefix evidence when present."""
+# Leading designator tokens in normalized (punctuation-free, lowercased) titles:
+# bare numbers ("34", "1 2") and label words with an optional short identifier
+# ("chapter 7", "appendix b", "part iii", or a bare "chapter" when OCR loses
+# the number glyph).
+_LEADING_DESIGNATOR_PATTERN = re.compile(r"^(?:(?:chapter|part|appendix|section)\s+(?:\S{1,4}\s+)?|\d+\s+)")
+
+_LEADING_NUMBER_PATTERN = re.compile(r"^\s*(\d+)")
+
+
+def _strip_leading_designators(normalized_title: str) -> str:
+    """Strip leading numbering/label designators from a normalized title.
+
+    Section identity lives in the title's core text: "chapter 3 risk management"
+    and "risk management" name the same section, while "translators preface" and
+    "preface" do not. Never strips down to an empty string.
+    """
+    stripped = normalized_title
+    while True:
+        match = _LEADING_DESIGNATOR_PATTERN.match(stripped)
+        if not match or match.end() >= len(stripped):
+            return stripped
+        stripped = stripped[match.end() :]
+
+
+def _extract_leading_number(text: str) -> str | None:
+    """Extract a leading integer designator from raw (unnormalized) text."""
+    match = _LEADING_NUMBER_PATTERN.match(text)
+    return match.group(1) if match else None
+
+
+def _heading_text_matches_title(title: str, candidate_text: str, anchored: bool = False) -> bool:
+    """Match heading text while preserving section-prefix evidence when present.
+
+    In anchored mode (used when *locating* a heading's page), evidence must be
+    structural, not incidental:
+    - The title must match at the START of the candidate text. Headings begin
+      blocks; a title appearing mid-block ("...see Preface to the second
+      edition...") or behind extra leading words ("Translator's preface to the
+      second edition") is a different or merely-referenced section.
+    - A candidate that is a sub-phrase of the title (e.g. block "Differential
+      forms" for title "Chapter 7 Differential forms") is accepted only if the
+      candidate's own leading number designator, when present, agrees with the
+      title's numbering — block "34. Differential forms" must not satisfy a
+      title designated chapter 7.
+
+    The default (unanchored) mode keeps loose containment for presence checks
+    over large text spans (whole pages, page zones).
+    """
     candidate_normalized = _normalize_snippet(candidate_text)
     if len(candidate_normalized) < _HEADING_MIN_LENGTH:
         return False
@@ -234,14 +280,50 @@ def _heading_text_matches_title(title: str, candidate_text: str) -> bool:
     if appendix_without_prefix != title:
         search_texts.append(_normalize_snippet(appendix_without_prefix))
 
+    candidate_leading_number = _extract_leading_number(candidate_text)
+    title_numbers = re.findall(r"\d+", title)
+    candidate_consistent = (
+        candidate_leading_number is None or candidate_leading_number in title_numbers or not title_numbers
+    )
+
+    # Anchoring compares designator-stripped cores: a heading block may carry a
+    # designator the title lacks ("Chapter 4: Numerical Differentiation" for
+    # title "Numerical Differentiation") and vice versa.
+    candidate_core = _strip_leading_designators(candidate_normalized)
+
     content_matches = False
     for search_text in search_texts:
         if len(search_text) < _HEADING_MIN_LENGTH:
             continue
-        if search_text in candidate_normalized:
+
+        # Forward: title contained in the candidate (anchored: at its start only).
+        if anchored:
+            if candidate_consistent:
+                # Full title at the candidate's start: heading may continue into
+                # merged body text. Checked against both the normalized candidate
+                # (block carries the same designator as the title) and its
+                # designator-stripped core (block omits the designator).
+                if candidate_normalized.startswith(search_text) or candidate_core.startswith(search_text):
+                    content_matches = True
+                    break
+                # Relaxed variant: both sides reduced to designator-stripped
+                # cores. With designators gone the cores carry all remaining
+                # identity, so they must match EXACTLY — a prefix match would
+                # conflate a short title with a longer different heading
+                # ("Distance" vs "Distance and Angles").
+                search_core = _strip_leading_designators(search_text)
+                if (
+                    search_core != search_text
+                    and len(search_core) >= _FUZZY_MIN_SUBSTRING_LEN
+                    and candidate_core == search_core
+                ):
+                    content_matches = True
+                    break
+        elif search_text in candidate_normalized:
             content_matches = True
             break
 
+        # Reverse: candidate is a sub-phrase of the title (short heading block).
         shorter_len = min(len(search_text), len(candidate_normalized))
         longer_len = max(len(search_text), len(candidate_normalized))
         if (
@@ -249,6 +331,8 @@ def _heading_text_matches_title(title: str, candidate_text: str) -> bool:
             and candidate_normalized in search_text
             and shorter_len / longer_len >= _FUZZY_MIN_COVERAGE_RATIO
         ):
+            if anchored and not candidate_consistent:
+                continue
             content_matches = True
             break
 
@@ -309,6 +393,46 @@ RETRY_MAX_WAIT_SECONDS = 120  # Maximum wait time between retries
 
 # Exception class name fragments that indicate non-retryable client errors
 _NON_RETRYABLE_PATTERNS = ("ContextOverflow", "BadRequest", "InvalidRequest", "ValidationError")
+
+
+def _unpack_structured_response(response) -> tuple[TOC, dict | None]:
+    """Unpack a structured-output response into (parsed, usage_metadata).
+
+    Handles both shapes:
+    - include_raw=True dicts: {"raw": AIMessage, "parsed": model, "parsing_error": ...}
+      — raises the recorded parsing error if present (so retry logic applies),
+      and reads the provider's actual token usage from the raw message.
+    - plain parsed models (legacy/mocked paths) — no usage metadata available.
+    """
+    if isinstance(response, dict) and "parsed" in response:
+        parsing_error = response.get("parsing_error")
+        if parsing_error is not None:
+            raise parsing_error
+        parsed = response["parsed"]
+        if parsed is None:
+            # Empty/refusal completions can yield parsed=None without a recorded
+            # error; raise so the retry policy can absorb a transient flake.
+            raise ValueError("Structured output response contained no parsed result")
+        raw = response.get("raw")
+        usage_metadata = getattr(raw, "usage_metadata", None) if raw is not None else None
+        return parsed, usage_metadata
+    return response, getattr(response, "usage_metadata", None)
+
+
+def _resolve_token_counts(usage_metadata: dict | None, estimated_input: int, parsed: TOC) -> tuple[int, int]:
+    """Resolve (input, output) token counts for a structured LLM call.
+
+    Prefers the provider's actual usage_metadata (which includes reasoning
+    tokens); falls back to tiktoken estimates when unavailable (legacy cassette
+    replays, providers without usage reporting).
+    """
+    estimated_output = estimate_tokens(str(parsed.entries))
+    if not usage_metadata:
+        return estimated_input, estimated_output
+    return (
+        usage_metadata.get("input_tokens") or estimated_input,
+        usage_metadata.get("output_tokens") or estimated_output,
+    )
 
 
 def _is_retryable_error(exception: BaseException) -> bool:
@@ -479,6 +603,74 @@ def serialize_features_compact(features: list) -> str:
     return "\n".join(lines)
 
 
+# Maximum non-heading (body) spans per page kept in the LLM payload. One body span
+# per page preserves page anchoring and the font-size baseline while dropping the
+# bulk of body text, which carries no TOC signal (~60% of payload tokens).
+_MAX_BODY_SPANS_PER_PAGE_FOR_LLM = 1
+
+
+def _is_heading_like_feature(span: TOCFeature, body_font_size: float) -> bool:
+    """Classify an extracted TOCFeature as heading-like (vs body text).
+
+    Applies the same shared criteria as _is_heading_candidate, but on
+    TOCFeature objects (post-extraction) rather than raw PyMuPDF span dicts.
+    """
+    return _passes_heading_criteria(
+        text=span.text_snippet.strip(),
+        full_text_length=span.text_length,
+        font_size=span.font_size,
+        is_bold=bool(span.is_bold),
+        body_font_size=body_font_size,
+    )
+
+
+def filter_features_for_llm(features: list, max_body_spans_per_page: int = _MAX_BODY_SPANS_PER_PAGE_FOR_LLM) -> list:
+    """Reduce the feature payload sent to the LLM by dropping low-signal body spans.
+
+    Keeps all heading-like spans (larger font, bold at body size, section
+    numbering, letter-spaced caps) plus the first `max_body_spans_per_page`
+    body spans per page. The retained body span keeps every page represented
+    in the payload (page anchoring) and gives the LLM a body-font baseline —
+    and is typically the running header or first paragraph line, preserving
+    the y-position guidance in the prompt.
+
+    The full (unfiltered) features must still be used for deterministic
+    corrections and the postprocess summary; this filter only shrinks the
+    LLM payload.
+
+    Args:
+        features: Nested list of TOCFeature objects (blocks > lines > spans).
+        max_body_spans_per_page: Body spans to retain per page.
+
+    Returns:
+        A filtered nested list with the same blocks > lines > spans structure;
+        empty lines and blocks are pruned.
+    """
+    _, body_font_size = _compute_body_font_profile(features)
+
+    body_spans_kept: dict[int, int] = {}
+    filtered: list[list] = []
+
+    for block in features:
+        filtered_block: list[list] = []
+        for line in block:
+            filtered_line = []
+            for span in line:
+                if not isinstance(span, TOCFeature):
+                    continue
+                if _is_heading_like_feature(span, body_font_size):
+                    filtered_line.append(span)
+                elif body_spans_kept.get(span.page_number, 0) < max_body_spans_per_page:
+                    body_spans_kept[span.page_number] = body_spans_kept.get(span.page_number, 0) + 1
+                    filtered_line.append(span)
+            if filtered_line:
+                filtered_block.append(filtered_line)
+        if filtered_block:
+            filtered.append(filtered_block)
+
+    return filtered
+
+
 def _estimate_block_tokens(block: list) -> int:
     """Estimate the token count for a single feature block in compact format.
 
@@ -540,19 +732,47 @@ def _compute_body_font_profile(features: list) -> tuple[str, float]:
     return counter.most_common(1)[0][0]
 
 
+def _passes_heading_criteria(
+    text: str,
+    full_text_length: int,
+    font_size: float,
+    is_bold: bool,
+    body_font_size: float,
+    font_size_ratio: float = _HEADING_FONT_SIZE_RATIO,
+) -> bool:
+    """Shared heading classification core used for both raw spans and TOCFeatures.
+
+    A text run is heading-like when its length is within heading bounds AND:
+    - font size >= font_size_ratio * body font size, OR
+    - bold at >= body font size, OR
+    - it matches the section numbering pattern, OR
+    - it is letter-spaced ALL-CAPS (e.g. "C H A P T E R  I").
+
+    The bold-based check always uses the true body_font_size; only the
+    size-based check uses font_size_ratio.
+    """
+    if len(text) < _HEADING_MIN_LENGTH or full_text_length > _HEADING_MAX_LENGTH:
+        return False
+
+    if body_font_size > 0 and font_size >= body_font_size * font_size_ratio:
+        return True
+
+    if is_bold and body_font_size > 0 and font_size >= body_font_size:
+        return True
+
+    if _SECTION_NUMBER_PATTERN.match(text):
+        return True
+
+    return bool(_LETTERSPACED_PATTERN.match(text))
+
+
 def _is_heading_candidate(
     span: dict,
     body_font_name: str,
     body_font_size: float,
     font_size_ratio: float = _HEADING_FONT_SIZE_RATIO,
 ) -> bool:
-    """Determine if a span is likely a heading based on font characteristics.
-
-    A span is a heading candidate if:
-    - Font size >= font_size_ratio * body font size, OR
-    - Bold font AND font size >= body font size, OR
-    - Text matches section numbering pattern (e.g. "1.", "Chapter", "Section")
-    AND text length is between 3-200 chars.
+    """Determine if a raw PyMuPDF span is likely a heading (see _passes_heading_criteria).
 
     Args:
         span: A PyMuPDF span dict.
@@ -561,34 +781,16 @@ def _is_heading_candidate(
         font_size_ratio: Minimum font size ratio vs body text for size-based detection.
             Defaults to _HEADING_FONT_SIZE_RATIO (1.15). Pass a higher value
             (e.g. _HEADING_FONT_SIZE_RATIO_PHASE2) for stricter Phase 2 scanning.
-            This does NOT affect the bold-based check, which always uses body_font_size.
-
-    Returns:
-        True if the span looks like a heading.
     """
     text = span.get("text", "").strip()
-    text_len = len(text)
-
-    if text_len < _HEADING_MIN_LENGTH or text_len > _HEADING_MAX_LENGTH:
-        return False
-
-    font_size = span.get("size", 0.0)
-    is_bold = _is_bold_font(span)
-
-    # Size-based: significantly larger than body text
-    if body_font_size > 0 and font_size >= body_font_size * font_size_ratio:
-        return True
-
-    # Bold + at least body size
-    if is_bold and body_font_size > 0 and font_size >= body_font_size:
-        return True
-
-    # Section numbering pattern
-    if _SECTION_NUMBER_PATTERN.match(text):
-        return True
-
-    # Letter-spaced ALL-CAPS text (e.g. "C H A P T E R  I")
-    return bool(_LETTERSPACED_PATTERN.match(text))
+    return _passes_heading_criteria(
+        text=text,
+        full_text_length=len(text),
+        font_size=span.get("size", 0.0),
+        is_bold=_is_bold_font(span),
+        body_font_size=body_font_size,
+        font_size_ratio=font_size_ratio,
+    )
 
 
 def _merge_line_spans(spans: list[dict], text_snippet_length: int) -> dict:
@@ -726,7 +928,7 @@ class TOCGenerator:
 
     def run(
         self,
-        output_file: str,
+        output_file: str | None,
         force: bool = False,
         request_delay: float = DEFAULT_REQUEST_DELAY_SECONDS,
         postprocess: bool = False,
@@ -734,7 +936,8 @@ class TOCGenerator:
         """Generate the table of contents.
 
         Args:
-            output_file: Path to save the modified PDF with TOC.
+            output_file: Path to save the modified PDF with TOC, or None to only
+                set the TOC on the in-memory document without saving.
             force: If True, overwrite existing TOC. Otherwise raise if TOC exists.
             request_delay: Delay in seconds between LLM calls to avoid rate limiting.
             postprocess: If True, run a postprocessing step to clean up and improve the TOC.
@@ -752,7 +955,12 @@ class TOCGenerator:
             )
 
         features = self._extract_features(self.doc)
-        toc, usage = self._extract_toc(features, request_delay=request_delay)
+
+        # Send a reduced payload to the LLM: body text beyond one span per page
+        # carries no TOC signal. The full features are kept for the deterministic
+        # corrections and postprocess summary below.
+        llm_features = filter_features_for_llm(features)
+        toc, usage = self._extract_toc(llm_features, request_delay=request_delay)
 
         # Deterministic correction: fix entries that point to running headers
         # instead of actual section starts (e.g., when a section starts near the
@@ -772,7 +980,8 @@ class TOCGenerator:
         toc = toc.sort_by_page()
         toc = toc.sanitize_hierarchy()
         self.doc.set_toc(toc.to_list())
-        self.doc.save(output_file)
+        if output_file is not None:
+            self.doc.save(output_file)
 
         return usage
 
@@ -1142,17 +1351,17 @@ class TOCGenerator:
         if current_batch:
             yield current_batch
 
-    def _invoke_with_retry(self, model, messages, batch_description: str, input_tokens: int) -> TOC:
+    def _invoke_with_retry(self, model, messages, batch_description: str, input_tokens: int) -> tuple[TOC, dict | None]:
         """Invoke the LLM with retry logic for rate limiting.
 
         Args:
-            model: The LLM model with structured output.
+            model: The LLM model with structured output (include_raw supported).
             messages: The messages to send.
             batch_description: Description of the current batch for logging.
             input_tokens: Estimated input tokens for logging.
 
         Returns:
-            The TOC response from the LLM.
+            Tuple of (parsed TOC, provider usage_metadata or None when unavailable).
         """
 
         def _log_retry(retry_state) -> None:
@@ -1184,18 +1393,21 @@ class TOCGenerator:
             before_sleep=_log_retry,
             reraise=True,
         )
-        def _invoke():
-            return model.invoke(messages)
+        def _invoke() -> tuple[TOC, dict | None]:
+            # Unpack inside the retried call so structured-output parsing
+            # errors participate in the retry policy.
+            parsed, usage_metadata = _unpack_structured_response(model.invoke(messages))
+            return cast(TOC, parsed), usage_metadata
 
         console.print(f"  [dim]Invoking LLM for {batch_description} (~{input_tokens:,} input tokens)...[/dim]")
         start_time = time.time()
 
-        response = _invoke()
+        parsed, usage_metadata = _invoke()
 
         elapsed = time.time() - start_time
         console.print(f"  [green]Completed {batch_description} in {elapsed:.1f}s[/green]")
 
-        return cast(TOC, response)
+        return parsed, usage_metadata
 
     def _extract_toc_paginated(
         self,
@@ -1222,7 +1434,9 @@ class TOCGenerator:
         """
         usage = TokenUsage()
         merged_toc = TOC(entries=[])
-        model = self.llm.with_structured_output(TOC)
+        # include_raw=True exposes the provider's actual token usage (including
+        # reasoning tokens) on the raw message instead of relying on estimates.
+        model = self.llm.with_structured_output(TOC, include_raw=True)
 
         batches = list(self._batch_features(features, max_tokens_per_batch, overlap_blocks))
         total_batches = len(batches)
@@ -1266,15 +1480,13 @@ class TOCGenerator:
             input_tokens = estimate_tokens(input_text)
 
             # Make LLM call with retry logic
-            batch_toc = self._invoke_with_retry(model, messages, batch_description, input_tokens)
+            batch_toc, usage_metadata = self._invoke_with_retry(model, messages, batch_description, input_tokens)
 
-            # Estimate output tokens (rough estimate based on response)
-            output_tokens = estimate_tokens(str(batch_toc.entries))
+            actual_input, actual_output = _resolve_token_counts(usage_metadata, input_tokens, batch_toc)
 
-            # Record token usage
             usage.add_call(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                input_tokens=actual_input,
+                output_tokens=actual_output,
                 description=f"Batch {batch_idx + 1}/{total_batches}",
             )
 
@@ -1350,7 +1562,7 @@ class TOCGenerator:
             A tuple of (refined TOC, TokenUsage) with the improved TOC.
         """
         usage = TokenUsage()
-        model = self.llm.with_structured_output(TOC)
+        model = self.llm.with_structured_output(TOC, include_raw=True)
 
         # Extract reference text from first pages (may contain printed TOC)
         reference_text = self._extract_reference_toc_text(max_pages=max_pages_for_reference_toc)
@@ -1405,18 +1617,16 @@ must be PDF page numbers (not printed page numbers).
 
         # Make LLM call with retry logic
         console.print("[bold]Postprocessing TOC...[/bold]")
-        refined_toc = self._invoke_with_retry(model, messages, "TOC postprocessing", input_tokens)
+        refined_toc, usage_metadata = self._invoke_with_retry(model, messages, "TOC postprocessing", input_tokens)
 
         # Validate and correct page numbers if the LLM shifted to printed page numbers
         refined_toc = self._correct_postprocessed_page_numbers(toc, refined_toc, reference_text=reference_text)
 
-        # Estimate output tokens
-        output_tokens = estimate_tokens(str(refined_toc.entries))
+        actual_input, actual_output = _resolve_token_counts(usage_metadata, input_tokens, refined_toc)
 
-        # Record token usage
         usage.add_call(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
+            input_tokens=actual_input,
+            output_tokens=actual_output,
             description="TOC postprocessing",
         )
 
@@ -1668,7 +1878,8 @@ must be PDF page numbers (not printed page numbers).
                 if y_pos < _HEADING_SEARCH_HEADER_Y_THRESHOLD or y_pos > _HEADING_SEARCH_FOOTER_Y_THRESHOLD:
                     continue
                 block_text = " ".join(s.get("text", "") for s in block_spans)
-                if _heading_text_matches_title(title, block_text):
+                # Anchored: only structural heading evidence may relocate a page.
+                if _heading_text_matches_title(title, block_text, anchored=True):
                     return page_idx + 1  # 1-indexed
 
         return None
@@ -1861,23 +2072,38 @@ must be PDF page numbers (not printed page numbers).
                 if orig_level == level:
                     return orig_page
 
-            # Strategy 2: collect ALL substring matches at the same level,
+            # Strategy 2: collect ALL prefix-aligned matches at the same level,
             # then pick the best one (highest coverage ratio = shorter/longer).
+            # Titles are compared on their designator-stripped cores, and the
+            # shorter core must be a PREFIX of the longer one: this accepts
+            # end-truncated snippets ("Chapter 3 Risk Manag") and printed-TOC
+            # designator drops ("Distance" vs "1, §2. Distance"), but rejects
+            # leading-word variants ("Preface..." vs "Translator's preface...")
+            # which name different sections.
+            key_core = _strip_leading_designators(key)
+            key_digits = re.findall(r"\d+", key)
             best_page: int | None = None
             best_ratio: float = 0.0
 
             for orig_key, matches in original_map.items():
+                # Numbering is identity: when BOTH titles carry numbers and they
+                # disagree, they are different sections even if their cores
+                # match ("1.8 Exercises" vs "2.9 Exercises"). A missing number
+                # on one side is fine (printed TOCs often drop designators).
+                orig_digits = re.findall(r"\d+", orig_key)
+                if key_digits and orig_digits and key_digits != orig_digits:
+                    continue
+                orig_core = _strip_leading_designators(orig_key)
+                shorter, longer = sorted((key_core, orig_core), key=len)
+                if len(shorter) < _FUZZY_MIN_SUBSTRING_LEN:
+                    continue
+                if not longer.startswith(shorter):
+                    continue
+                ratio = len(shorter) / len(longer)
+                if ratio < _FUZZY_MIN_COVERAGE_RATIO:
+                    continue
                 for orig_page, orig_level in matches:
                     if orig_level != level:
-                        continue
-                    shorter_len = min(len(key), len(orig_key))
-                    longer_len = max(len(key), len(orig_key))
-                    if shorter_len < _FUZZY_MIN_SUBSTRING_LEN:
-                        continue
-                    if not (orig_key in key or key in orig_key):
-                        continue
-                    ratio = shorter_len / longer_len
-                    if ratio < _FUZZY_MIN_COVERAGE_RATIO:
                         continue
                     if ratio > best_ratio:
                         best_ratio = ratio

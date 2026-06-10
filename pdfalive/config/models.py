@@ -51,6 +51,16 @@ class RenameConfig(BaseModel):
     show_token_usage: bool | None = Field(default=None, alias="show-token-usage")
 
 
+class EvalConfig(BaseModel):
+    """Configuration settings for the eval command."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    evals_dir: str | None = Field(default=None, alias="evals-dir")
+    mode: str | None = None
+    model_identifier: str | None = Field(default=None, alias="model-identifier")
+
+
 class PdfAliveConfig(BaseModel):
     """Root configuration model containing all command configurations."""
 
@@ -60,3 +70,4 @@ class PdfAliveConfig(BaseModel):
     generate_toc: GenerateTocConfig = Field(default_factory=GenerateTocConfig, alias="generate-toc")
     extract_text: ExtractTextConfig = Field(default_factory=ExtractTextConfig, alias="extract-text")
     rename: RenameConfig = Field(default_factory=RenameConfig)
+    eval: EvalConfig = Field(default_factory=EvalConfig)
