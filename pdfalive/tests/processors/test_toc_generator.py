@@ -3035,6 +3035,7 @@ class TestIsRetryableError:
             ("BadRequestError", False),
             ("InvalidRequestError", False),
             ("ValidationError", False),
+            ("CassetteMissError", False),  # Eval replay drift — same request always misses
             ("RateLimitError", True),  # No matching pattern → defaults to True
             ("ConnectionError", True),
             ("TimeoutError", True),

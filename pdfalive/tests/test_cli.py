@@ -18,25 +18,38 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cwd(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every CLI test from an empty temporary working directory.
+
+    Replaces Click's deprecated ``CliRunner.isolated_filesystem`` (removed in
+    Click 9) and keeps cwd-based config discovery from picking up a
+    ``pdfalive.toml`` that happens to live in the developer's working directory.
+
+    The directory is a sibling of ``tmp_path`` rather than ``tmp_path`` itself,
+    so anything the CLI writes relative to the cwd stays out of the tests that
+    assert over ``tmp_path`` contents to prove no temp file leaked.
+    """
+    monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
+
+
 class TestGenerateTocInplace:
     """Tests for generate-toc --inplace flag."""
 
     def test_missing_output_and_inplace_raises_error(self, runner: CliRunner) -> None:
         """Test that missing both OUTPUT_FILE and --inplace raises an error."""
-        with runner.isolated_filesystem():
-            # Create a dummy input file so Click's exists=True check passes
-            Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
-            result = runner.invoke(cli, ["generate-toc", "input.pdf"])
-            assert result.exit_code != 0
-            assert "Either OUTPUT_FILE must be provided or --inplace must be set" in result.output
+        # Create a dummy input file so Click's exists=True check passes
+        Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
+        result = runner.invoke(cli, ["generate-toc", "input.pdf"])
+        assert result.exit_code != 0
+        assert "Either OUTPUT_FILE must be provided or --inplace must be set" in result.output
 
     def test_both_output_and_inplace_raises_error(self, runner: CliRunner) -> None:
         """Test that providing both OUTPUT_FILE and --inplace raises an error."""
-        with runner.isolated_filesystem():
-            Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
-            result = runner.invoke(cli, ["generate-toc", "input.pdf", "output.pdf", "--inplace"])
-            assert result.exit_code != 0
-            assert "Cannot specify both OUTPUT_FILE and --inplace" in result.output
+        Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
+        result = runner.invoke(cli, ["generate-toc", "input.pdf", "output.pdf", "--inplace"])
+        assert result.exit_code != 0
+        assert "Cannot specify both OUTPUT_FILE and --inplace" in result.output
 
     def test_help_shows_inplace_option(self, runner: CliRunner) -> None:
         """Test that --help shows the --inplace option."""
@@ -51,19 +64,17 @@ class TestExtractTextInplace:
 
     def test_missing_output_and_inplace_raises_error(self, runner: CliRunner) -> None:
         """Test that missing both OUTPUT_FILE and --inplace raises an error."""
-        with runner.isolated_filesystem():
-            Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
-            result = runner.invoke(cli, ["extract-text", "input.pdf"])
-            assert result.exit_code != 0
-            assert "Either OUTPUT_FILE must be provided or --inplace must be set" in result.output
+        Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
+        result = runner.invoke(cli, ["extract-text", "input.pdf"])
+        assert result.exit_code != 0
+        assert "Either OUTPUT_FILE must be provided or --inplace must be set" in result.output
 
     def test_both_output_and_inplace_raises_error(self, runner: CliRunner) -> None:
         """Test that providing both OUTPUT_FILE and --inplace raises an error."""
-        with runner.isolated_filesystem():
-            Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
-            result = runner.invoke(cli, ["extract-text", "input.pdf", "output.pdf", "--inplace"])
-            assert result.exit_code != 0
-            assert "Cannot specify both OUTPUT_FILE and --inplace" in result.output
+        Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
+        result = runner.invoke(cli, ["extract-text", "input.pdf", "output.pdf", "--inplace"])
+        assert result.exit_code != 0
+        assert "Cannot specify both OUTPUT_FILE and --inplace" in result.output
 
     def test_help_shows_inplace_option(self, runner: CliRunner) -> None:
         """Test that --help shows the --inplace option."""
@@ -131,12 +142,11 @@ class TestRenameInputFile:
 
     def test_both_input_files_and_input_file_raises_error(self, runner: CliRunner) -> None:
         """Test that providing both INPUT_FILES and --input-file raises an error."""
-        with runner.isolated_filesystem():
-            Path("test.pdf").write_bytes(b"%PDF-1.4 dummy")
-            Path("paths.txt").write_text("test.pdf\n")
-            result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt", "test.pdf"])
-            assert result.exit_code != 0
-            assert "Cannot specify both INPUT_FILES arguments and --input-file option" in result.output
+        Path("test.pdf").write_bytes(b"%PDF-1.4 dummy")
+        Path("paths.txt").write_text("test.pdf\n")
+        result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt", "test.pdf"])
+        assert result.exit_code != 0
+        assert "Cannot specify both INPUT_FILES arguments and --input-file option" in result.output
 
     def test_input_file_not_found_raises_error(self, runner: CliRunner) -> None:
         """Test that a non-existent --input-file raises an error."""
@@ -147,29 +157,26 @@ class TestRenameInputFile:
 
     def test_input_file_with_nonexistent_path_raises_error(self, runner: CliRunner) -> None:
         """Test that a path in --input-file that doesn't exist raises an error."""
-        with runner.isolated_filesystem():
-            Path("paths.txt").write_text("nonexistent.pdf\n")
-            result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
-            assert result.exit_code != 0
-            assert "File not found" in result.output
-            assert "nonexistent.pdf" in result.output
-            assert "line 1" in result.output
+        Path("paths.txt").write_text("nonexistent.pdf\n")
+        result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
+        assert result.exit_code != 0
+        assert "File not found" in result.output
+        assert "nonexistent.pdf" in result.output
+        assert "line 1" in result.output
 
     def test_input_file_empty_raises_error(self, runner: CliRunner) -> None:
         """Test that an empty --input-file raises an error."""
-        with runner.isolated_filesystem():
-            Path("paths.txt").write_text("")
-            result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
-            assert result.exit_code != 0
-            assert "No valid file paths found" in result.output
+        Path("paths.txt").write_text("")
+        result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
+        assert result.exit_code != 0
+        assert "No valid file paths found" in result.output
 
     def test_input_file_only_comments_and_blanks_raises_error(self, runner: CliRunner) -> None:
         """Test that --input-file with only comments and blank lines raises an error."""
-        with runner.isolated_filesystem():
-            Path("paths.txt").write_text("# This is a comment\n\n# Another comment\n   \n")
-            result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
-            assert result.exit_code != 0
-            assert "No valid file paths found" in result.output
+        Path("paths.txt").write_text("# This is a comment\n\n# Another comment\n   \n")
+        result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
+        assert result.exit_code != 0
+        assert "No valid file paths found" in result.output
 
     @patch("pdfalive.cli.RenameProcessor")
     @patch("pdfalive.cli.init_chat_model")
@@ -183,16 +190,15 @@ class TestRenameInputFile:
         mock_result.operations = []
         mock_processor.generate_renames.return_value = (mock_result, MagicMock())
 
-        with runner.isolated_filesystem():
-            Path("file1.pdf").write_bytes(b"%PDF-1.4 dummy")
-            Path("file2.pdf").write_bytes(b"%PDF-1.4 dummy")
+        Path("file1.pdf").write_bytes(b"%PDF-1.4 dummy")
+        Path("file2.pdf").write_bytes(b"%PDF-1.4 dummy")
 
-            input_content = "# This is a comment\nfile1.pdf\n\n# Another comment\nfile2.pdf\n\n"
-            Path("paths.txt").write_text(input_content)
+        input_content = "# This is a comment\nfile1.pdf\n\n# Another comment\nfile2.pdf\n\n"
+        Path("paths.txt").write_text(input_content)
 
-            result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
-            # Should show "2 file(s)" (parsed correctly, skipping comments)
-            assert "2" in result.output and "file" in result.output
+        result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
+        # Should show "2 file(s)" (parsed correctly, skipping comments)
+        assert "2" in result.output and "file" in result.output
 
 
 class TestConfigIntegration:
@@ -214,123 +220,116 @@ class TestConfigIntegration:
 
     def test_config_file_sets_defaults_for_rename(self, runner: CliRunner) -> None:
         """Test that config file sets default values for rename command."""
-        with runner.isolated_filesystem():
-            # Create config file with rename query
-            config_content = """
+        # Create config file with rename query
+        config_content = """
 [rename]
 query = "Rename to [Author] Title.pdf"
 """
-            Path("pdfalive.toml").write_text(config_content)
+        Path("pdfalive.toml").write_text(config_content)
 
-            # Check that --help shows the default value from config
-            result = runner.invoke(cli, ["rename", "--help"])
-            assert result.exit_code == 0
-            # The default should now be shown in help
-            assert "Rename to [Author] Title.pdf" in result.output
+        # Check that --help shows the default value from config
+        result = runner.invoke(cli, ["rename", "--help"])
+        assert result.exit_code == 0
+        # The default should now be shown in help
+        assert "Rename to [Author] Title.pdf" in result.output
 
     def test_config_file_sets_defaults_for_generate_toc(self, runner: CliRunner) -> None:
         """Test that config file sets default values for generate-toc command."""
-        with runner.isolated_filesystem():
-            # Create config file
-            config_content = """
+        # Create config file
+        config_content = """
 [generate-toc]
 model-identifier = "custom-model"
 ocr-dpi = 150
 """
-            Path("pdfalive.toml").write_text(config_content)
+        Path("pdfalive.toml").write_text(config_content)
 
-            # Check that --help shows the default values from config
-            result = runner.invoke(cli, ["generate-toc", "--help"])
-            assert result.exit_code == 0
-            assert "custom-model" in result.output
-            assert "150" in result.output
+        # Check that --help shows the default values from config
+        result = runner.invoke(cli, ["generate-toc", "--help"])
+        assert result.exit_code == 0
+        assert "custom-model" in result.output
+        assert "150" in result.output
 
     def test_cli_args_override_config(self, runner: CliRunner) -> None:
         """Test that CLI arguments override config file values."""
-        with runner.isolated_filesystem():
-            # Create config file
-            config_content = """
+        # Create config file
+        config_content = """
 [generate-toc]
 model-identifier = "config-model"
 """
-            Path("pdfalive.toml").write_text(config_content)
+        Path("pdfalive.toml").write_text(config_content)
 
-            # Create a dummy input file
-            Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
+        # Create a dummy input file
+        Path("input.pdf").write_bytes(b"%PDF-1.4 dummy")
 
-            # Run with explicit --model-identifier to override config
-            # This won't actually run the command (no valid PDF), but we can check
-            # that the option parsing works correctly
-            result = runner.invoke(
-                cli,
-                ["generate-toc", "input.pdf", "output.pdf", "--model-identifier", "cli-model"],
-            )
-            # The command will fail because the PDF is invalid, but we just want to
-            # verify the option parsing worked (config + CLI override)
-            # Check that no error about invalid option or missing config occurred
-            assert "Invalid value" not in result.output
-            assert "config" not in result.output.lower() or "Config file not found" not in result.output
+        # Run with explicit --model-identifier to override config
+        # This won't actually run the command (no valid PDF), but we can check
+        # that the option parsing works correctly
+        result = runner.invoke(
+            cli,
+            ["generate-toc", "input.pdf", "output.pdf", "--model-identifier", "cli-model"],
+        )
+        # The command will fail because the PDF is invalid, but we just want to
+        # verify the option parsing worked (config + CLI override)
+        # Check that no error about invalid option or missing config occurred
+        assert "Invalid value" not in result.output
+        assert "config" not in result.output.lower() or "Config file not found" not in result.output
 
     def test_explicit_config_path_option(self, runner: CliRunner) -> None:
         """Test that explicit --config path is used."""
-        with runner.isolated_filesystem():
-            # Create config file in a subdirectory
-            config_dir = Path("configs")
-            config_dir.mkdir()
-            config_file = config_dir / "custom.toml"
-            config_content = """
+        # Create config file in a subdirectory
+        config_dir = Path("configs")
+        config_dir.mkdir()
+        config_file = config_dir / "custom.toml"
+        config_content = """
 [rename]
 query = "Custom config query"
 """
-            config_file.write_text(config_content)
+        config_file.write_text(config_content)
 
-            # Use explicit config path
-            result = runner.invoke(cli, ["--config", str(config_file), "rename", "--help"])
-            assert result.exit_code == 0
-            assert "Custom config query" in result.output
+        # Use explicit config path
+        result = runner.invoke(cli, ["--config", str(config_file), "rename", "--help"])
+        assert result.exit_code == 0
+        assert "Custom config query" in result.output
 
     def test_hidden_config_file_detected(self, runner: CliRunner) -> None:
         """Test that .pdfalive.toml is auto-detected."""
-        with runner.isolated_filesystem():
-            # Create hidden config file
-            config_content = """
+        # Create hidden config file
+        config_content = """
 [rename]
 query = "Hidden config query"
 """
-            Path(".pdfalive.toml").write_text(config_content)
+        Path(".pdfalive.toml").write_text(config_content)
 
-            result = runner.invoke(cli, ["rename", "--help"])
-            assert result.exit_code == 0
-            assert "Hidden config query" in result.output
+        result = runner.invoke(cli, ["rename", "--help"])
+        assert result.exit_code == 0
+        assert "Hidden config query" in result.output
 
     def test_global_settings_apply_to_commands(self, runner: CliRunner) -> None:
         """Test that global settings are applied to relevant commands."""
-        with runner.isolated_filesystem():
-            config_content = """
+        config_content = """
 [global]
 model-identifier = "global-model"
 """
-            Path("pdfalive.toml").write_text(config_content)
+        Path("pdfalive.toml").write_text(config_content)
 
-            # Check generate-toc picks up global setting
-            result = runner.invoke(cli, ["generate-toc", "--help"])
-            assert result.exit_code == 0
-            assert "global-model" in result.output
+        # Check generate-toc picks up global setting
+        result = runner.invoke(cli, ["generate-toc", "--help"])
+        assert result.exit_code == 0
+        assert "global-model" in result.output
 
-            # Check rename picks up global setting
-            result = runner.invoke(cli, ["rename", "--help"])
-            assert result.exit_code == 0
-            assert "global-model" in result.output
+        # Check rename picks up global setting
+        result = runner.invoke(cli, ["rename", "--help"])
+        assert result.exit_code == 0
+        assert "global-model" in result.output
 
     def test_invalid_toml_shows_error(self, runner: CliRunner) -> None:
         """Test that invalid TOML shows an appropriate error."""
-        with runner.isolated_filesystem():
-            Path("pdfalive.toml").write_text("invalid toml [[[")
+        Path("pdfalive.toml").write_text("invalid toml [[[")
 
-            # Use a subcommand to trigger the config loading
-            result = runner.invoke(cli, ["rename", "--help"])
-            assert result.exit_code != 0
-            assert "Error loading config file" in result.output
+        # Use a subcommand to trigger the config loading
+        result = runner.invoke(cli, ["rename", "--help"])
+        assert result.exit_code != 0
+        assert "Error loading config file" in result.output
 
 
 def _create_valid_pdf(path: Path) -> None:

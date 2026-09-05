@@ -10,7 +10,9 @@ The TOC generation pipeline in `pdfalive/processors/toc_generator.py` uses sever
 
 | Constant | Type | Purpose |
 |----------|------|---------|
-| `_FRONT_MATTER_TITLES` | `frozenset` of strings | Skip known front matter titles (Contents, Preface, Introduction, Foreword, Acknowledgements, etc.) when detecting the printed-to-PDF page offset |
+| `_FRONT_MATTER_TITLES` | `frozenset` of strings | Seed vocabulary of known front matter titles (Contents, Preface, Introduction, Foreword, Acknowledgements, etc.), compiled into `_FRONT_MATTER_TITLE_PATTERN` |
+| `_FRONT_MATTER_TITLE_PATTERN` | Compiled regex | The classifier actually used: a seed title optionally followed by a qualifying phrase ("to the ...", "for the ...", "of the ...", "of volume ..."), so "Preface to the Second Edition" is front matter but "Introduction to Ito-Calculus" is not |
+| `_MAIN_CONTENT_START_PATTERN` | Compiled regex | Positive signal that a level-1 entry is the first main-content chapter ("1.", "Chapter 1/I", "Part 1/I") |
 | `_SECTION_NUMBER_PATTERN` | Compiled regex | Match section numbering prefixes: "1.", "1.2", "Chapter N", "Section N", "Part N", "Appendix N", Roman numerals ("XIV."), letter-spaced "C H A P T E R" |
 | `_LETTERSPACED_PATTERN` | Compiled regex | Match ALL-CAPS letter-spaced text like "P R E F A C E" |
 | `_ROMAN_NUMERAL_RE` | Regex sub-pattern | Match Roman numerals I through XXXIX (used inside `_SECTION_NUMBER_PATTERN`) |
@@ -59,10 +61,11 @@ After the LLM generates the initial TOC, a deterministic correction step detects
 
 **Used by:** `_detect_front_matter_offset()`, called from `_correct_postprocessed_page_numbers()`
 
-After the postprocessor LLM refines the TOC, the correction code identifies the front matter offset by finding the first "real" chapter in the Phase 1 TOC. `_FRONT_MATTER_TITLES` determines which entries to skip.
+After the postprocessor LLM refines the TOC, the correction code identifies the front matter offset by finding the first "real" chapter in the Phase 1 TOC. `_FRONT_MATTER_TITLE_PATTERN` decides which entries to skip, and `_MAIN_CONTENT_START_PATTERN` recognizes the first main-content chapter directly.
 
 **Constants involved:**
-- `_FRONT_MATTER_TITLES` — title classification
+- `_FRONT_MATTER_TITLE_PATTERN` (built from `_FRONT_MATTER_TITLES`) — title classification
+- `_MAIN_CONTENT_START_PATTERN` — first-main-chapter detection
 
 **Key point:** This runs after both LLM passes. It's a deterministic heuristic trying to fix what the LLM may have gotten wrong.
 
@@ -71,8 +74,8 @@ After the postprocessor LLM refines the TOC, the correction code identifies the 
 ### `_FRONT_MATTER_TITLES` — High brittleness
 
 - **English-only:** Won't match "Inhaltsverzeichnis", "Pr&eacute;face", "&Iacute;ndice", "Sommaire", etc.
-- **Requires ongoing maintenance:** We already had to add "introduction" and switch from exact matching to prefix matching because "Acknowledgments for the English Edition" didn't match. Every book with unusual front matter labels is a potential failure.
-- **Ambiguous entries:** "Introduction" can be either front matter or the first real chapter depending on the book. Currently treated as front matter.
+- **Requires ongoing maintenance:** We already had to add "introduction", switch from exact matching to prefix matching because "Acknowledgments for the English Edition" didn't match, and then tighten prefix matching into `_FRONT_MATTER_TITLE_PATTERN` because "Introduction to Ito-Calculus" was being swallowed as front matter. Every book with unusual front matter labels is a potential failure.
+- **Ambiguous entries:** a bare "Introduction" can be either front matter or the first real chapter depending on the book; it is still treated as front matter. Only the qualified forms ("Introduction to the Second Edition") vs. subject-specific forms ("Introduction to Ito-Calculus") are now distinguished.
 
 ### `_SECTION_NUMBER_PATTERN` — Moderate brittleness
 
@@ -119,7 +122,7 @@ These are language-neutral and unlikely to cause issues. No action needed.
 
 | Constant | Brittleness | i18n impact | Recommendation |
 |----------|-------------|-------------|----------------|
-| `_FRONT_MATTER_TITLES` | High | Breaks for non-English | Remove or delegate to LLM |
+| `_FRONT_MATTER_TITLES` / `_FRONT_MATTER_TITLE_PATTERN` | High | Breaks for non-English | Remove or delegate to LLM |
 | `_SECTION_NUMBER_PATTERN` | Moderate | Named prefixes are English-only | Drop text patterns, keep font heuristics |
 | `_LETTERSPACED_PATTERN` | Low | Works for Latin alphabets | Could drop (low marginal value) |
 | `_ROMAN_NUMERAL_RE` | Low | Universal | Could drop (part of section pattern) |

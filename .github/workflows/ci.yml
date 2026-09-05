@@ -20,33 +20,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.13"]
+        python-version: ["3.14", "3.13"]
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Install Tesseract OCR
       run: |
         sudo apt-get update
         sudo apt-get install --no-install-recommends -y tesseract-ocr tesseract-ocr-eng
     - name: Install uv and set the python version
-      uses: astral-sh/setup-uv@v5
+      uses: astral-sh/setup-uv@v10.0.1
       with:
         python-version: ${{ matrix.python-version }}
         version: "latest"
     - name: Install the project
       run: uv sync --all-extras --dev
     - name: Install ruff
-      uses: astral-sh/ruff-action@v3
+      uses: astral-sh/ruff-action@v4.1.0
       with:
         version: "latest"
         src: "./pdfalive"
     - name: Run formatting checks (lint runs as part of ruff-action above)
       run: |
         uv run ruff check pdfalive
-        uv run ruff format pdfalive
+        uv run ruff format --check pdfalive
     - name: Run mypy
-      run: |
-        uv pip install types-pyyaml
-        uv run mypy pdfalive
+      run: uv run mypy pdfalive
     - name: Run tests
       run: uv run pytest
