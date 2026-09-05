@@ -22,6 +22,21 @@ SUMMARY_PAGE_TOLERANCE = 1
 _PUNCTUATION_PATTERN = re.compile(r"[^\w\s]")
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 
+# Roman numerals i through xxxix, restricted to i/v/x so ordinary words made of
+# roman letters ("mix", "did", "civil") are never mistaken for a numeral.
+_ROMAN_NUMERAL_TOKEN = r"(?=[ivx])x{0,3}(?:ix|iv|v?i{0,3})"
+
+# One leading section-numbering token of an already-normalized title: a naming
+# keyword (optionally carrying a single-letter label, as in "appendix a"), an
+# arabic number, or a roman numeral.
+_SECTION_PREFIX_TOKEN_PATTERN = re.compile(
+    rf"^(?:(?:chapter|section|part|appendix|lecture)(?:\s+[a-z]\b)?|\d+|{_ROMAN_NUMERAL_TOKEN})(?:\s+|$)"
+)
+
+# A pair that only matches once section numbering is stripped scores at most
+# this, so an exact full-title match always outranks it during greedy pairing.
+_SECTION_STRIPPED_MATCH_WEIGHT = 0.95
+
 
 class GoldenEntry(BaseModel):
     """A single ground-truth TOC entry from a golden data file."""
@@ -42,6 +57,22 @@ def normalize_title(title: str) -> str:
     return _WHITESPACE_PATTERN.sub(" ", title).strip()
 
 
+def strip_section_prefix(normalized_title: str) -> str:
+    """Strip leading section numbering from an already-normalized title.
+
+    "chapter 1 distance and angles" and "1 1 exercises" become "distance and
+    angles" and "exercises". A title that is nothing but numbering is returned
+    unchanged rather than emptied.
+    """
+    stripped = normalized_title
+    while True:
+        candidate = _SECTION_PREFIX_TOKEN_PATTERN.sub("", stripped, count=1)
+        if candidate == stripped or not candidate:
+            break
+        stripped = candidate
+    return stripped
+
+
 def _normalized_similarity(left_norm: str, right_norm: str) -> float:
     """Similarity ratio in [0, 1] between two already-normalized titles."""
     if left_norm == right_norm:
@@ -49,9 +80,39 @@ def _normalized_similarity(left_norm: str, right_norm: str) -> float:
     return SequenceMatcher(None, left_norm, right_norm).ratio()
 
 
+def _matching_similarity(left: "_TitleForms", right: "_TitleForms") -> float:
+    """Similarity used for pairing, tolerant of dropped section numbering.
+
+    Models disagree on whether a heading's printed number belongs in the title
+    ("Chapter 1: Distance and Angles" vs "Distance and Angles"). Scoring only
+    full titles charges that one stylistic choice twice — once as a missing
+    golden entry and once as a spurious generated one — so a pair that agrees
+    after stripping the numbering still matches, at a slightly discounted
+    score that keeps numbered titles pairing with their own counterparts.
+    """
+    full = _normalized_similarity(left.normalized, right.normalized)
+    if full == 1.0:
+        return full
+    stripped = _normalized_similarity(left.section_stripped, right.section_stripped)
+    return max(full, stripped * _SECTION_STRIPPED_MATCH_WEIGHT)
+
+
+@dataclass(frozen=True)
+class _TitleForms:
+    """The comparison forms of one title, computed once per entry."""
+
+    normalized: str
+    section_stripped: str
+
+    @classmethod
+    def of(cls, title: str) -> "_TitleForms":
+        normalized = normalize_title(title)
+        return cls(normalized=normalized, section_stripped=strip_section_prefix(normalized))
+
+
 def title_similarity(left: str, right: str) -> float:
-    """Similarity ratio in [0, 1] between two titles after normalization."""
-    return _normalized_similarity(normalize_title(left), normalize_title(right))
+    """Similarity in [0, 1] between two titles, as used for golden matching."""
+    return _matching_similarity(_TitleForms.of(left), _TitleForms.of(right))
 
 
 @dataclass(frozen=True)
@@ -166,15 +227,15 @@ def evaluate_toc(
         generated entries.
     """
     # Normalize once per entry, not once per pair.
-    golden_norms = [normalize_title(entry.title) for entry in golden]
-    generated_norms = [normalize_title(entry.title) for entry in generated.entries]
+    golden_forms = [_TitleForms.of(entry.title) for entry in golden]
+    generated_forms = [_TitleForms.of(entry.title) for entry in generated.entries]
 
     # Candidates sort naturally: similarity stored negated so plain tuple order
     # ranks by (similarity desc, page_delta asc, stable indices).
     candidates: list[tuple[float, int, int, int]] = []  # (-similarity, page_delta, golden_idx, generated_idx)
     for golden_idx, golden_entry in enumerate(golden):
         for generated_idx, generated_entry in enumerate(generated.entries):
-            similarity = _normalized_similarity(golden_norms[golden_idx], generated_norms[generated_idx])
+            similarity = _matching_similarity(golden_forms[golden_idx], generated_forms[generated_idx])
             if similarity >= similarity_threshold:
                 page_delta = abs(golden_entry.page_number - generated_entry.page_number)
                 candidates.append((-similarity, page_delta, golden_idx, generated_idx))

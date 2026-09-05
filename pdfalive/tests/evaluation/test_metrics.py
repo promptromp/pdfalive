@@ -8,6 +8,7 @@ from pdfalive.evaluation.metrics import (
     GoldenEntry,
     evaluate_toc,
     normalize_title,
+    strip_section_prefix,
     title_similarity,
 )
 from pdfalive.models.toc import TOC, TOCEntry
@@ -55,6 +56,92 @@ class TestTitleSimilarity:
     def test_is_symmetric(self) -> None:
         left, right = "Chapter 2: Coordinates", "Chapter 2 Coordinates."
         assert title_similarity(left, right) == title_similarity(right, left)
+
+
+class TestStripSectionPrefix:
+    @pytest.mark.parametrize(
+        ("normalized", "expected"),
+        [
+            ("chapter 1 distance and angles", "distance and angles"),
+            ("section 4 1 some text", "some text"),
+            ("part iii transformations", "transformations"),
+            ("appendix a tables", "tables"),
+            ("1 1 lines", "lines"),
+            ("34 differential forms", "differential forms"),
+            ("i basic notions", "basic notions"),
+            # Ordinary words built from roman-numeral letters must survive.
+            ("mix and match", "mix and match"),
+            ("did it work", "did it work"),
+            ("civil rights", "civil rights"),
+            ("index", "index"),
+            # A title that is only numbering keeps a token rather than emptying.
+            ("1 1", "1"),
+        ],
+    )
+    def test_strips_only_leading_numbering(self, normalized: str, expected: str) -> None:
+        assert strip_section_prefix(normalized) == expected
+
+
+class TestSectionPrefixTolerantMatching:
+    """A dropped section number must not count as both a miss and a false positive."""
+
+    @pytest.mark.parametrize(
+        ("numbered", "unnumbered"),
+        [
+            ("Chapter 1: Distance and Angles", "Distance and Angles"),
+            ("Chapter 12: Isometries", "Isometries"),
+            ("§34 Differential forms", "Differential forms"),
+            ("1, §1. Exercises", "Exercises"),
+        ],
+    )
+    def test_numbering_only_difference_still_matches(self, numbered: str, unnumbered: str) -> None:
+        assert title_similarity(numbered, unnumbered) >= SIMILARITY_THRESHOLD
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            ("Chapter 1: Distance and Angles", "Chapter 2: Coordinates"),
+            ("Chapter 1: Distance and Angles", "Index"),
+            ("Chapter 3: Circles", "Volumes"),
+        ],
+    )
+    def test_different_titles_stay_below_threshold(self, left: str, right: str) -> None:
+        assert title_similarity(left, right) < SIMILARITY_THRESHOLD
+
+    def test_exact_match_outranks_stripped_match(self) -> None:
+        assert title_similarity("Chapter 1: Distance and Angles", "Chapter 1: Distance and Angles") == 1.0
+        assert title_similarity("Chapter 1: Distance and Angles", "Distance and Angles") < 1.0
+
+    def test_numbered_titles_pair_with_their_own_counterparts(
+        self, make_golden_entry: Callable[..., GoldenEntry], make_toc: Callable[..., TOC]
+    ) -> None:
+        """Stripping must not let same-titled entries at different levels cross-match."""
+        golden = [
+            make_golden_entry(title="Chapter 7 Differential forms", page_number=174, level=1),
+            make_golden_entry(title="§34 Differential forms", page_number=177, level=2),
+        ]
+        generated = make_toc(("§34 Differential forms", 177, 2), ("Chapter 7 Differential forms", 174, 1))
+
+        report = evaluate_toc(golden, generated)
+
+        assert report.f1 == 1.0
+        assert report.level_accuracy == 1.0
+        assert report.page_accuracy() == 1.0
+
+    def test_unnumbered_generated_titles_score_as_recall(
+        self, make_golden_entry: Callable[..., GoldenEntry], make_toc: Callable[..., TOC]
+    ) -> None:
+        golden = [
+            make_golden_entry(title=title, page_number=page, level=1)
+            for title, page in [("Chapter 1: Distance and Angles", 14), ("Chapter 2: Coordinates", 78)]
+        ]
+        generated = make_toc(("Distance and Angles", 14, 1), ("Coordinates", 78, 1))
+
+        report = evaluate_toc(golden, generated)
+
+        assert report.recall == 1.0
+        assert report.precision == 1.0
+        assert not report.spurious
 
 
 class TestEvaluateToc:

@@ -42,7 +42,7 @@ In this example, page 1 has spans from two fonts (F0=Times-Bold, F1=Times-Roman)
 When you encounter a feature which you believe signifies a chapter or section heading (e.g., larger font size, bold font, etc.), you should create a TOC entry for it.
 
 Each TOC entry should include:
-- Title: The text snippet of the feature.
+- Title: The heading's text, including its printed chapter/section numbering. The number and the title text often arrive as separate spans on the same page (e.g. `CHAPTER`, `1`, `Distance and Angles`), so join them into one title: `Chapter 1: Distance and Angles`.
 - Level: An integer representing the hierarchical level of the entry (1 for top-level chapters, 2 for sections, etc.). The user will instruct you on the maximum depth (level) to include.
 - Page Number: The PDF page number where the feature is located (1-indexed from the first physical page of the PDF file). Use this exact page number in your output — do not substitute printed page numbers visible in the text.
 - Confidence: A float between 0 and 1 indicating your confidence that this feature represents a TOC entry.
@@ -63,6 +63,7 @@ Example output:
   A sanity check for this would be that you shouldn't normally mark multiple table of contents items at level 1 coming from the same page!
 - *Do* include an entry for the Table of Contents itself if it exists in the document, as well as for preamble such as Preface, Introduction, Acknowledgements, etc.
 - *Do* use any existing table of contents in the document to help guide your decisions about what constitutes a chapter / section heading.
+- **Preserve section numbering**: ALWAYS keep a heading's printed numbering (e.g. `Chapter 3`, `4.1`, `§34`, `Appendix A`) in the title, even when the number is a separate span or line from the title text. Section numbers are valuable navigational aids in bookmarks, so never drop them.
 - **Running headers vs actual headings**: When y-position is provided, use it to distinguish running headers (y near 0.0, typically < 0.05) from actual section headings. Running headers are repeated at the top of each page and should NOT be used as TOC entries. If the same heading text appears at the top of one page (low y) and mid-page on a previous page (higher y), prefer the mid-page occurrence as the actual section start.
 
 """
@@ -95,7 +96,7 @@ Optional trailing fields:
 When you encounter a feature which you believe signifies a chapter or section heading (e.g., larger font size, bold font, etc.), you should create a TOC entry for it.
 
 Each TOC entry should include:
-- Title: The text snippet of the feature.
+- Title: The heading's text, including its printed chapter/section numbering. The number and the title text often arrive as separate spans on the same page (e.g. `CHAPTER`, `1`, `Distance and Angles`), so join them into one title: `Chapter 1: Distance and Angles`.
 - Level: An integer representing the hierarchical level of the entry (1 for top-level chapters, 2 for sections, etc.). The user will instruct you on the maximum depth (level) to include.
 - Page Number: The PDF page number where the feature is located (1-indexed from the first physical page of the PDF file). Use this exact page number in your output — do not substitute printed page numbers visible in the text.
 - Confidence: A float between 0 and 1 indicating your confidence that this feature represents a TOC entry.
@@ -108,6 +109,7 @@ Return the TOC as a list of entries, where each entry is represented as a dictio
 - If this batch includes features that look like they might be continuations of entries from previous batches (e.g., second part of a chapter title), include them if they appear to be headings on their own.
 - Documents (such as books) often include a table of contents in the first few pages. DO NOT parse individual line items from a printed TOC in the document itself - we only want actual chapter/section pages.
 - Maintain consistent level assignments: use level 1 for main chapters, level 2 for sections, etc.
+- **Preserve section numbering**: ALWAYS keep a heading's printed numbering (e.g. `Chapter 3`, `4.1`, `§34`, `Appendix A`) in the title, even when the number is a separate span or line from the title text. Section numbers are valuable navigational aids in bookmarks, so never drop them.
 - **Running headers vs actual headings**: When y-position is provided, use it to distinguish running headers (y near 0.0, typically < 0.05) from actual section headings. If the same heading appears at the top of one page and mid-page on a previous page, prefer the mid-page occurrence as the actual section start.
 
 """
