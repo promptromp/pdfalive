@@ -392,7 +392,14 @@ RETRY_MIN_WAIT_SECONDS = 10  # Minimum wait time between retries
 RETRY_MAX_WAIT_SECONDS = 120  # Maximum wait time between retries
 
 # Exception class name fragments that indicate non-retryable client errors
-_NON_RETRYABLE_PATTERNS = ("ContextOverflow", "BadRequest", "InvalidRequest", "ValidationError")
+_NON_RETRYABLE_PATTERNS = (
+    "ContextOverflow",
+    "BadRequest",
+    "InvalidRequest",
+    "ValidationError",
+    # An eval cassette miss is deterministic: the same request will miss again.
+    "CassetteMiss",
+)
 
 
 def _unpack_structured_response(response) -> tuple[TOC, dict | None]:
