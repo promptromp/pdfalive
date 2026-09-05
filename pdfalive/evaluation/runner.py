@@ -119,7 +119,7 @@ def _build_llm(case: EvalCase, mode: EvalMode, model_identifier: str, strict_rep
 def run_eval_case(
     case: EvalCase,
     mode: EvalMode,
-    model_identifier: str = "gpt-5.5",
+    model_identifier: str = "gpt-5.6",
     strict_replay: bool = True,
     request_delay: float | None = None,
     num_processes: int | None = None,

@@ -183,7 +183,7 @@ pdfalive rename -q "Add sequential numbering prefix" -y *.pdf
 | Option | Description |
 |--------|-------------|
 | `-f, --input-file` | Read input file paths from a text file (one per line) |
-| `--model-identifier` | Choose which LLM to use (default: `gpt-5.5`) |
+| `--model-identifier` | Choose which LLM to use (default: `gpt-5.6`) |
 | `-y, --yes` | Automatically apply renames without confirmation |
 | `--show-token-usage` | Display token usage statistics (default: enabled) |
 
@@ -201,7 +201,7 @@ pdfalive supports TOML configuration files for setting default options. This is 
 ```toml
 # Global settings (shared across commands)
 [global]
-model-identifier = "gpt-5.5"
+model-identifier = "gpt-5.6"
 show-token-usage = true
 
 # Settings for generate-toc command

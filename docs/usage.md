@@ -199,7 +199,7 @@ exits with code 1 if any case falls below the thresholds.
 | `--evals-dir` | Directory containing `golden/` and `cassettes/` (default: `evals`) |
 | `--mode` | `replay` (default, free), `record` (live LLM, writes cassette), or `live` |
 | `--case` | Run only the named case(s); may be repeated |
-| `--model-identifier` | LLM for record/live modes (default: `gpt-5.5`) |
+| `--model-identifier` | LLM for record/live modes (default: `gpt-5.6`) |
 | `--loose-replay` | Replay by call order even if prompts drifted since recording |
 | `--request-delay` | Seconds between LLM calls (default: 0 in replay, pipeline default otherwise) |
 | `--num-processes` | Parallel processes for feature extraction (default: CPU count - 1) |
@@ -225,7 +225,7 @@ pdfalive supports TOML configuration files for setting default CLI options. This
 
 	# Global settings (shared across commands)
 	[global]
-	model-identifier = "gpt-5.5"
+	model-identifier = "gpt-5.6"
 	show-token-usage = true
 
 	# Settings for generate-toc command
