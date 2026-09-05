@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-pdfalive is a Python (3.13) library and CLI tool that uses LLMs to enhance PDF files. It provides:
+pdfalive is a Python (3.13 and 3.14; 3.14 is the development default) library and CLI tool that uses LLMs to enhance PDF files. It provides:
 - **Automatic Table of Contents (bookmarks) generation** for PDFs using LLM inference, with optional postprocessing refinement
 - **OCR processing** for scanned PDFs using Tesseract integration
 - **Intelligent file renaming** using LLM inference for batch renaming with confidence scoring
