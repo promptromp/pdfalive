@@ -19,14 +19,18 @@ def runner() -> CliRunner:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolated_cwd(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     """Run every CLI test from an empty temporary working directory.
 
     Replaces Click's deprecated ``CliRunner.isolated_filesystem`` (removed in
     Click 9) and keeps cwd-based config discovery from picking up a
     ``pdfalive.toml`` that happens to live in the developer's working directory.
+
+    The directory is a sibling of ``tmp_path`` rather than ``tmp_path`` itself,
+    so anything the CLI writes relative to the cwd stays out of the tests that
+    assert over ``tmp_path`` contents to prove no temp file leaked.
     """
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
 
 
 class TestGenerateTocInplace:

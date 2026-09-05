@@ -27,15 +27,29 @@ _WHITESPACE_PATTERN = re.compile(r"\s+")
 _ROMAN_NUMERAL_TOKEN = r"(?=[ivx])x{0,3}(?:ix|iv|v?i{0,3})"
 
 # One leading section-numbering token of an already-normalized title: a naming
-# keyword (optionally carrying a single-letter label, as in "appendix a"), an
-# arabic number, or a roman numeral.
+# keyword carrying a label ("chapter 3", "appendix a", "part iii"), a bare
+# arabic number, or a bare roman numeral followed by more title text. The
+# keyword always requires its label and the bare roman always requires a
+# successor, so ordinary titles like "part of the whole" and "chapter
+# overview" keep their first word.
 _SECTION_PREFIX_TOKEN_PATTERN = re.compile(
-    rf"^(?:(?:chapter|section|part|appendix|lecture)(?:\s+[a-z]\b)?|\d+|{_ROMAN_NUMERAL_TOKEN})(?:\s+|$)"
+    rf"^(?:"
+    rf"(?:chapter|section|part|appendix|lecture)\s+(?:\d+|[a-z]\b|{_ROMAN_NUMERAL_TOKEN}\b)"
+    rf"|\d+"
+    rf"|{_ROMAN_NUMERAL_TOKEN}(?=\s)"
+    rf")(?:\s+|$)"
 )
 
 # A pair that only matches once section numbering is stripped scores at most
 # this, so an exact full-title match always outranks it during greedy pairing.
 _SECTION_STRIPPED_MATCH_WEIGHT = 0.95
+
+# Stripped-form matching only applies to entries this close together. The
+# tolerance exists for one heading written two ways, which necessarily sits on
+# roughly one page; without the bound, a golden "Chapter 3: Notes" on p50 would
+# pair with a back-matter "Notes" on p400 at 0.95 and outrank every genuinely
+# closer candidate, since pairing ranks by similarity before page distance.
+_SECTION_STRIPPED_MAX_PAGE_DISTANCE = 5
 
 
 class GoldenEntry(BaseModel):
@@ -93,7 +107,7 @@ class _TitleForms:
         return cls(normalized=normalized, section_stripped=strip_section_prefix(normalized))
 
 
-def _matching_similarity(left: _TitleForms, right: _TitleForms) -> float:
+def _matching_similarity(left: _TitleForms, right: _TitleForms, page_distance: int) -> float:
     """Similarity used for pairing, tolerant of dropped section numbering.
 
     Models disagree on whether a heading's printed number belongs in the title
@@ -102,17 +116,27 @@ def _matching_similarity(left: _TitleForms, right: _TitleForms) -> float:
     golden entry and once as a spurious generated one — so a pair that agrees
     after stripping the numbering still matches, at a slightly discounted
     score that keeps numbered titles pairing with their own counterparts.
+
+    The tolerance applies only to entries within
+    _SECTION_STRIPPED_MAX_PAGE_DISTANCE pages of each other: two headings that
+    read alike once their numbering is gone but sit far apart in the book are
+    different headings that happen to share a noun, not one heading written
+    two ways.
     """
     full = _normalized_similarity(left.normalized, right.normalized)
-    if full == 1.0:
+    if full == 1.0 or page_distance > _SECTION_STRIPPED_MAX_PAGE_DISTANCE:
         return full
     stripped = _normalized_similarity(left.section_stripped, right.section_stripped)
     return max(full, stripped * _SECTION_STRIPPED_MATCH_WEIGHT)
 
 
-def title_similarity(left: str, right: str) -> float:
-    """Similarity in [0, 1] between two titles, as used for golden matching."""
-    return _matching_similarity(_TitleForms.of(left), _TitleForms.of(right))
+def title_similarity(left: str, right: str, page_distance: int = 0) -> float:
+    """Similarity in [0, 1] between two titles, as used for golden matching.
+
+    ``page_distance`` gates the section-numbering tolerance; the default of 0
+    scores two titles as if they sat on the same page.
+    """
+    return _matching_similarity(_TitleForms.of(left), _TitleForms.of(right), page_distance)
 
 
 @dataclass(frozen=True)
@@ -235,9 +259,9 @@ def evaluate_toc(
     candidates: list[tuple[float, int, int, int]] = []  # (-similarity, page_delta, golden_idx, generated_idx)
     for golden_idx, golden_entry in enumerate(golden):
         for generated_idx, generated_entry in enumerate(generated.entries):
-            similarity = _matching_similarity(golden_forms[golden_idx], generated_forms[generated_idx])
+            page_delta = abs(golden_entry.page_number - generated_entry.page_number)
+            similarity = _matching_similarity(golden_forms[golden_idx], generated_forms[generated_idx], page_delta)
             if similarity >= similarity_threshold:
-                page_delta = abs(golden_entry.page_number - generated_entry.page_number)
                 candidates.append((-similarity, page_delta, golden_idx, generated_idx))
 
     candidates.sort()

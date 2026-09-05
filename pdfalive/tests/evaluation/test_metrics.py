@@ -73,6 +73,10 @@ class TestStripSectionPrefix:
             ("mix and match", "mix and match"),
             ("did it work", "did it work"),
             ("civil rights", "civil rights"),
+            # A naming keyword without a label is an ordinary first word.
+            ("part of the whole", "part of the whole"),
+            ("chapter overview", "chapter overview"),
+            ("section headings in this book", "section headings in this book"),
             ("index", "index"),
             # A title that is only numbering keeps a token rather than emptying.
             ("1 1", "1"),
@@ -107,6 +111,32 @@ class TestSectionPrefixTolerantMatching:
     )
     def test_different_titles_stay_below_threshold(self, left: str, right: str) -> None:
         assert title_similarity(left, right) < SIMILARITY_THRESHOLD
+
+    @pytest.mark.parametrize(
+        ("numbered", "unnumbered"),
+        [
+            ("Chapter 3: Notes", "Notes"),
+            ("Lecture 1: Introduction", "Introduction"),
+            ("Appendix A: Bibliography", "Bibliography"),
+        ],
+    )
+    def test_far_apart_entries_do_not_match_on_stripped_form(self, numbered: str, unnumbered: str) -> None:
+        """One heading written two ways sits on one page; a shared noun 350 pages away does not."""
+        assert title_similarity(numbered, unnumbered) >= SIMILARITY_THRESHOLD
+        assert title_similarity(numbered, unnumbered, page_distance=350) < SIMILARITY_THRESHOLD
+
+    def test_distant_generic_title_is_not_credited_as_a_match(
+        self, make_golden_entry: Callable[..., GoldenEntry], make_toc: Callable[..., TOC]
+    ) -> None:
+        """A missed chapter must not be papered over by a same-noun back-matter entry."""
+        golden = [make_golden_entry(title="Chapter 3: Notes", page_number=50, level=1)]
+        generated = make_toc(("Notes", 400, 1))
+
+        report = evaluate_toc(golden, generated)
+
+        assert not report.matched
+        assert [entry.title for entry in report.missing] == ["Chapter 3: Notes"]
+        assert [entry.title for entry in report.spurious] == ["Notes"]
 
     def test_exact_match_outranks_stripped_match(self) -> None:
         assert title_similarity("Chapter 1: Distance and Angles", "Chapter 1: Distance and Angles") == 1.0
