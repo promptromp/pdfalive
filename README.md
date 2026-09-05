@@ -68,7 +68,7 @@ By default, pdfalive uses the latest OpenAI model. Use any [LangChain-supported 
 
 ```bash
 # Use Claude
-pdfalive generate-toc --model-identifier 'claude-sonnet-4-5' input.pdf output.pdf
+pdfalive generate-toc --model-identifier 'claude-sonnet-5' input.pdf output.pdf
 
 # Use a local model via Ollama
 pdfalive generate-toc --model-identifier 'ollama/llama3' input.pdf output.pdf

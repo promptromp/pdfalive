@@ -30,7 +30,7 @@ Generate a clickable Table of Contents for any PDF. The tool analyzes font sizes
 **Using a different LLM:**
 
 	# Use Claude instead of the default OpenAI model
-	pdfalive generate-toc --model-identifier 'claude-sonnet-4-5' input.pdf output.pdf
+	pdfalive generate-toc --model-identifier 'claude-sonnet-5' input.pdf output.pdf
 
 	# Use a local model via Ollama
 	pdfalive generate-toc --model-identifier 'ollama/llama3' input.pdf output.pdf
@@ -139,7 +139,7 @@ The input file should contain one path per line. Lines starting with `#` are tre
 **Options:**
 
 	# Use a different LLM
-	pdfalive rename -q "Standardize filenames" --model-identifier 'claude-sonnet-4-5' *.pdf
+	pdfalive rename -q "Standardize filenames" --model-identifier 'claude-sonnet-5' *.pdf
 
 	# Skip confirmation prompt
 	pdfalive rename -q "Add sequential numbering" -y *.pdf
@@ -201,6 +201,8 @@ exits with code 1 if any case falls below the thresholds.
 | `--case` | Run only the named case(s); may be repeated |
 | `--model-identifier` | LLM for record/live modes (default: `gpt-5.5`) |
 | `--loose-replay` | Replay by call order even if prompts drifted since recording |
+| `--request-delay` | Seconds between LLM calls (default: 0 in replay, pipeline default otherwise) |
+| `--num-processes` | Parallel processes for feature extraction (default: CPU count - 1) |
 | `--min-f1`, `--min-page-accuracy` | Fail (exit 1) if any case scores below threshold |
 
 **Adding a new case:** generate a TOC with `generate-toc`, verify the bookmarks by hand (fix any errors — this is your ground truth), then save the verified entries as a golden file and record a cassette with `--mode record`.

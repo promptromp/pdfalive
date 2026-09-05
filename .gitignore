@@ -231,3 +231,6 @@ pdfalive.toml
 # Scratch data and root-level sample PDFs (test fixtures live under pdfalive/tests/)
 data/
 /*.pdf
+
+# Cassette backups written by `pdfalive eval --mode record`
+evals/cassettes/*.json.bak

@@ -16,7 +16,7 @@ pdfalive is a Python (3.13) library and CLI tool that uses LLMs to enhance PDF f
 uv sync
 
 # Run the CLI - TOC generation
-uv run pdfalive generate-toc examples/example.pdf output.pdf --force
+uv run pdfalive generate-toc input.pdf output.pdf --force
 
 # Run the CLI - OCR text extraction
 uv run pdfalive extract-text input.pdf output.pdf
@@ -124,5 +124,6 @@ The `pdfalive/evaluation/` package measures TOC generation quality against golde
 - always prefer placing imports at top of files rather than inline. Especially when writing unit-test. only do otherwise to avoid circular dependencies in rare cases. In those cases, mention explicitly why you are doing this in a comment on the relevant code line.
 - When writing unit-tests, use variables and/or pytest fixtures (e.g. via conftest.py and `@pytest.fixture` decorator) for fixture values and objects, rather than repeating literal values in test setup and assertions. Prefer using pytest's `@pytest.mark.parametrize` decorator when you wish to test different values or combinations of values rather than creating repetitive standalone test cases.
 - When making changes, always make sure formatting, linting, type checks, and tests work afterwards. We use ruff, mypy and pytest for these, and can run them via uv, e.g. `uv run ruff ...`, `uv run mypy`, etc.
+- Bumping `pymupdf` (or anything else that affects PDF text/font extraction) changes the features sent to the LLM and therefore the prompts, which invalidates the eval cassettes even though no code changed. Always run `uv run pdfalive eval --mode replay` after a dependency bump; if strict replay fails, `--loose-replay` tells you whether the post-LLM logic is still intact, and `--mode record` re-records.
 - When changing TOC generation heuristics, feature extraction, prompts, or correction logic, run the evaluation harness (`uv run pdfalive eval --mode replay`) and compare metrics before/after. If a change intentionally alters LLM prompts, re-record cassettes with `--mode record` (costs real LLM calls) and re-verify the golden data still scores well.
 - When finished making substantial changes to functionality and/or API (e.g. CLI usage) make sure to update documentation - README.md, CLAUDE.md and docs/ markdown files should all be kept up to date. Changing any CLI configuration options should also result in update the config/ submodule which lets us use TOML configuration files for defaults.
