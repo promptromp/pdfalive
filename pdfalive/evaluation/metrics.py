@@ -80,7 +80,20 @@ def _normalized_similarity(left_norm: str, right_norm: str) -> float:
     return SequenceMatcher(None, left_norm, right_norm).ratio()
 
 
-def _matching_similarity(left: "_TitleForms", right: "_TitleForms") -> float:
+@dataclass(frozen=True)
+class _TitleForms:
+    """The comparison forms of one title, computed once per entry."""
+
+    normalized: str
+    section_stripped: str
+
+    @classmethod
+    def of(cls, title: str) -> "_TitleForms":
+        normalized = normalize_title(title)
+        return cls(normalized=normalized, section_stripped=strip_section_prefix(normalized))
+
+
+def _matching_similarity(left: _TitleForms, right: _TitleForms) -> float:
     """Similarity used for pairing, tolerant of dropped section numbering.
 
     Models disagree on whether a heading's printed number belongs in the title
@@ -95,19 +108,6 @@ def _matching_similarity(left: "_TitleForms", right: "_TitleForms") -> float:
         return full
     stripped = _normalized_similarity(left.section_stripped, right.section_stripped)
     return max(full, stripped * _SECTION_STRIPPED_MATCH_WEIGHT)
-
-
-@dataclass(frozen=True)
-class _TitleForms:
-    """The comparison forms of one title, computed once per entry."""
-
-    normalized: str
-    section_stripped: str
-
-    @classmethod
-    def of(cls, title: str) -> "_TitleForms":
-        normalized = normalize_title(title)
-        return cls(normalized=normalized, section_stripped=strip_section_prefix(normalized))
 
 
 def title_similarity(left: str, right: str) -> float:
