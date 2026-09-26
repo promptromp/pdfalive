@@ -37,6 +37,18 @@ Generate a clickable Table of Contents for any PDF. The tool analyzes font sizes
 
 Don't forget to set the appropriate API key environment variable for your provider (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
 
+**Reasoning effort:**
+
+Models with a reasoning-effort control accept it via the optional `--reasoning-effort`. Leave it out and each provider keeps its own default.
+
+	# Spend less on reasoning for a straightforward document
+	pdfalive generate-toc --reasoning-effort low input.pdf output.pdf
+
+	# Spend more on a dense or badly structured one
+	pdfalive generate-toc --reasoning-effort xhigh input.pdf output.pdf
+
+Accepted levels vary by model, not just by provider: `gpt-6-sol` and `gpt-6-luna` take `none`, `low`, `medium`, `high` and `xhigh`; `gpt-6-astra` takes the same minus `none`; Anthropic models additionally offer `max`. The value is passed through unvalidated, so a model that rejects a level responds with an error naming the levels it accepts. Providers without the control (Ollama, for instance) ignore it.
+
 **Working with scanned PDFs:**
 
 OCR is enabled by default. Scanned documents without extractable text will be automatically detected and OCR will be performed to extract text before TOC generation.
@@ -141,6 +153,9 @@ The input file should contain one path per line. Lines starting with `#` are tre
 	# Use a different LLM
 	pdfalive rename -q "Standardize filenames" --model-identifier 'claude-sonnet-5' *.pdf
 
+	# Constrain reasoning effort (optional)
+	pdfalive rename -q "Standardize filenames" --reasoning-effort low *.pdf
+
 	# Skip confirmation prompt
 	pdfalive rename -q "Add sequential numbering" -y *.pdf
 
@@ -200,6 +215,7 @@ exits with code 1 if any case falls below the thresholds.
 | `--mode` | `replay` (default, free), `record` (live LLM, writes cassette), or `live` |
 | `--case` | Run only the named case(s); may be repeated |
 | `--model-identifier` | LLM for record/live modes (default: `gpt-5.6`) |
+| `--reasoning-effort` | Reasoning effort for record/live modes (unset by default) |
 | `--loose-replay` | Replay by call order even if prompts drifted since recording |
 | `--request-delay` | Seconds between LLM calls (default: 0 in replay, pipeline default otherwise) |
 | `--num-processes` | Parallel processes for feature extraction (default: CPU count - 1) |
@@ -226,6 +242,7 @@ pdfalive supports TOML configuration files for setting default CLI options. This
 	# Global settings (shared across commands)
 	[global]
 	model-identifier = "gpt-5.6"
+	reasoning-effort = "medium"   # optional; omit to use the provider's default
 	show-token-usage = true
 
 	# Settings for generate-toc command

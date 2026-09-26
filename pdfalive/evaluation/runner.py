@@ -22,12 +22,12 @@ from pathlib import Path
 from typing import Literal, cast
 
 import pymupdf
-from langchain.chat_models import init_chat_model
 from langchain.chat_models.base import BaseChatModel
 from pydantic import BaseModel, Field
 
 from pdfalive.evaluation.cassette import RecordingChatModel, ReplayChatModel
 from pdfalive.evaluation.metrics import EvalReport, GoldenEntry, evaluate_toc
+from pdfalive.llm import build_chat_model
 from pdfalive.models.toc import TOC, TOCEntry
 from pdfalive.processors.toc_generator import DEFAULT_REQUEST_DELAY_SECONDS, TOCGenerator
 
@@ -104,15 +104,21 @@ def discover_cases(evals_dir: Path) -> list[EvalCase]:
     return cases
 
 
-def _build_llm(case: EvalCase, mode: EvalMode, model_identifier: str, strict_replay: bool) -> BaseChatModel:
+def _build_llm(
+    case: EvalCase,
+    mode: EvalMode,
+    model_identifier: str,
+    strict_replay: bool,
+    reasoning_effort: str | None = None,
+) -> BaseChatModel:
     """Build the chat model for the requested evaluation mode."""
     if mode == "replay":
         return cast(BaseChatModel, ReplayChatModel(cassette_path=case.cassette_path, strict=strict_replay))
     if mode == "record":
-        real_llm = init_chat_model(model=model_identifier)
+        real_llm = build_chat_model(model_identifier, reasoning_effort)
         return cast(BaseChatModel, RecordingChatModel(llm=real_llm, cassette_path=case.cassette_path))
     if mode == "live":
-        return init_chat_model(model=model_identifier)
+        return build_chat_model(model_identifier, reasoning_effort)
     raise ValueError(f"Unknown evaluation mode: {mode!r}")
 
 
@@ -123,6 +129,7 @@ def run_eval_case(
     strict_replay: bool = True,
     request_delay: float | None = None,
     num_processes: int | None = None,
+    reasoning_effort: str | None = None,
 ) -> EvalReport:
     """Run the TOC generation pipeline on a case's PDF and score it against golden data.
 
@@ -134,6 +141,8 @@ def run_eval_case(
         request_delay: Seconds between LLM calls; defaults to 0 for replay and
             the pipeline default for record/live.
         num_processes: Feature-extraction parallelism (passed to TOCGenerator).
+        reasoning_effort: Reasoning effort for record/live modes, or None to
+            leave the provider's default in place.
 
     Returns:
         The EvalReport scoring the generated TOC against the golden entries.
@@ -144,7 +153,7 @@ def run_eval_case(
             "Eval PDFs are local-only (not committed); see the golden file's description for how to obtain it."
         )
 
-    llm = _build_llm(case, mode, model_identifier, strict_replay)
+    llm = _build_llm(case, mode, model_identifier, strict_replay, reasoning_effort)
 
     if request_delay is None:
         request_delay = _REPLAY_REQUEST_DELAY_SECONDS if mode == "replay" else DEFAULT_REQUEST_DELAY_SECONDS

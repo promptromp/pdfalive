@@ -9,6 +9,7 @@ class GlobalConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     model_identifier: str | None = Field(default=None, alias="model-identifier")
+    reasoning_effort: str | None = Field(default=None, alias="reasoning-effort")
     show_token_usage: bool | None = Field(default=None, alias="show-token-usage")
 
 
@@ -26,6 +27,7 @@ class GenerateTocConfig(BaseModel):
     postprocess: bool | None = None
     inplace: bool | None = None
     model_identifier: str | None = Field(default=None, alias="model-identifier")
+    reasoning_effort: str | None = Field(default=None, alias="reasoning-effort")
     show_token_usage: bool | None = Field(default=None, alias="show-token-usage")
 
 
@@ -48,6 +50,7 @@ class RenameConfig(BaseModel):
     query: str | None = None
     yes: bool | None = None
     model_identifier: str | None = Field(default=None, alias="model-identifier")
+    reasoning_effort: str | None = Field(default=None, alias="reasoning-effort")
     show_token_usage: bool | None = Field(default=None, alias="show-token-usage")
 
 
@@ -59,6 +62,7 @@ class EvalConfig(BaseModel):
     evals_dir: str | None = Field(default=None, alias="evals-dir")
     mode: str | None = None
     model_identifier: str | None = Field(default=None, alias="model-identifier")
+    reasoning_effort: str | None = Field(default=None, alias="reasoning-effort")
 
 
 class PdfAliveConfig(BaseModel):

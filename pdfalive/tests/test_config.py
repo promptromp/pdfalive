@@ -275,6 +275,34 @@ class TestConfigToDefaultMap:
         # Global settings should NOT appear in extract-text (no LLM usage)
         assert "extract-text" not in result
 
+    def test_reasoning_effort_flows_from_global_to_every_llm_command(self) -> None:
+        """A global reasoning-effort applies to each command that calls an LLM."""
+        config = PdfAliveConfig.model_validate({"global": {"reasoning-effort": "high"}})
+        result = _config_to_default_map(config)
+
+        assert result["generate-toc"]["reasoning_effort"] == "high"
+        assert result["rename"]["reasoning_effort"] == "high"
+        assert result["eval"]["reasoning_effort"] == "high"
+        # extract-text performs no LLM calls, so it gets no effort setting.
+        assert "extract-text" not in result
+
+    @pytest.mark.parametrize("command", ["generate-toc", "rename", "eval"])
+    def test_command_specific_reasoning_effort_overrides_global(self, command: str) -> None:
+        config = PdfAliveConfig.model_validate(
+            {"global": {"reasoning-effort": "low"}, command: {"reasoning-effort": "xhigh"}}
+        )
+        result = _config_to_default_map(config)
+
+        assert result[command]["reasoning_effort"] == "xhigh"
+
+    def test_reasoning_effort_absent_when_unset(self) -> None:
+        """Nothing is injected when the config does not mention effort."""
+        config = PdfAliveConfig.model_validate({"global": {"model-identifier": "gpt-6-luna"}})
+        result = _config_to_default_map(config)
+
+        assert "reasoning_effort" not in result["generate-toc"]
+        assert "reasoning_effort" not in result["rename"]
+
     def test_command_specific_overrides_global(self) -> None:
         """Test that command-specific settings override global settings."""
         config = PdfAliveConfig.model_validate(
