@@ -8,7 +8,6 @@ from typing import Any, cast
 
 import click
 import pymupdf
-from langchain.chat_models import init_chat_model
 from langsmith import traceable
 from rich.console import Console
 from rich.table import Table
@@ -16,6 +15,7 @@ from rich.table import Table
 from pdfalive.config import load_config_as_default_map
 from pdfalive.evaluation.metrics import SUMMARY_PAGE_TOLERANCE, EvalReport
 from pdfalive.evaluation.runner import EvalCase, EvalMode, discover_cases, run_eval_case
+from pdfalive.llm import build_chat_model
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
 from pdfalive.processors.rename_processor import RenameProcessor
@@ -141,6 +141,13 @@ def cli(ctx: click.Context) -> None:
     default=False,
     help="Modify the input file in place instead of creating a new output file.",
 )
+@click.option(
+    "--reasoning-effort",
+    type=str,
+    default=None,
+    help="Reasoning effort level for models that support it (e.g. 'none', 'low', 'medium', 'high', 'xhigh'). "
+    "Accepted levels vary by model; omitted by default, leaving the provider's own default.",
+)
 @traceable
 def generate_toc(
     input_file: str,
@@ -155,6 +162,7 @@ def generate_toc(
     ocr_output: bool,
     postprocess: bool,
     inplace: bool,
+    reasoning_effort: str | None,
 ) -> None:
     """Generate a table of contents for a PDF file."""
     # Validate that either output_file is provided or --inplace is set
@@ -228,7 +236,7 @@ def generate_toc(
                 performed_ocr = True
                 console.print("[green]OCR completed.[/green]")
 
-        llm = init_chat_model(model=model_identifier)
+        llm = build_chat_model(model_identifier, reasoning_effort)
         processor = TOCGenerator(doc=doc, llm=llm)
 
         usage = processor.run(
@@ -422,6 +430,13 @@ def extract_text(
     default=None,
     help="Exit with code 1 if any case's page accuracy (±1 page) falls below this.",
 )
+@click.option(
+    "--reasoning-effort",
+    type=str,
+    default=None,
+    help="Reasoning effort level for models that support it (e.g. 'none', 'low', 'medium', 'high', 'xhigh'). "
+    "Accepted levels vary by model; omitted by default, leaving the provider's own default.",
+)
 @traceable
 def eval_command(
     evals_dir: str,
@@ -433,6 +448,7 @@ def eval_command(
     num_processes: int | None,
     min_f1: float | None,
     min_page_accuracy: float | None,
+    reasoning_effort: str | None,
 ) -> None:
     """Evaluate TOC generation quality against golden (ground truth) data.
 
@@ -465,6 +481,7 @@ def eval_command(
             strict_replay=not loose_replay,
             request_delay=request_delay,
             num_processes=num_processes,
+            reasoning_effort=reasoning_effort,
         )
         reports.append((case, report))
 
@@ -554,6 +571,13 @@ def eval_command(
     help="Automatically apply renames without asking for confirmation.",
 )
 @click.option("--show-token-usage", is_flag=True, default=True, help="Display token usage statistics.")
+@click.option(
+    "--reasoning-effort",
+    type=str,
+    default=None,
+    help="Reasoning effort level for models that support it (e.g. 'none', 'low', 'medium', 'high', 'xhigh'). "
+    "Accepted levels vary by model; omitted by default, leaving the provider's own default.",
+)
 @traceable
 def rename(
     input_files: tuple[str, ...],
@@ -562,6 +586,7 @@ def rename(
     model_identifier: str,
     yes: bool,
     show_token_usage: bool,
+    reasoning_effort: str | None,
 ) -> None:
     """Rename files using LLM-powered intelligent renaming.
 
@@ -619,7 +644,7 @@ def rename(
     paths = [Path(f) for f in resolved_input_files]
 
     # Initialize LLM and processor
-    llm = init_chat_model(model=model_identifier)
+    llm = build_chat_model(model_identifier, reasoning_effort)
     processor = RenameProcessor(llm=llm)
 
     # Generate rename suggestions

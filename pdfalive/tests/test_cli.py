@@ -179,9 +179,9 @@ class TestRenameInputFile:
         assert "No valid file paths found" in result.output
 
     @patch("pdfalive.cli.RenameProcessor")
-    @patch("pdfalive.cli.init_chat_model")
+    @patch("pdfalive.cli.build_chat_model")
     def test_input_file_skips_comments_and_blank_lines(
-        self, mock_init_chat_model: MagicMock, mock_processor_cls: MagicMock, runner: CliRunner
+        self, mock_build_chat_model: MagicMock, mock_processor_cls: MagicMock, runner: CliRunner
     ) -> None:
         """Test that --input-file correctly skips comments and blank lines."""
         # Make processor.generate_renames return empty result to short-circuit
@@ -199,6 +199,54 @@ class TestRenameInputFile:
         result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
         # Should show "2 file(s)" (parsed correctly, skipping comments)
         assert "2" in result.output and "file" in result.output
+
+
+class TestReasoningEffort:
+    """Tests for the --reasoning-effort option reaching the chat model."""
+
+    @pytest.mark.parametrize("command", ["generate-toc", "rename"])
+    def test_option_appears_in_help(self, runner: CliRunner, command: str) -> None:
+        result = runner.invoke(cli, [command, "--help"])
+
+        assert result.exit_code == 0
+        assert "--reasoning-effort" in result.output
+
+    @patch("pdfalive.cli.RenameProcessor")
+    @patch("pdfalive.cli.build_chat_model")
+    def test_effort_is_forwarded_to_the_model(
+        self, mock_build_chat_model: MagicMock, mock_processor_cls: MagicMock, runner: CliRunner
+    ) -> None:
+        mock_result = MagicMock()
+        mock_result.operations = []
+        mock_processor_cls.return_value.generate_renames.return_value = (mock_result, MagicMock())
+        Path("file1.pdf").write_bytes(b"%PDF-1.4 dummy")
+
+        runner.invoke(cli, ["rename", "-q", "Add prefix", "--reasoning-effort", "xhigh", "file1.pdf"])
+
+        mock_build_chat_model.assert_called_once_with("gpt-5.6", "xhigh")
+
+    @patch("pdfalive.cli.RenameProcessor")
+    @patch("pdfalive.cli.build_chat_model")
+    def test_effort_defaults_to_none(
+        self, mock_build_chat_model: MagicMock, mock_processor_cls: MagicMock, runner: CliRunner
+    ) -> None:
+        """Without the option the model is built exactly as it was before."""
+        mock_result = MagicMock()
+        mock_result.operations = []
+        mock_processor_cls.return_value.generate_renames.return_value = (mock_result, MagicMock())
+        Path("file1.pdf").write_bytes(b"%PDF-1.4 dummy")
+
+        runner.invoke(cli, ["rename", "-q", "Add prefix", "file1.pdf"])
+
+        mock_build_chat_model.assert_called_once_with("gpt-5.6", None)
+
+    def test_config_file_supplies_the_default(self, runner: CliRunner) -> None:
+        Path("pdfalive.toml").write_text('[global]\nreasoning-effort = "medium"\n')
+
+        result = runner.invoke(cli, ["generate-toc", "--help"])
+
+        assert result.exit_code == 0
+        assert "medium" in result.output
 
 
 class TestConfigIntegration:
@@ -355,12 +403,12 @@ class TestGenerateTocTempFileCleanup:
         return CliRunner()
 
     @patch("pdfalive.cli.TOCGenerator")
-    @patch("pdfalive.cli.init_chat_model")
+    @patch("pdfalive.cli.build_chat_model")
     @patch("pdfalive.cli.OCRProcessor")
     def test_inplace_failure_cleans_up_temp_file(
         self,
         mock_ocr_cls: MagicMock,
-        mock_init_chat_model: MagicMock,
+        mock_build_chat_model: MagicMock,
         mock_toc_cls: MagicMock,
         runner: CliRunner,
         tmp_path: Path,
@@ -383,12 +431,12 @@ class TestGenerateTocTempFileCleanup:
         )
 
     @patch("pdfalive.cli.TOCGenerator")
-    @patch("pdfalive.cli.init_chat_model")
+    @patch("pdfalive.cli.build_chat_model")
     @patch("pdfalive.cli.OCRProcessor")
     def test_inplace_failure_preserves_original_input(
         self,
         mock_ocr_cls: MagicMock,
-        mock_init_chat_model: MagicMock,
+        mock_build_chat_model: MagicMock,
         mock_toc_cls: MagicMock,
         runner: CliRunner,
         tmp_path: Path,
@@ -409,12 +457,12 @@ class TestGenerateTocTempFileCleanup:
         assert input_pdf.read_bytes() == original_content
 
     @patch("pdfalive.cli.TOCGenerator")
-    @patch("pdfalive.cli.init_chat_model")
+    @patch("pdfalive.cli.build_chat_model")
     @patch("pdfalive.cli.OCRProcessor")
     def test_non_inplace_failure_does_not_delete_output_path(
         self,
         mock_ocr_cls: MagicMock,
-        mock_init_chat_model: MagicMock,
+        mock_build_chat_model: MagicMock,
         mock_toc_cls: MagicMock,
         runner: CliRunner,
         tmp_path: Path,
@@ -437,12 +485,12 @@ class TestGenerateTocTempFileCleanup:
         assert output_pdf.read_bytes() == b"pre-existing output content"
 
     @patch("pdfalive.cli.TOCGenerator")
-    @patch("pdfalive.cli.init_chat_model")
+    @patch("pdfalive.cli.build_chat_model")
     @patch("pdfalive.cli.OCRProcessor")
     def test_inplace_ocr_failure_cleans_up_temp_file(
         self,
         mock_ocr_cls: MagicMock,
-        mock_init_chat_model: MagicMock,
+        mock_build_chat_model: MagicMock,
         mock_toc_cls: MagicMock,
         runner: CliRunner,
         tmp_path: Path,

@@ -86,6 +86,8 @@ def _config_to_default_map(config: PdfAliveConfig) -> dict[str, dict[str, Any]]:
     global_defaults: dict[str, Any] = {}
     if config.global_.model_identifier is not None:
         global_defaults["model_identifier"] = config.global_.model_identifier
+    if config.global_.reasoning_effort is not None:
+        global_defaults["reasoning_effort"] = config.global_.reasoning_effort
     if config.global_.show_token_usage is not None:
         global_defaults["show_token_usage"] = config.global_.show_token_usage
 
@@ -111,6 +113,8 @@ def _config_to_default_map(config: PdfAliveConfig) -> dict[str, dict[str, Any]]:
     # Command-specific model/token settings override global
     if generate_toc.model_identifier is not None:
         generate_toc_defaults["model_identifier"] = generate_toc.model_identifier
+    if generate_toc.reasoning_effort is not None:
+        generate_toc_defaults["reasoning_effort"] = generate_toc.reasoning_effort
     if generate_toc.show_token_usage is not None:
         generate_toc_defaults["show_token_usage"] = generate_toc.show_token_usage
     if generate_toc_defaults:
@@ -140,6 +144,8 @@ def _config_to_default_map(config: PdfAliveConfig) -> dict[str, dict[str, Any]]:
     # Command-specific model/token settings override global
     if rename.model_identifier is not None:
         rename_defaults["model_identifier"] = rename.model_identifier
+    if rename.reasoning_effort is not None:
+        rename_defaults["reasoning_effort"] = rename.reasoning_effort
     if rename.show_token_usage is not None:
         rename_defaults["show_token_usage"] = rename.show_token_usage
     if rename_defaults:
@@ -149,6 +155,8 @@ def _config_to_default_map(config: PdfAliveConfig) -> dict[str, dict[str, Any]]:
     eval_defaults: dict[str, Any] = {}
     if config.global_.model_identifier is not None:
         eval_defaults["model_identifier"] = config.global_.model_identifier
+    if config.global_.reasoning_effort is not None:
+        eval_defaults["reasoning_effort"] = config.global_.reasoning_effort
     eval_config = config.eval
     if eval_config.evals_dir is not None:
         eval_defaults["evals_dir"] = eval_config.evals_dir
@@ -156,6 +164,8 @@ def _config_to_default_map(config: PdfAliveConfig) -> dict[str, dict[str, Any]]:
         eval_defaults["mode"] = eval_config.mode
     if eval_config.model_identifier is not None:
         eval_defaults["model_identifier"] = eval_config.model_identifier
+    if eval_config.reasoning_effort is not None:
+        eval_defaults["reasoning_effort"] = eval_config.reasoning_effort
     if eval_defaults:
         default_map["eval"] = eval_defaults
 

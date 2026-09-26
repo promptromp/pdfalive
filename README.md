@@ -76,6 +76,20 @@ pdfalive generate-toc --model-identifier 'ollama/llama3' input.pdf output.pdf
 
 Set the appropriate API key for your provider (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
 
+**Reasoning effort:**
+
+Models that expose a reasoning-effort control accept it via `--reasoning-effort`, which is optional — leave it out and each provider keeps its own default:
+
+```bash
+# Spend less on reasoning for a straightforward document
+pdfalive generate-toc --reasoning-effort low input.pdf output.pdf
+
+# Spend more on a dense or badly structured one
+pdfalive generate-toc --reasoning-effort xhigh input.pdf output.pdf
+```
+
+The accepted levels vary by model, not just by provider: `gpt-6-sol` and `gpt-6-luna` take `none`, `low`, `medium`, `high` and `xhigh`, `gpt-6-astra` takes the same minus `none`, and Anthropic models additionally offer `max`. pdfalive passes the value through rather than validating it, so a model that rejects a level answers with an error naming the levels it does accept. Providers with no such control, such as Ollama, ignore the setting.
+
 **Scanned PDFs:**
 
 OCR is enabled by default. Scanned documents without extractable text are automatically detected and processed:
@@ -112,6 +126,7 @@ Postprocessing uses an additional LLM call to:
 | `--force` | Overwrite existing TOC if the PDF already has bookmarks |
 | `--ocr-language` | Set OCR language (default: `eng`). Use [Tesseract language codes](https://tesseract-ocr.github.io/tessdoc/Data-Files-in-different-versions.html) |
 | `--request-delay` | Delay between LLM calls for rate limiting (default: 10s) |
+| `--reasoning-effort` | Reasoning effort level for models that support it (unset by default) |
 
 ### extract-text
 
@@ -184,6 +199,7 @@ pdfalive rename -q "Add sequential numbering prefix" -y *.pdf
 |--------|-------------|
 | `-f, --input-file` | Read input file paths from a text file (one per line) |
 | `--model-identifier` | Choose which LLM to use (default: `gpt-5.6`) |
+| `--reasoning-effort` | Reasoning effort level for models that support it (unset by default) |
 | `-y, --yes` | Automatically apply renames without confirmation |
 | `--show-token-usage` | Display token usage statistics (default: enabled) |
 
@@ -202,6 +218,7 @@ pdfalive supports TOML configuration files for setting default options. This is 
 # Global settings (shared across commands)
 [global]
 model-identifier = "gpt-5.6"
+reasoning-effort = "medium"   # optional; omit to use the provider's default
 show-token-usage = true
 
 # Settings for generate-toc command
