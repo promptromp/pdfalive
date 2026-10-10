@@ -3,19 +3,22 @@
 import os
 import shutil
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
 import click
 import pymupdf
 from langsmith import traceable
-from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from pdfalive.config import load_config_as_default_map
-from pdfalive.evaluation.metrics import SUMMARY_PAGE_TOLERANCE, EvalReport
+from pdfalive.console import TextPart, create_console, safe_text, truncate_visible, visible
+from pdfalive.evaluation.metrics import SUMMARY_PAGE_TOLERANCE, EvalReport, GoldenEntry
 from pdfalive.evaluation.runner import EvalCase, EvalMode, discover_cases, run_eval_case
 from pdfalive.llm import build_chat_model
+from pdfalive.models.toc import TOCEntry
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
 from pdfalive.processors.rename_processor import RenameProcessor
@@ -24,6 +27,14 @@ from pdfalive.processors.toc_generator import (
     TOCGenerator,
     apply_toc_to_document,
 )
+
+
+# Rename preview table: reasoning shown wider than this many terminal cells is cut, ending in an ellipsis.
+_RENAME_REASONING_PREVIEW_WIDTH = 50
+
+# Rename preview table: confidence at or above these thresholds shows green / yellow, below them red.
+_HIGH_CONFIDENCE_THRESHOLD = 0.9
+_MEDIUM_CONFIDENCE_THRESHOLD = 0.7
 
 
 def _save_inplace(temp_file: str, target_file: str) -> None:
@@ -43,7 +54,28 @@ def _save_inplace(temp_file: str, target_file: str) -> None:
     os.chmod(target_file, original_stat.st_mode)
 
 
-console = Console()
+console = create_console()
+
+
+def _in_place_note(inplace: bool) -> tuple[TextPart, ...]:
+    """The " (in place)" marker that follows the input path in startup lines, or nothing."""
+    return (" ", ("(in place)", "yellow")) if inplace else ()
+
+
+def _done_line(path: str, inplace: bool) -> Text:
+    """The closing line of a PDF-writing command, naming the input modified in place or the output written."""
+    if inplace:
+        return safe_text(("All done.", "bold green"), " Modified ", (path, "bold cyan"), " in place.")
+    return safe_text(("All done.", "bold green"), " Saved to ", (path, "bold cyan"), ".")
+
+
+def _confidence_style(confidence: float | None) -> str:
+    """Style of a rename's confidence cell: green when high, yellow when medium, red when low or unknown."""
+    if confidence is not None and confidence >= _HIGH_CONFIDENCE_THRESHOLD:
+        return "green"
+    if confidence is not None and confidence >= _MEDIUM_CONFIDENCE_THRESHOLD:
+        return "yellow"
+    return "red"
 
 
 def _load_config_callback(ctx: click.Context, param: click.Parameter, value: str | None) -> None:
@@ -60,9 +92,9 @@ def _load_config_callback(ctx: click.Context, param: click.Parameter, value: str
     try:
         default_map = load_config_as_default_map(config_path)
     except FileNotFoundError:
-        raise click.BadParameter(f"Config file not found: {value}", param=param) from None
+        raise click.BadParameter(f"Config file not found: {visible(str(value))}", param=param) from None
     except Exception as e:
-        raise click.BadParameter(f"Error loading config file: {e}", param=param) from None
+        raise click.BadParameter(f"Error loading config file: {visible(str(e), multiline=True)}", param=param) from None
 
     if default_map:
         # Merge with existing default_map (if any), config takes lower precedence
@@ -178,17 +210,19 @@ def generate_toc(
         temp_fd, temp_path = tempfile.mkstemp(suffix=input_path.suffix, dir=input_path.parent)
         os.close(temp_fd)
         actual_output_file = temp_path
-        console.print(
-            f"Generating TOC for [bold cyan]{input_file}[/bold cyan] [yellow](in place)[/yellow] "
-            f"using model [bold magenta]{model_identifier}[/bold magenta]..."
-        )
     else:
         assert output_file is not None  # Validated above
         actual_output_file = output_file
-        console.print(
-            f"Generating TOC for [bold cyan]{input_file}[/bold cyan] "
-            f"using model [bold magenta]{model_identifier}[/bold magenta]..."
+    console.print(
+        safe_text(
+            "Generating TOC for ",
+            (input_file, "bold cyan"),
+            *_in_place_note(inplace),
+            " using model ",
+            (model_identifier, "bold magenta"),
+            "...",
         )
+    )
 
     # Show active options summary
     options_parts = []
@@ -202,7 +236,7 @@ def generate_toc(
             options_parts.append("ocr-output")
     else:
         options_parts.append("ocr disabled")
-    console.print(f"  Options: [cyan]{', '.join(options_parts)}[/cyan]")
+    console.print(safe_text("  Options: ", (", ".join(options_parts), "cyan")))
 
     try:
         doc = pymupdf.open(input_file)
@@ -211,7 +245,7 @@ def generate_toc(
 
         # Check if OCR is needed and perform it if enabled
         if ocr:
-            console.print("[cyan]Checking if document needs OCR...[/cyan]")
+            console.print("Checking if document needs OCR...", style="cyan")
             ocr_processor = OCRProcessor(
                 detection_strategy=NoTextDetectionStrategy(),
                 language=ocr_language,
@@ -220,11 +254,11 @@ def generate_toc(
 
             needs_ocr = ocr_processor.needs_ocr(doc)
             if needs_ocr:
-                console.print("[yellow]Insufficient text detected in PDF. Performing OCR to extract text...[/yellow]")
+                console.print("Insufficient text detected in PDF. Performing OCR to extract text...", style="yellow")
 
                 # If --ocr-output is not set, keep the original document for final output
                 if not ocr_output:
-                    console.print("[dim]  OCR text used for TOC generation only (use --ocr-output to include)[/dim]")
+                    console.print("  OCR text used for TOC generation only (use --ocr-output to include)", style="dim")
                     original_doc = doc
                     doc = pymupdf.open(input_file)  # Reopen for OCR processing
 
@@ -234,7 +268,7 @@ def generate_toc(
                     doc.close()
                 doc = ocr_doc
                 performed_ocr = True
-                console.print("[green]OCR completed.[/green]")
+                console.print("OCR completed.", style="green")
 
         llm = build_chat_model(model_identifier, reasoning_effort)
         processor = TOCGenerator(doc=doc, llm=llm)
@@ -245,7 +279,7 @@ def generate_toc(
 
         # If --ocr-output is not set and we performed OCR, apply TOC to original and save that instead
         if not ocr_output and performed_ocr and original_doc is not None:
-            console.print("[cyan]Applying TOC to original document (discarding OCR text layer)...[/cyan]")
+            console.print("Applying TOC to original document (discarding OCR text layer)...", style="cyan")
             toc = doc.get_toc()
             apply_toc_to_document(original_doc, toc, actual_output_file)
             original_doc.close()
@@ -257,11 +291,7 @@ def generate_toc(
         # For inplace mode, replace the original file with the temp file
         if inplace:
             _save_inplace(actual_output_file, input_file)
-            console.print(f"[bold green]All done.[/bold green] Modified [bold cyan]{input_file}[/bold cyan] in place.")
-        else:
-            console.print(
-                f"[bold green]All done.[/bold green] Saved modified PDF to [bold cyan]{actual_output_file}[/bold cyan]."
-            )
+        console.print(_done_line(input_file if inplace else actual_output_file, inplace))
 
         if show_token_usage:
             usage.print_summary(console)
@@ -326,12 +356,16 @@ def extract_text(
         assert output_file is not None  # Validated above
         actual_output_file = output_file
 
-    if inplace:
-        console.print(f"Processing [bold cyan]{input_file}[/bold cyan] [yellow](in place)[/yellow]...")
-    else:
-        console.print(f"Processing [bold cyan]{input_file}[/bold cyan]...")
+    console.print(safe_text("Processing ", (input_file, "bold cyan"), *_in_place_note(inplace), "..."))
     console.print(
-        f"  Language: [cyan]{ocr_language}[/cyan], DPI: [cyan]{ocr_dpi}[/cyan], Force OCR: [cyan]{force}[/cyan]"
+        safe_text(
+            "  Language: ",
+            (ocr_language, "cyan"),
+            ", DPI: ",
+            (str(ocr_dpi), "cyan"),
+            ", Force OCR: ",
+            (str(force), "cyan"),
+        )
     )
 
     try:
@@ -348,14 +382,14 @@ def extract_text(
 
         if needs_ocr or force:
             if needs_ocr:
-                console.print("[yellow]Insufficient text detected in PDF. Performing OCR...[/yellow]")
+                console.print("Insufficient text detected in PDF. Performing OCR...", style="yellow")
             else:
-                console.print("[yellow]Force OCR enabled. Performing OCR...[/yellow]")
+                console.print("Force OCR enabled. Performing OCR...", style="yellow")
 
             # process_in_memory returns a NEW document with OCR text layer
             ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True)
             doc.close()
-            console.print("[green]OCR completed.[/green]")
+            console.print("OCR completed.", style="green")
 
             # Save the document with OCR text layer
             ocr_doc.save(actual_output_file)
@@ -364,19 +398,13 @@ def extract_text(
             # For inplace mode, replace the original file with the temp file
             if inplace:
                 _save_inplace(actual_output_file, input_file)
-                console.print(
-                    f"[bold green]All Done.[/bold green] Modified [bold cyan]{input_file}[/bold cyan] in place."
-                )
-            else:
-                console.print(
-                    f"[bold green]All Done.[/bold green] Saved to [bold cyan]{actual_output_file}[/bold cyan]."
-                )
+            console.print(_done_line(input_file if inplace else actual_output_file, inplace))
         else:
             doc.close()
             # Clean up temp file if it was created but not used
             if inplace:
                 os.unlink(actual_output_file)
-            console.print("[green]Document already has sufficient extractable text. No OCR needed.[/green]")
+            console.print("Document already has sufficient extractable text. No OCR needed.", style="green")
             console.print("Use --force to process anyway.")
     except Exception:
         # Clean up temp file on failure to avoid leaking it in the input file's directory
@@ -462,18 +490,19 @@ def eval_command(
         cases_by_name = {case.name: case for case in cases}
         unknown = [name for name in case_names if name not in cases_by_name]
         if unknown:
-            raise click.UsageError(
-                f"Unknown case(s): {', '.join(unknown)}. Available: {', '.join(sorted(cases_by_name)) or '(none)'}"
-            )
+            available = ", ".join(sorted(cases_by_name)) or "(none)"
+            raise click.UsageError(f"Unknown case(s): {visible(', '.join(unknown))}. Available: {visible(available)}")
         cases = [cases_by_name[name] for name in case_names]
 
     if not cases:
-        raise click.UsageError(f"No evaluation cases found under {evals_dir}/golden/.")
+        raise click.UsageError(f"No evaluation cases found under {visible(evals_dir)}/golden/.")
 
     eval_mode = cast(EvalMode, mode)
     reports: list[tuple[EvalCase, EvalReport]] = []
     for case in cases:
-        console.print(f"Evaluating case [bold cyan]{case.name}[/bold cyan] ([magenta]{eval_mode}[/magenta] mode)...")
+        console.print(
+            safe_text("Evaluating case ", (case.name, "bold cyan"), " (", (eval_mode, "magenta"), " mode)...")
+        )
         report = run_eval_case(
             case,
             mode=eval_mode,
@@ -500,7 +529,7 @@ def eval_command(
     for case, report in reports:
         summary = report.summary()
         table.add_row(
-            case.name,
+            safe_text(case.name),
             str(summary["golden_entries"]),
             str(summary["generated_entries"]),
             str(summary["matched"]),
@@ -516,16 +545,17 @@ def eval_command(
     console.print(table)
 
     for case, report in reports:
-        if report.missing:
-            console.print(f"\n[yellow]{case.name}: {len(report.missing)} missing golden entries:[/yellow]")
-            for entry in report.missing:
-                console.print(f"  - {entry.title} (page {entry.page_number}, level {entry.level})")
-        if report.spurious:
-            console.print(f"\n[yellow]{case.name}: {len(report.spurious)} spurious generated entries:[/yellow]")
-            for spurious_entry in report.spurious:
-                console.print(
-                    f"  - {spurious_entry.title} (page {spurious_entry.page_number}, level {spurious_entry.level})"
-                )
+        entry_blocks: tuple[tuple[str, Sequence[GoldenEntry | TOCEntry]], ...] = (
+            ("missing golden", report.missing),
+            ("spurious generated", report.spurious),
+        )
+        for kind, entries in entry_blocks:
+            if not entries:
+                continue
+            console.print()
+            console.print(safe_text((f"{case.name}: {len(entries)} {kind} entries:", "yellow")))
+            for entry in entries:
+                console.print(safe_text(f"  - {entry.title} (page {entry.page_number}, level {entry.level})"))
 
     failures = []
     for case, report in reports:
@@ -541,7 +571,7 @@ def eval_command(
     if failures:
         console.print()
         for failure in failures:
-            console.print(f"[bold red]Threshold failure:[/bold red] {failure}")
+            console.print(safe_text(("Threshold failure:", "bold red"), " ", failure))
         raise SystemExit(1)
 
 
@@ -625,19 +655,26 @@ def rename(
                     continue
                 file_path = Path(line)
                 if not file_path.exists():
-                    raise click.UsageError(f"File not found: '{line}' (line {line_num} in {input_file})")
+                    raise click.UsageError(
+                        f"File not found: '{visible(line)}' (line {line_num} in {visible(input_file)})"
+                    )
                 file_paths.append(line)
         if not file_paths:
-            raise click.UsageError(f"No valid file paths found in {input_file}")
+            raise click.UsageError(f"No valid file paths found in {visible(input_file)}")
         resolved_input_files: tuple[str, ...] = tuple(file_paths)
     else:
         resolved_input_files = input_files
 
     console.print(
-        f"Renaming [bold cyan]{len(resolved_input_files)}[/bold cyan] file(s) "
-        f"using model [bold magenta]{model_identifier}[/bold magenta]..."
+        safe_text(
+            "Renaming ",
+            (str(len(resolved_input_files)), "bold cyan"),
+            " file(s) using model ",
+            (model_identifier, "bold magenta"),
+            "...",
+        )
     )
-    console.print(f"Query: [italic]{query}[/italic]")
+    console.print(safe_text("Query: ", (query, "italic")))
     console.print()
 
     # Convert to Path objects
@@ -648,22 +685,22 @@ def rename(
     processor = RenameProcessor(llm=llm)
 
     # Generate rename suggestions
-    console.print("[cyan]Generating rename suggestions...[/cyan]")
+    console.print("Generating rename suggestions...", style="cyan")
     try:
         result, usage = processor.generate_renames(paths, query)
     except ValueError as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
+        console.print(safe_text(("Error:", "bold red"), " ", str(e)))
         raise SystemExit(1) from e
 
     if not result.operations:
-        console.print("[yellow]No rename operations suggested.[/yellow]")
+        console.print("No rename operations suggested.", style="yellow")
         return
 
     # Resolve full paths
     resolved = processor._resolve_full_paths(result.operations, paths)
 
     if not resolved:
-        console.print("[yellow]No valid rename operations to apply.[/yellow]")
+        console.print("No valid rename operations to apply.", style="yellow")
         return
 
     # Build operation lookup for display
@@ -671,7 +708,7 @@ def rename(
 
     # Display proposed renames in a table
     console.print()
-    console.print("[bold]Proposed renames:[/bold]")
+    console.print("Proposed renames:", style="bold")
 
     table = Table(
         show_header=True,
@@ -686,22 +723,15 @@ def rename(
 
     for source, target in resolved:
         op = op_lookup.get(source.name)
-        confidence_str = f"{op.confidence:.0%}" if op else "N/A"
-        reasoning = op.reasoning if op else ""
-
-        # Color-code confidence
-        if op and op.confidence >= 0.9:
-            confidence_style = "green"
-        elif op and op.confidence >= 0.7:
-            confidence_style = "yellow"
-        else:
-            confidence_style = "red"
+        confidence = op.confidence if op else None
+        confidence_label = f"{confidence:.0%}" if confidence is not None else "N/A"
+        reasoning = safe_text(truncate_visible(op.reasoning if op else "", _RENAME_REASONING_PREVIEW_WIDTH))
 
         table.add_row(
-            source.name,
-            target.name,
-            f"[{confidence_style}]{confidence_str}[/{confidence_style}]",
-            reasoning[:50] + "..." if len(reasoning) > 50 else reasoning,
+            safe_text(source.name),
+            safe_text(target.name),
+            safe_text((confidence_label, _confidence_style(confidence))),
+            reasoning,
         )
 
     console.print(table)
@@ -709,24 +739,24 @@ def rename(
 
     # Ask for confirmation unless --yes is provided
     if not yes and not click.confirm("Apply these renames?", default=False):
-        console.print("[yellow]Aborted. No files were renamed.[/yellow]")
+        console.print("Aborted. No files were renamed.", style="yellow")
         if show_token_usage:
             usage.print_summary(console)
         return
 
     # Apply renames
-    console.print("[cyan]Applying renames...[/cyan]")
+    console.print("Applying renames...", style="cyan")
     apply_result = processor.apply_renames(resolved)
 
     # Report any failures
     for error in apply_result.failed:
-        console.print(f"[bold red]Error:[/bold red] {error.error}")
+        console.print(safe_text(("Error:", "bold red"), " ", error.error))
 
     # Report summary
     if apply_result.success_count > 0:
-        console.print(f"[bold green]Successfully renamed {apply_result.success_count} file(s).[/bold green]")
+        console.print(f"Successfully renamed {apply_result.success_count} file(s).", style="bold green")
     if apply_result.failure_count > 0:
-        console.print(f"[bold yellow]Failed to rename {apply_result.failure_count} file(s).[/bold yellow]")
+        console.print(f"Failed to rename {apply_result.failure_count} file(s).", style="bold yellow")
 
     if show_token_usage:
         usage.print_summary(console)

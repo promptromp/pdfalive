@@ -4,11 +4,11 @@ from abc import ABC, abstractmethod
 from multiprocessing import Pool, cpu_count
 
 import pymupdf
-from rich.console import Console
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+
+from pdfalive.console import create_console, create_progress
 
 
-console = Console()
+console = create_console()
 
 
 def _check_page_has_text(args: tuple) -> tuple[int, bool]:
@@ -148,14 +148,8 @@ class NoTextDetectionStrategy(OCRDetectionStrategy):
         pages_with_text = 0
 
         if show_progress:
-            console.print(f"[cyan]Checking {pages_to_check} page(s) for existing text...[/cyan]")
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                console=console,
-            ) as progress:
+            console.print(f"Checking {pages_to_check} page(s) for existing text...", style="cyan")
+            with create_progress(console) as progress:
                 task = progress.add_task("Detecting text...", total=pages_to_check)
 
                 for page_idx in range(pages_to_check):
@@ -195,21 +189,15 @@ class NoTextDetectionStrategy(OCRDetectionStrategy):
 
         if show_progress:
             console.print(
-                f"[cyan]Checking {pages_to_check} page(s) for existing text "
-                f"(using {num_processes} parallel processes)...[/cyan]"
+                f"Checking {pages_to_check} page(s) for existing text (using {num_processes} parallel processes)...",
+                style="cyan",
             )
 
         # Process in parallel
         with Pool(processes=num_processes) as pool:
             results = []
             if show_progress:
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(),
-                    TaskProgressColumn(),
-                    console=console,
-                ) as progress:
+                with create_progress(console) as progress:
                     task = progress.add_task("Detecting text...", total=pages_to_check)
 
                     for result in pool.imap_unordered(_check_page_has_text, args_list):

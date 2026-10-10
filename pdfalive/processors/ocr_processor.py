@@ -7,13 +7,12 @@ from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 import pymupdf
-from rich.console import Console
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 
+from pdfalive.console import create_console, create_progress
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy, OCRDetectionStrategy
 
 
-console = Console()
+console = create_console()
 
 
 def _ocr_page_range(args: tuple) -> tuple[int, int, str]:
@@ -184,14 +183,8 @@ class OCRProcessor:
             show_progress: Whether to show progress indicator.
         """
         if show_progress:
-            console.print(f"[cyan]Performing OCR on {doc.page_count} page(s) (DPI={self.dpi})...[/cyan]")
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                console=console,
-            ) as progress:
+            console.print(f"Performing OCR on {doc.page_count} page(s) (DPI={self.dpi})...", style="cyan")
+            with create_progress(console) as progress:
                 task = progress.add_task("Performing OCR...", total=doc.page_count)
 
                 for page in doc:
@@ -263,21 +256,16 @@ class OCRProcessor:
                 page_count = doc.page_count
                 doc.close()
                 console.print(
-                    f"[cyan]Performing OCR on {page_count} page(s) "
-                    f"(using {num_processes} parallel processes, DPI={self.dpi})...[/cyan]"
+                    f"Performing OCR on {page_count} page(s) "
+                    f"(using {num_processes} parallel processes, DPI={self.dpi})...",
+                    style="cyan",
                 )
 
             # Process in parallel
             with Pool(processes=num_processes) as pool:
                 results = []
                 if show_progress:
-                    with Progress(
-                        SpinnerColumn(),
-                        TextColumn("[progress.description]{task.description}"),
-                        BarColumn(),
-                        TaskProgressColumn(),
-                        console=console,
-                    ) as progress:
+                    with create_progress(console) as progress:
                         task = progress.add_task("OCR processing...", total=num_processes)
 
                         for result in pool.imap_unordered(_ocr_page_range, args_list):
@@ -291,7 +279,7 @@ class OCRProcessor:
 
             # Merge the processed parts back together
             if show_progress:
-                console.print("[cyan]Merging OCR results...[/cyan]")
+                console.print("Merging OCR results...", style="cyan")
 
             merged_doc = pymupdf.open()
             for _, _, part_path in results:

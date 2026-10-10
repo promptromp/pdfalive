@@ -1,10 +1,8 @@
 """Unit tests for token counting utilities."""
 
-from io import StringIO
-
 import pytest
-from rich.console import Console
 
+import pdfalive.tokens as tokens_module
 from pdfalive.tokens import (
     DEFAULT_ENCODING,
     TokenUsage,
@@ -168,47 +166,42 @@ class TestTokenUsage:
         assert combined.output_tokens == 50
         assert combined.llm_calls == 1
 
-    def test_print_summary_output(self, usage):
-        """Test that print_summary outputs formatted token usage."""
+    @pytest.mark.parametrize("calls", [[], [(1000, 500)], [(100, 50), (1200, 75)]])
+    def test_summary_text_lists_each_count(self, usage, calls):
+        """summary_text renders a heading and each count, thousands-separated and highlighted."""
+        for input_tokens, output_tokens in calls:
+            usage.add_call(input_tokens=input_tokens, output_tokens=output_tokens, description="test")
+        counts = [
+            f"{usage.llm_calls}",
+            f"{usage.input_tokens:,}",
+            f"{usage.output_tokens:,}",
+            f"{usage.total_tokens:,}",
+        ]
+
+        text = usage.summary_text()
+
+        assert text.plain.splitlines() == [
+            "Token Usage:",
+            f"  LLM calls: {counts[0]}",
+            f"  Input tokens: {counts[1]}",
+            f"  Output tokens: {counts[2]}",
+            f"  Total tokens: {counts[3]}",
+        ]
+        styled = [(text.plain[span.start : span.end], span.style) for span in text.spans]
+        assert not text.style  # only the heading and the counts are styled, not the whole summary
+        assert styled == [("Token Usage:", "bold"), *((count, "cyan") for count in counts)]
+
+    def test_print_summary_prints_the_summary_after_a_blank_line(self, usage, recording_console):
         usage.add_call(input_tokens=1000, output_tokens=500, description="test")
 
-        # Capture console output without ANSI codes for easier assertion
-        string_io = StringIO()
-        console = Console(file=string_io, force_terminal=False, no_color=True)
+        usage.print_summary(recording_console)
 
-        usage.print_summary(console)
+        assert recording_console.export_text() == f"\n{usage.summary_text().plain}\n"
 
-        output = string_io.getvalue()
+    def test_print_summary_creates_a_console_when_none_is_given(self, usage, recording_console, monkeypatch):
+        """Library callers may omit the console; one comes from create_console()."""
+        monkeypatch.setattr(tokens_module, "create_console", lambda: recording_console)
 
-        assert "Token Usage:" in output
-        assert "LLM calls:" in output
-        assert "1" in output  # llm_calls
-        assert "Input tokens:" in output
-        assert "1,000" in output  # input_tokens formatted
-        assert "Output tokens:" in output
-        assert "500" in output  # output_tokens
-        assert "Total tokens:" in output
-        assert "1,500" in output  # total_tokens formatted
-        # Token counts are now accurate (not estimated)
-        assert "(estimated)" not in output
-
-    def test_print_summary_creates_console_if_none(self, usage):
-        """Test that print_summary works without passing a console."""
-        usage.add_call(input_tokens=100, output_tokens=50, description="test")
-
-        # Should not raise an error
         usage.print_summary()
 
-    def test_print_summary_with_zero_usage(self):
-        """Test print_summary with zero token usage."""
-        usage = TokenUsage()
-
-        string_io = StringIO()
-        console = Console(file=string_io, force_terminal=False, no_color=True)
-
-        usage.print_summary(console)
-
-        output = string_io.getvalue()
-
-        assert "LLM calls:" in output
-        assert "0" in output
+        assert recording_console.export_text() == f"\n{usage.summary_text().plain}\n"

@@ -11,22 +11,22 @@ from typing import cast
 import pymupdf
 from langchain.chat_models.base import BaseChatModel
 from langchain.messages import HumanMessage, SystemMessage
-from rich.console import Console
-from rich.markup import escape
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from tenacity import (
+    RetryCallState,
     retry,
     retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
 
+from pdfalive.console import create_console, create_progress, safe_text
 from pdfalive.models.toc import TOC, TOCFeature
 from pdfalive.prompts import (
     TOC_GENERATOR_CONTINUATION_SYSTEM_PROMPT,
     TOC_GENERATOR_SYSTEM_PROMPT,
     TOC_POSTPROCESSOR_SYSTEM_PROMPT,
 )
+from pdfalive.retry import retry_warning
 from pdfalive.tokens import TokenUsage, estimate_tokens
 
 
@@ -367,7 +367,7 @@ def apply_toc_to_document(doc: pymupdf.Document, toc: list, output_file: str) ->
 
 
 # Console for rich output
-console = Console()
+console = create_console()
 
 # Default maximum tokens for features per batch to stay under context window limits.
 # Must fit within the smallest common context window (128k tokens) with headroom for:
@@ -1015,16 +1015,16 @@ class TOCGenerator:
         in_range, out_of_range = toc.partition_by_page_range(self.doc.page_count)
         if out_of_range:
             shown = ", ".join(
-                f"'{escape(entry.title)}' (page {entry.page_number})"
-                for entry in out_of_range[:_MAX_DROPPED_ENTRIES_SHOWN]
+                f"'{entry.title}' (page {entry.page_number})" for entry in out_of_range[:_MAX_DROPPED_ENTRIES_SHOWN]
             )
             hidden_count = len(out_of_range) - _MAX_DROPPED_ENTRIES_SHOWN
             more = f" and {hidden_count} more" if hidden_count > 0 else ""
             noun = "entry" if len(out_of_range) == 1 else "entries"
-            console.print(
-                f"  [yellow]Dropped {len(out_of_range)} {noun} with page numbers outside the document "
-                f"(1-{self.doc.page_count}): {shown}{more}[/yellow]"
+            warning = (
+                f"Dropped {len(out_of_range)} {noun} with page numbers outside the document "
+                f"(1-{self.doc.page_count}): {shown}{more}"
             )
+            console.print(safe_text("  ", (warning, "yellow")))
         return in_range
 
     def _extract_features(
@@ -1141,14 +1141,8 @@ class TOCGenerator:
                             )
 
         if show_progress:
-            console.print(f"[cyan]Extracting features from {page_count} page(s)...[/cyan]")
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                console=console,
-            ) as progress:
+            console.print(f"Extracting features from {page_count} page(s)...", style="cyan")
+            with create_progress(console) as progress:
                 task = progress.add_task("Extracting features...", total=page_count)
 
                 for ix, page in enumerate(doc):
@@ -1232,8 +1226,8 @@ class TOCGenerator:
         """
         if show_progress:
             console.print(
-                f"[cyan]Extracting features from {page_count} page(s) "
-                f"(using {num_processes} parallel processes)...[/cyan]"
+                f"Extracting features from {page_count} page(s) (using {num_processes} parallel processes)...",
+                style="cyan",
             )
 
         # Prepare arguments for worker processes
@@ -1246,13 +1240,7 @@ class TOCGenerator:
         with Pool(processes=num_processes) as pool:
             results = []
             if show_progress:
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    BarColumn(),
-                    TaskProgressColumn(),
-                    console=console,
-                ) as progress:
+                with create_progress(console) as progress:
                     task = progress.add_task("Extracting features...", total=num_processes)
 
                     for result in pool.imap_unordered(_extract_features_from_page_range, args_list):
@@ -1266,7 +1254,7 @@ class TOCGenerator:
 
         # Merge features and remaining spans buffers from all processes
         if show_progress:
-            console.print("[cyan]Merging extracted features...[/cyan]")
+            console.print("Merging extracted features...", style="cyan")
 
         all_features: list = []
         all_remaining_spans: list[tuple[int, float, int, list[dict]]] = []
@@ -1402,23 +1390,8 @@ class TOCGenerator:
             Tuple of (parsed TOC, provider usage_metadata or None when unavailable).
         """
 
-        def _log_retry(retry_state) -> None:
-            """Log retry attempt information."""
-            wait_time = getattr(retry_state.next_action, "sleep", 0) if retry_state.next_action else 0
-
-            # Extract exception details if available
-            exception_info = ""
-            if retry_state.outcome is not None:
-                exc = retry_state.outcome.exception()
-                if exc is not None:
-                    exc_name = type(exc).__name__
-                    exc_msg = str(exc) or getattr(exc, "message", "")
-                    exception_info = f" ({exc_name}: {exc_msg})" if exc_msg else f" ({exc_name})"
-
-            console.print(
-                f"  [yellow]Error encountered{exception_info}. Retrying in {wait_time:.1f}s "
-                f"(attempt {retry_state.attempt_number}/{MAX_RETRY_ATTEMPTS})...[/yellow]"
-            )
+        def _log_retry(retry_state: RetryCallState) -> None:
+            console.print(retry_warning(retry_state, MAX_RETRY_ATTEMPTS))
 
         @retry(
             retry=retry_if_exception(_is_retryable_error),
@@ -1437,13 +1410,13 @@ class TOCGenerator:
             parsed, usage_metadata = _unpack_structured_response(model.invoke(messages))
             return cast(TOC, parsed), usage_metadata
 
-        console.print(f"  [dim]Invoking LLM for {batch_description} (~{input_tokens:,} input tokens)...[/dim]")
+        console.print(f"  Invoking LLM for {batch_description} (~{input_tokens:,} input tokens)...", style="dim")
         start_time = time.time()
 
         parsed, usage_metadata = _invoke()
 
         elapsed = time.time() - start_time
-        console.print(f"  [green]Completed {batch_description} in {elapsed:.1f}s[/green]")
+        console.print(f"  Completed {batch_description} in {elapsed:.1f}s", style="green")
 
         return parsed, usage_metadata
 
@@ -1479,7 +1452,7 @@ class TOCGenerator:
         batches = list(self._batch_features(features, max_tokens_per_batch, overlap_blocks))
         total_batches = len(batches)
 
-        console.print(f"[bold]Processing {total_batches} batch(es) of features...[/bold]")
+        console.print(f"Processing {total_batches} batch(es) of features...", style="bold")
 
         for batch_idx, batch in enumerate(batches):
             is_first_batch = batch_idx == 0
@@ -1487,7 +1460,7 @@ class TOCGenerator:
 
             # Add delay between requests (except for the first one)
             if not is_first_batch and request_delay > 0:
-                console.print(f"  [dim]Waiting {request_delay:.1f}s before next request...[/dim]")
+                console.print(f"  Waiting {request_delay:.1f}s before next request...", style="dim")
                 time.sleep(request_delay)
 
             # Select appropriate prompt
@@ -1531,12 +1504,12 @@ class TOCGenerator:
             # Log entries found
             entries_found = len(batch_toc.entries)
             if entries_found > 0:
-                console.print(f"  [cyan]Found {entries_found} TOC entries in this batch[/cyan]")
+                console.print(f"  Found {entries_found} TOC entries in this batch", style="cyan")
 
             # Merge results
             merged_toc = merged_toc.merge(batch_toc)
 
-        console.print(f"[bold green]All batches processed. Total TOC entries: {len(merged_toc.entries)}[/bold green]")
+        console.print(f"All batches processed. Total TOC entries: {len(merged_toc.entries)}", style="bold green")
 
         return merged_toc, usage
 
@@ -1654,7 +1627,7 @@ must be PDF page numbers (not printed page numbers).
         input_tokens = estimate_tokens(input_text)
 
         # Make LLM call with retry logic
-        console.print("[bold]Postprocessing TOC...[/bold]")
+        console.print("Postprocessing TOC...", style="bold")
         refined_toc, usage_metadata = self._invoke_with_retry(model, messages, "TOC postprocessing", input_tokens)
 
         # Validate and correct page numbers if the LLM shifted to printed page numbers
@@ -1669,9 +1642,8 @@ must be PDF page numbers (not printed page numbers).
         )
 
         console.print(
-            f"[bold green]Postprocessing complete. "
-            f"Refined TOC has {len(refined_toc.entries)} entries "
-            f"(was {len(toc.entries)})[/bold green]"
+            f"Postprocessing complete. Refined TOC has {len(refined_toc.entries)} entries (was {len(toc.entries)})",
+            style="bold green",
         )
 
         return refined_toc, usage
@@ -2056,7 +2028,7 @@ must be PDF page numbers (not printed page numbers).
 
         if corrections > 0:
             console.print(
-                f"  [yellow]Corrected {corrections} entries from running headers to actual section starts[/yellow]"
+                f"  Corrected {corrections} entries from running headers to actual section starts", style="yellow"
             )
 
         return TOC(entries=corrected)
@@ -2187,11 +2159,11 @@ must be PDF page numbers (not printed page numbers).
 
         # Log corrections
         if restored_count > 0:
-            console.print(f"  [yellow]Restored page numbers for {restored_count} existing entries[/yellow]")
+            console.print(f"  Restored page numbers for {restored_count} existing entries", style="yellow")
         if verified_count > 0:
             console.print(
-                f"  [yellow]Verified and corrected {verified_count} entries "
-                f"via heading search (±{offset} page window)[/yellow]"
+                f"  Verified and corrected {verified_count} entries via heading search (±{offset} page window)",
+                style="yellow",
             )
 
         return TOC(entries=corrected)

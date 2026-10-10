@@ -2,14 +2,45 @@
 
 import os
 import stat
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pymupdf
 import pytest
 from click.testing import CliRunner
+from rich.cells import cell_len
+from rich.console import Console
 
-from pdfalive.cli import _save_inplace, cli
+import pdfalive.cli as cli_module
+from pdfalive.cli import (
+    _HIGH_CONFIDENCE_THRESHOLD,
+    _MEDIUM_CONFIDENCE_THRESHOLD,
+    _RENAME_REASONING_PREVIEW_WIDTH,
+    _confidence_style,
+    _save_inplace,
+    cli,
+)
+from pdfalive.evaluation.metrics import EvalReport, GoldenEntry
+from pdfalive.evaluation.runner import EvalCase, GoldenFile
+from pdfalive.models.rename import RenameOp, RenameResult
+from pdfalive.models.toc import TOCEntry
+from pdfalive.processors.rename_processor import RenameProcessor
+from pdfalive.tokens import TokenUsage
+
+
+# A --input-file line naming a missing file, with an erase-line sequence in it, and how errors show it.
+HIDDEN_PATH_LINE = "missing\x1b[2K.pdf"
+HIDDEN_PATH_LINE_SHOWN = "missing\\x1b[2K.pdf"
+
+# Rich draws the cell borders of table body rows with this character.
+TABLE_ROW_BORDER = "│"
+
+# Offset from a confidence threshold that lands just below it.
+CONFIDENCE_STEP = 0.01
+
+# Rich's single-cell ellipsis, appended to truncated reasoning.
+ELLIPSIS = "…"
 
 
 @pytest.fixture
@@ -163,6 +194,16 @@ class TestRenameInputFile:
         assert "File not found" in result.output
         assert "nonexistent.pdf" in result.output
         assert "line 1" in result.output
+
+    def test_missing_path_error_shows_control_characters_visibly(self, runner: CliRunner) -> None:
+        """Click prints its error messages itself, so outside text in them is made visible first."""
+        Path("paths.txt").write_text(f"{HIDDEN_PATH_LINE}\n")
+
+        result = runner.invoke(cli, ["rename", "-q", "Add prefix", "-f", "paths.txt"])
+
+        assert result.exit_code != 0
+        assert f"File not found: '{HIDDEN_PATH_LINE_SHOWN}'" in result.output
+        assert HIDDEN_PATH_LINE not in result.output
 
     def test_input_file_empty_raises_error(self, runner: CliRunner) -> None:
         """Test that an empty --input-file raises an error."""
@@ -609,3 +650,412 @@ class TestExtractTextTempFileCleanup:
         # Only the original input should remain (temp file cleaned up)
         remaining_files = list(tmp_path.iterdir())
         assert remaining_files == [input_pdf]
+
+
+class TestConfidenceStyle:
+    """Tests for the rename preview's confidence color-coding."""
+
+    @pytest.mark.parametrize(
+        ("confidence", "expected_style"),
+        [
+            (_HIGH_CONFIDENCE_THRESHOLD, "green"),
+            (_HIGH_CONFIDENCE_THRESHOLD - CONFIDENCE_STEP, "yellow"),
+            (_MEDIUM_CONFIDENCE_THRESHOLD, "yellow"),
+            (_MEDIUM_CONFIDENCE_THRESHOLD - CONFIDENCE_STEP, "red"),
+            (None, "red"),
+        ],
+    )
+    def test_thresholds(self, confidence: float | None, expected_style: str) -> None:
+        assert _confidence_style(confidence) == expected_style
+
+
+def _table_rows(output: str) -> list[list[str]]:
+    """Cell texts of the non-blank body rows of the Rich tables in exported console output."""
+    rows = []
+    for line in output.splitlines():
+        if line.startswith(TABLE_ROW_BORDER):
+            cells = [cell.strip() for cell in line.strip(TABLE_ROW_BORDER).split(TABLE_ROW_BORDER)]
+            if any(cells):
+                rows.append(cells)
+    return rows
+
+
+class TestOutsideTextIsPrintedSafely:
+    """Text the CLI does not control is never parsed as Rich markup, and its control characters are made visible.
+
+    Regression: input paths were interpolated into console markup, so
+    ``[van Author] Some Title.pdf`` printed as `` Some Title.pdf`` (Rich parsed
+    ``[van Author]`` as a style tag), and a ``[/]`` raised MarkupError.
+
+    File paths come from ``markup_like_filename`` (names that are valid path
+    components); every other value comes from ``markup_like_text``.
+    """
+
+    MODEL_IDENTIFIER = "test-model"
+    PLAIN_PDF_NAME = "input.pdf"
+    OUTPUT_DIRNAME = "out"
+    OCR_DPI = 150
+    RENAMED_PREFIX = "renamed "
+    RENAME_CONFIDENCE = 0.95
+    RENAME_QUERY = "Add a prefix"
+    RENAME_REASONING = "Applied the naming instruction"
+    DECLINE_CONFIRMATION = "n\n"
+    EVAL_MODE = "replay"
+    EVAL_MIN_F1 = 1.0
+    SPURIOUS_TITLE_PREFIX = "Extra "
+
+    @pytest.fixture
+    def cli_console(self, recording_console: Console, monkeypatch: pytest.MonkeyPatch) -> Console:
+        """Record everything the CLI module prints."""
+        monkeypatch.setattr(cli_module, "console", recording_console)
+        return recording_console
+
+    @pytest.fixture
+    def markup_like_pdf(self, tmp_path: Path, markup_like_filename: str) -> Path:
+        """A valid PDF with a markup-like file name."""
+        path = tmp_path / markup_like_filename
+        _create_valid_pdf(path)
+        return path
+
+    @pytest.fixture
+    def markup_like_output(self, tmp_path: Path, markup_like_filename: str) -> Path:
+        """An output path with a markup-like file name; never written, as the processors are mocked."""
+        return tmp_path / self.OUTPUT_DIRNAME / markup_like_filename
+
+    @pytest.fixture
+    def plain_pdf(self, tmp_path: Path) -> Path:
+        """A valid PDF with an ordinary name, for tests whose markup-like values are not paths."""
+        path = tmp_path / self.PLAIN_PDF_NAME
+        _create_valid_pdf(path)
+        return path
+
+    @pytest.fixture
+    def suggest_rename(self) -> Iterator[Callable[[RenameOp], None]]:
+        """Patch the chat model; the yielded function sets the rename the real RenameProcessor gets back."""
+        with patch("pdfalive.cli.build_chat_model") as mock_build_chat_model:
+            structured_llm = mock_build_chat_model.return_value.with_structured_output.return_value
+
+            def suggest(op: RenameOp) -> None:
+                structured_llm.invoke.return_value = RenameResult(operations=[op])
+
+            yield suggest
+
+    def _rename_op(self, source: Path, reasoning: str, output_filename: str | None = None) -> RenameOp:
+        return RenameOp(
+            input_filename=source.name,
+            output_filename=output_filename or f"{self.RENAMED_PREFIX}{source.name}",
+            confidence=self.RENAME_CONFIDENCE,
+            reasoning=reasoning,
+        )
+
+    def _preview_row(self, op: RenameOp) -> list[str]:
+        """The rename preview table row the CLI should print for op."""
+        return [op.input_filename, op.output_filename, f"{op.confidence:.0%}", op.reasoning]
+
+    @pytest.mark.parametrize("inplace", [False, True])
+    @patch("pdfalive.cli.TOCGenerator")
+    @patch("pdfalive.cli.build_chat_model")
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_generate_toc_paths(
+        self,
+        mock_ocr_cls: MagicMock,
+        mock_build_chat_model: MagicMock,
+        mock_toc_cls: MagicMock,
+        runner: CliRunner,
+        cli_console: Console,
+        markup_like_pdf: Path,
+        markup_like_output: Path,
+        inplace: bool,
+    ) -> None:
+        mock_ocr_cls.return_value.needs_ocr.return_value = False
+        mock_toc_cls.return_value.run.return_value = TokenUsage()
+        destination = ["--inplace"] if inplace else [str(markup_like_output)]
+
+        result = runner.invoke(
+            cli,
+            ["generate-toc", str(markup_like_pdf), *destination, "--model-identifier", self.MODEL_IDENTIFIER],
+        )
+
+        assert result.exit_code == 0, result.output
+        output = cli_console.export_text()
+        in_place = " (in place)" if inplace else ""
+        assert f"Generating TOC for {markup_like_pdf}{in_place} using model {self.MODEL_IDENTIFIER}..." in output
+        done = (
+            f"All done. Modified {markup_like_pdf} in place."
+            if inplace
+            else f"All done. Saved to {markup_like_output}."
+        )
+        assert done in output
+
+    @patch("pdfalive.cli.TOCGenerator")
+    @patch("pdfalive.cli.build_chat_model")
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_generate_toc_option_values(
+        self,
+        mock_ocr_cls: MagicMock,
+        mock_build_chat_model: MagicMock,
+        mock_toc_cls: MagicMock,
+        runner: CliRunner,
+        cli_console: Console,
+        plain_pdf: Path,
+        markup_like_text: str,
+    ) -> None:
+        mock_ocr_cls.return_value.needs_ocr.return_value = False
+        mock_toc_cls.return_value.run.return_value = TokenUsage()
+        options = ["--model-identifier", markup_like_text, "--ocr-language", markup_like_text]
+
+        result = runner.invoke(
+            cli, ["generate-toc", str(plain_pdf), "--inplace", *options, "--ocr-dpi", str(self.OCR_DPI)]
+        )
+
+        assert result.exit_code == 0, result.output
+        output = cli_console.export_text()
+        assert f"using model {markup_like_text}..." in output
+        assert f"Options: ocr ({markup_like_text}, {self.OCR_DPI} DPI)" in output
+
+    @pytest.mark.parametrize("inplace", [False, True])
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_extract_text_paths(
+        self,
+        mock_ocr_cls: MagicMock,
+        runner: CliRunner,
+        cli_console: Console,
+        markup_like_pdf: Path,
+        markup_like_output: Path,
+        inplace: bool,
+    ) -> None:
+        mock_ocr_cls.return_value.needs_ocr.return_value = True
+        destination = ["--inplace"] if inplace else [str(markup_like_output)]
+
+        result = runner.invoke(cli, ["extract-text", str(markup_like_pdf), *destination])
+
+        assert result.exit_code == 0, result.output
+        output = cli_console.export_text()
+        in_place = " (in place)" if inplace else ""
+        assert f"Processing {markup_like_pdf}{in_place}..." in output
+        done = (
+            f"All done. Modified {markup_like_pdf} in place."
+            if inplace
+            else f"All done. Saved to {markup_like_output}."
+        )
+        assert done in output
+
+    @patch("pdfalive.cli.TOCGenerator")
+    @patch("pdfalive.cli.build_chat_model")
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_generate_toc_output_path_control_sequences(
+        self,
+        mock_ocr_cls: MagicMock,
+        mock_build_chat_model: MagicMock,
+        mock_toc_cls: MagicMock,
+        runner: CliRunner,
+        cli_console: Console,
+        tmp_path: Path,
+        plain_pdf: Path,
+        control_sequence_text: tuple[str, str],
+    ) -> None:
+        raw, visible = control_sequence_text
+        mock_ocr_cls.return_value.needs_ocr.return_value = False
+        mock_toc_cls.return_value.run.return_value = TokenUsage()
+        output_path = tmp_path / self.OUTPUT_DIRNAME / raw  # never written, as the processors are mocked
+
+        result = runner.invoke(cli, ["generate-toc", str(plain_pdf), str(output_path)])
+
+        assert result.exit_code == 0, result.output
+        output = cli_console.export_text()
+        assert f"All done. Saved to {tmp_path / self.OUTPUT_DIRNAME / visible}." in output
+        assert raw not in output
+
+    def test_rename_preview_control_sequences(
+        self,
+        runner: CliRunner,
+        cli_console: Console,
+        suggest_rename: Callable[[RenameOp], None],
+        plain_pdf: Path,
+        control_sequence_text: tuple[str, str],
+    ) -> None:
+        """A suggested file name and reasoning carrying terminal control sequences are shown escaped."""
+        raw, visible = control_sequence_text
+        op = self._rename_op(plain_pdf, reasoning=raw, output_filename=raw)
+        suggest_rename(op)
+
+        result = runner.invoke(
+            cli, ["rename", "-q", self.RENAME_QUERY, str(plain_pdf)], input=self.DECLINE_CONFIRMATION
+        )
+
+        assert result.exit_code == 0, result.output
+        output = cli_console.export_text()
+        assert [op.input_filename, visible, f"{op.confidence:.0%}", visible] in _table_rows(output)
+        assert raw not in output
+
+    @pytest.mark.parametrize("character", ["x", "長"], ids=["narrow", "wide"])
+    def test_rename_preview_truncates_long_reasoning_to_the_cell_width(
+        self,
+        runner: CliRunner,
+        cli_console: Console,
+        suggest_rename: Callable[[RenameOp], None],
+        plain_pdf: Path,
+        character: str,
+    ) -> None:
+        reasoning = character * _RENAME_REASONING_PREVIEW_WIDTH * 2
+        op = self._rename_op(plain_pdf, reasoning=reasoning)
+        suggest_rename(op)
+
+        result = runner.invoke(
+            cli, ["rename", "-q", self.RENAME_QUERY, str(plain_pdf)], input=self.DECLINE_CONFIRMATION
+        )
+
+        assert result.exit_code == 0, result.output
+        [row] = _table_rows(cli_console.export_text())
+        shown = row[-1]
+        assert shown.endswith(ELLIPSIS)
+        # A wide character that does not fit before the ellipsis leaves a padding space instead.
+        assert reasoning.startswith(shown.removesuffix(ELLIPSIS).rstrip())
+        assert cell_len(shown) <= _RENAME_REASONING_PREVIEW_WIDTH
+
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_extract_text_language(
+        self,
+        mock_ocr_cls: MagicMock,
+        runner: CliRunner,
+        cli_console: Console,
+        plain_pdf: Path,
+        markup_like_text: str,
+    ) -> None:
+        mock_ocr_cls.return_value.needs_ocr.return_value = False
+
+        result = runner.invoke(
+            cli,
+            [
+                "extract-text",
+                str(plain_pdf),
+                "--inplace",
+                "--ocr-language",
+                markup_like_text,
+                "--ocr-dpi",
+                str(self.OCR_DPI),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert f"Language: {markup_like_text}, DPI: {self.OCR_DPI}" in cli_console.export_text()
+
+    def test_rename_preview_filenames(
+        self,
+        runner: CliRunner,
+        cli_console: Console,
+        suggest_rename: Callable[[RenameOp], None],
+        markup_like_pdf: Path,
+    ) -> None:
+        op = self._rename_op(markup_like_pdf, reasoning=self.RENAME_REASONING)
+        suggest_rename(op)
+
+        result = runner.invoke(
+            cli, ["rename", "-q", self.RENAME_QUERY, str(markup_like_pdf)], input=self.DECLINE_CONFIRMATION
+        )
+
+        assert result.exit_code == 0, result.output
+        assert self._preview_row(op) in _table_rows(cli_console.export_text())
+
+    def test_rename_preview_text_values(
+        self,
+        runner: CliRunner,
+        cli_console: Console,
+        suggest_rename: Callable[[RenameOp], None],
+        plain_pdf: Path,
+        markup_like_text: str,
+    ) -> None:
+        op = self._rename_op(plain_pdf, reasoning=markup_like_text)
+        suggest_rename(op)
+
+        result = runner.invoke(
+            cli,
+            ["rename", "-q", markup_like_text, "--model-identifier", markup_like_text, str(plain_pdf)],
+            input=self.DECLINE_CONFIRMATION,
+        )
+
+        assert result.exit_code == 0, result.output
+        output = cli_console.export_text()
+        assert f"using model {markup_like_text}..." in output
+        assert f"Query: {markup_like_text}" in output
+        assert self._preview_row(op) in _table_rows(output)
+
+    def test_rename_apply_error(
+        self,
+        runner: CliRunner,
+        cli_console: Console,
+        suggest_rename: Callable[[RenameOp], None],
+        markup_like_pdf: Path,
+    ) -> None:
+        op = self._rename_op(markup_like_pdf, reasoning=self.RENAME_REASONING)
+        suggest_rename(op)
+        target = markup_like_pdf.parent / op.output_filename
+        target.write_bytes(markup_like_pdf.read_bytes())  # occupy the target so the rename fails
+
+        result = runner.invoke(cli, ["rename", "-q", self.RENAME_QUERY, "--yes", str(markup_like_pdf)])
+
+        assert result.exit_code == 0, result.output
+        error_lines = [line for line in cli_console.export_text().splitlines() if line.startswith("Error:")]
+        assert len(error_lines) == 1
+        assert str(markup_like_pdf) in error_lines[0]
+        assert str(target) in error_lines[0]
+
+    @patch.object(RenameProcessor, "generate_renames")
+    @patch("pdfalive.cli.build_chat_model")
+    def test_rename_generation_error(
+        self,
+        mock_build_chat_model: MagicMock,
+        mock_generate_renames: MagicMock,
+        runner: CliRunner,
+        cli_console: Console,
+        plain_pdf: Path,
+        markup_like_text: str,
+    ) -> None:
+        mock_generate_renames.side_effect = ValueError(markup_like_text)
+
+        result = runner.invoke(cli, ["rename", "-q", self.RENAME_QUERY, str(plain_pdf)])
+
+        assert result.exit_code == 1
+        assert f"Error: {markup_like_text}" in cli_console.export_text()
+
+    @patch("pdfalive.cli.run_eval_case")
+    @patch("pdfalive.cli.discover_cases")
+    def test_eval_report(
+        self,
+        mock_discover_cases: MagicMock,
+        mock_run_eval_case: MagicMock,
+        runner: CliRunner,
+        cli_console: Console,
+        tmp_path: Path,
+        plain_pdf: Path,
+        markup_like_text: str,
+        make_golden_entry: Callable[..., GoldenEntry],
+        make_toc_entry: Callable[..., TOCEntry],
+    ) -> None:
+        """Case names and TOC titles reach the summary table and the report lines verbatim."""
+        case = EvalCase(
+            name=markup_like_text,
+            pdf_path=plain_pdf,
+            golden_path=tmp_path / "golden.json",
+            cassette_path=tmp_path / "cassette.json",
+            golden=GoldenFile(name=markup_like_text, source_pdf=str(plain_pdf), entries=[]),
+        )
+        missing = make_golden_entry(title=markup_like_text)
+        spurious = make_toc_entry(title=f"{self.SPURIOUS_TITLE_PREFIX}{markup_like_text}")
+        mock_discover_cases.return_value = [case]
+        mock_run_eval_case.return_value = EvalReport(matched=[], missing=[missing], spurious=[spurious])
+
+        result = runner.invoke(
+            cli,
+            ["eval", "--evals-dir", str(tmp_path), "--mode", self.EVAL_MODE, "--min-f1", str(self.EVAL_MIN_F1)],
+        )
+
+        assert result.exit_code == 1  # nothing matched, so F1 is below the threshold
+        output = cli_console.export_text()
+        assert f"Evaluating case {case.name} ({self.EVAL_MODE} mode)..." in output
+        assert [row[0] for row in _table_rows(output)] == [case.name]
+        assert f"{case.name}: 1 missing golden entries:" in output
+        assert f"  - {missing.title} (page {missing.page_number}, level {missing.level})" in output
+        assert f"{case.name}: 1 spurious generated entries:" in output
+        assert f"  - {spurious.title} (page {spurious.page_number}, level {spurious.level})" in output
+        assert f"Threshold failure: {case.name}: F1" in output

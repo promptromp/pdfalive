@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 import pymupdf
 import pytest
-from rich.console import Console
 
 from pdfalive.models.toc import TOC, TOCEntry, TOCFeature
 from pdfalive.processors import toc_generator as toc_generator_module
@@ -37,8 +36,11 @@ from pdfalive.processors.toc_generator import (
 from pdfalive.tokens import TokenUsage
 
 
-# Wide enough that rich never wraps a console line mid-assertion.
-_WIDE_CONSOLE_WIDTH = 1000
+# Batch label passed to _invoke_with_retry for its progress messages.
+_BATCH_DESCRIPTION = "batch 1/1"
+
+# Two titles, each harmless alone, that form a "[x' ... 'y]" markup tag once joined into one message.
+_TAG_FORMING_TITLES = ("[x", "y]")
 
 
 @pytest.fixture
@@ -256,10 +258,9 @@ class TestTOCGenerator:
         [(1, "entry"), (_MAX_DROPPED_ENTRIES_SHOWN, "entries"), (_MAX_DROPPED_ENTRIES_SHOWN + 2, "entries")],
     )
     def test_drop_warning_names_a_capped_number_of_entries(
-        self, mock_doc, mock_llm, make_toc_entry, monkeypatch, dropped_count, expected_noun
+        self, mock_doc, mock_llm, make_toc_entry, recording_console, monkeypatch, dropped_count, expected_noun
     ):
-        """The warning names at most _MAX_DROPPED_ENTRIES_SHOWN entries, escaping markup in titles."""
-        recording_console = Console(record=True, width=_WIDE_CONSOLE_WIDTH)
+        """The warning names at most _MAX_DROPPED_ENTRIES_SHOWN entries."""
         monkeypatch.setattr(toc_generator_module, "console", recording_console)
         dropped = [
             make_toc_entry(title=f"[Appendix {i}]", page_number=mock_doc.page_count + i)
@@ -274,6 +275,70 @@ class TestTOCGenerator:
         assert all(f"'{entry.title}'" in output for entry in shown)
         assert not any(f"'{entry.title}'" in output for entry in hidden)
         assert (f"and {len(hidden)} more" in output) == bool(hidden)
+
+    def test_drop_warning_renders_markup_like_titles_verbatim(
+        self, mock_doc, mock_llm, make_toc_entry, recording_console, monkeypatch, markup_like_text
+    ):
+        monkeypatch.setattr(toc_generator_module, "console", recording_console)
+        dropped = make_toc_entry(title=markup_like_text, page_number=mock_doc.page_count + 1)
+
+        TOCGenerator(doc=mock_doc, llm=mock_llm)._drop_out_of_range_entries(TOC(entries=[dropped]))
+
+        assert f"'{dropped.title}' (page {dropped.page_number})" in recording_console.export_text()
+
+    def test_drop_warning_keeps_titles_that_would_pair_into_a_tag(
+        self, mock_doc, mock_llm, make_toc_entry, recording_console, monkeypatch
+    ):
+        """Regression: titles escaped one by one still paired into a tag once joined into the warning."""
+        monkeypatch.setattr(toc_generator_module, "console", recording_console)
+        dropped = [
+            make_toc_entry(title=title, page_number=mock_doc.page_count + offset)
+            for offset, title in enumerate(_TAG_FORMING_TITLES, start=1)
+        ]
+
+        TOCGenerator(doc=mock_doc, llm=mock_llm)._drop_out_of_range_entries(TOC(entries=dropped))
+
+        output = recording_console.export_text()
+        assert all(f"'{entry.title}' (page {entry.page_number})" in output for entry in dropped)
+
+    def test_retry_warning_renders_exception_message_verbatim(
+        self, mock_doc, mock_llm, sample_toc_response, recording_console, monkeypatch, instant_retries, markup_like_text
+    ):
+        """Exception text is shown verbatim, e.g. pydantic's "[type=missing, ...]" in a parsing error."""
+        monkeypatch.setattr(toc_generator_module, "console", recording_console)
+        error = RuntimeError(markup_like_text)
+        model = MagicMock()
+        model.invoke.side_effect = [error, sample_toc_response]
+
+        TOCGenerator(doc=mock_doc, llm=mock_llm)._invoke_with_retry(
+            model, messages=[], batch_description=_BATCH_DESCRIPTION, input_tokens=0
+        )
+
+        assert f"({type(error).__name__}: {markup_like_text})" in recording_console.export_text()
+
+    def test_retry_survives_a_non_string_exception_message(
+        self,
+        mock_doc,
+        mock_llm,
+        sample_toc_response,
+        recording_console,
+        monkeypatch,
+        instant_retries,
+        non_string_message_error,
+        non_string_error_message,
+    ):
+        """An error whose ``message`` is not a str is reported, and the retry goes on to succeed."""
+        monkeypatch.setattr(toc_generator_module, "console", recording_console)
+        model = MagicMock()
+        model.invoke.side_effect = [non_string_message_error, sample_toc_response]
+
+        parsed, _ = TOCGenerator(doc=mock_doc, llm=mock_llm)._invoke_with_retry(
+            model, messages=[], batch_description=_BATCH_DESCRIPTION, input_tokens=0
+        )
+
+        assert parsed == sample_toc_response
+        expected = f"({type(non_string_message_error).__name__}: {non_string_error_message})"
+        assert expected in recording_console.export_text()
 
 
 class TestTOCGeneratorPagination:

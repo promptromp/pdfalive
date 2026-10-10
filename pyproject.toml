@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=84", "setuptools-scm>=10"]
+requires = ["setuptools>=84", "setuptools-scm>=10.3.4"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -21,15 +21,15 @@ classifiers = [
 requires-python = ">=3.13,<3.15"
 dependencies = [
     "click>=8.5.0",
-    "langchain>=1.4.2",
-    "langchain-anthropic>=1.7.4",
+    "langchain>=1.4.4",
+    "langchain-anthropic>=1.7.5",
     "langchain-ollama>=1.1.0",
-    "langchain-openai>=1.6.6",
-    "langsmith>=0.14.1",
+    "langchain-openai>=1.7.0",
+    "langsmith>=0.14.7",
     "ollama",
-    "pydantic>=2.13.5",
+    "pydantic>=2.14.0",
     "pymupdf>=1.28.2",
-    "tenacity>=9.1.4",
+    "tenacity>=9.2.1",
     "rich>=15.0.0",
     "tiktoken>=0.14.0",
     "urllib3>=2.8.0",
@@ -40,11 +40,11 @@ dynamic = ["version"]
 dev = [
     "devtools>=0.12.2",
     "ipython>=9.17.1",
-    "mypy>=2.3.1",
+    "mypy>=2.4.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "pytest-impacted[fast]>=0.35.0",
-    "ruff>=0.16.9",
+    "ruff>=0.17.0",
 ]
 
 [project.scripts]
@@ -86,7 +86,34 @@ select = [
     "I",
     # Pylint (Convention)
     "PLC",
+    # flake8-tidy-imports: banned APIs (see banned-api below)
+    "TID251",
 ]
+
+# Rich APIs that create a console, or fall back to Rich's unconfigured global
+# console when none is passed. pdfalive/console.py wraps what the codebase needs.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"rich.console.Console".msg = "Create consoles with pdfalive.console.create_console(); annotate with ConsoleType."
+"rich.get_console".msg = "Rich's global console is unconfigured; use pdfalive.console.create_console()."
+"rich.reconfigure".msg = "Rich's global console is unconfigured; use pdfalive.console.create_console()."
+"rich.print".msg = "Rich's global console is unconfigured; print on a console from pdfalive.console.create_console()."
+"rich.print_json".msg = "Rich's global console is unconfigured; print on a console from pdfalive.console.create_console()."
+"rich.inspect".msg = "Rich's global console is unconfigured; print on a console from pdfalive.console.create_console()."
+"rich.progress".msg = "Create progress bars with pdfalive.console.create_progress()."
+"rich.live".msg = "Live displays fall back to Rich's unconfigured global console; add a factory to pdfalive.console."
+"rich.status".msg = "Status displays fall back to Rich's unconfigured global console; add a factory to pdfalive.console."
+"rich.prompt".msg = "Prompts fall back to Rich's unconfigured global console; add a factory to pdfalive.console."
+"rich.logging".msg = "RichHandler falls back to Rich's unconfigured global console; add a factory to pdfalive.console."
+"rich.traceback".msg = "Rich tracebacks fall back to Rich's unconfigured global console; add a factory to pdfalive.console."
+"rich.pretty".msg = "rich.pretty installs on Rich's unconfigured global console; add a factory to pdfalive.console."
+"rich.markup".msg = "Do not build markup from outside text; compose output with pdfalive.console.safe_text()."
+"rich.text.Text.from_markup".msg = "Do not parse markup; compose output with pdfalive.console.safe_text()."
+"rich.text.Text.from_ansi".msg = "Do not interpret ANSI codes; compose output with pdfalive.console.safe_text()."
+
+[tool.ruff.lint.per-file-ignores]
+# The console module itself, and tests, which annotate fixtures with the Console type.
+"pdfalive/console.py" = ["TID251"]
+"pdfalive/tests/**" = ["TID251"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15
