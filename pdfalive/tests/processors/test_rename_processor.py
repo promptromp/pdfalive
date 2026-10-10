@@ -45,11 +45,9 @@ from pdfalive.processors.rename_processor import (
     _collision_problem,
     _target_name_problem,
 )
+from pdfalive.retry import LLMCallError
 from pdfalive.tokens import TokenUsage
 
-
-# Batch label passed to _invoke_with_retry for its progress messages.
-_BATCH_DESCRIPTION = "rename request"
 
 # Ids of the first and second files in a request.
 FIRST_ID = FIRST_FILE_ID
@@ -243,9 +241,9 @@ class TestDisplayNames:
 
 class TestPrompt:
     def test_files_are_listed_as_a_json_array_with_names_but_no_directories(
-        self, mock_llm, structured_llm, sample_rename_result
+        self, make_structured_answer, mock_llm, structured_llm, sample_rename_result
     ) -> None:
-        structured_llm.invoke.return_value = sample_rename_result
+        structured_llm.invoke.return_value = make_structured_answer(sample_rename_result)
         inputs = RenameInputs(SAME_NAME_PATHS)
 
         _generate(mock_llm, inputs)
@@ -255,17 +253,19 @@ class TestPrompt:
         assert QUERY in message
         assert all(str(path.parent) not in message for path in SAME_NAME_PATHS)
 
-    def test_entries_are_keyed_like_the_fields_the_llm_echoes(self, mock_llm, structured_llm, sample_rename_result):
-        structured_llm.invoke.return_value = sample_rename_result
+    def test_entries_are_keyed_like_the_fields_the_llm_echoes(
+        self, make_structured_answer, mock_llm, structured_llm, sample_rename_result
+    ):
+        structured_llm.invoke.return_value = make_structured_answer(sample_rename_result)
 
         _generate(mock_llm, RenameInputs(SAMPLE_PATHS))
 
         for entry in _listed_files(_user_message(structured_llm)):
             assert entry.keys() <= RenameOp.model_fields.keys()
 
-    def test_non_ascii_names_reach_the_model_as_text(self, mock_llm, structured_llm) -> None:
+    def test_non_ascii_names_reach_the_model_as_text(self, make_structured_answer, mock_llm, structured_llm) -> None:
         """Regression: ASCII-only JSON sent accented and CJK names as \\u escapes."""
-        structured_llm.invoke.return_value = RenameResult(operations=[])
+        structured_llm.invoke.return_value = make_structured_answer(RenameResult(operations=[]))
 
         _generate(mock_llm, RenameInputs([Path("/docs") / NON_ASCII_NAME]))
 
@@ -282,10 +282,10 @@ class TestPrompt:
         ids=["newline-injection", "quote-and-backslash", "rlo", "lone-surrogate"],
     )
     def test_a_hostile_name_stays_inside_its_entry_in_its_visible_form(
-        self, mock_llm, structured_llm, name: str
+        self, make_structured_answer, mock_llm, structured_llm, name: str
     ) -> None:
         """Regression: names were listed one per line, so a newline in a name could add lines that read as prompt."""
-        structured_llm.invoke.return_value = RenameResult(operations=[])
+        structured_llm.invoke.return_value = make_structured_answer(RenameResult(operations=[]))
         inputs = RenameInputs([Path("/docs") / name, SAMPLE_PATHS[0]])
 
         _generate(mock_llm, inputs)
@@ -295,9 +295,11 @@ class TestPrompt:
         assert message.count("## Renaming instruction:") == 1
         assert message.encode()  # encodable: no lone surrogate reaches the request
 
-    def test_each_request_numbers_its_files_from_the_first_id(self, mock_llm, structured_llm) -> None:
+    def test_each_request_numbers_its_files_from_the_first_id(
+        self, make_structured_answer, mock_llm, structured_llm
+    ) -> None:
         """Ids are per request, as the prompt's examples show, so positional numbering is right by construction."""
-        structured_llm.invoke.return_value = RenameResult(operations=[])
+        structured_llm.invoke.return_value = make_structured_answer(RenameResult(operations=[]))
         paths = tuple(Path("/docs") / name for name in LONG_NAMES)
 
         _generate(mock_llm, RenameInputs(paths), max_tokens_per_batch=ONE_FILE_PER_BATCH)
@@ -305,8 +307,8 @@ class TestPrompt:
         for call_index, path in enumerate(paths):
             assert _listed_files(_user_message(structured_llm, call_index)) == _entries((path,))
 
-    def test_later_batches_use_the_continuation_prompt(self, mock_llm, structured_llm) -> None:
-        structured_llm.invoke.return_value = RenameResult(operations=[])
+    def test_later_batches_use_the_continuation_prompt(self, make_structured_answer, mock_llm, structured_llm) -> None:
+        structured_llm.invoke.return_value = make_structured_answer(RenameResult(operations=[]))
         inputs = RenameInputs(Path("/docs") / name for name in LONG_NAMES)
 
         _generate(mock_llm, inputs, max_tokens_per_batch=ONE_FILE_PER_BATCH)
@@ -353,10 +355,12 @@ class TestBatching:
 
         assert [len(request.paths) for request in requests] == [1, 1]
 
-    def test_each_request_keeps_its_files_with_its_suggestions(self, mock_llm, structured_llm, make_rename_op):
+    def test_each_request_keeps_its_files_with_its_suggestions(
+        self, make_structured_answer, mock_llm, structured_llm, make_rename_op
+    ):
         paths = tuple(Path("/docs") / name for name in LONG_NAMES)
         answers = [RenameResult(operations=[make_rename_op(FIRST_ID, path.name, NEW_NAME)]) for path in paths]
-        structured_llm.invoke.side_effect = answers
+        structured_llm.invoke.side_effect = [make_structured_answer(answer) for answer in answers]
         usage = TokenUsage()
 
         batches = _generate(mock_llm, RenameInputs(paths), usage=usage, max_tokens_per_batch=ONE_FILE_PER_BATCH)
@@ -368,7 +372,7 @@ class TestBatching:
         assert usage.llm_calls == len(paths)
 
     def test_a_suggestion_cannot_name_a_file_another_request_listed(
-        self, mock_llm, structured_llm, make_rename_op
+        self, make_structured_answer, mock_llm, structured_llm, make_rename_op
     ) -> None:
         """Regression (wrong file renamed): with global ids, request 1 answering with request 2's id renamed it.
 
@@ -377,7 +381,10 @@ class TestBatching:
         paths = tuple(Path("/docs") / name for name in LONG_NAMES[:2])
         stray = make_rename_op(SECOND_ID, paths[1].name, NEW_NAME)
         proper = make_rename_op(FIRST_ID, paths[1].name, OTHER_NEW_NAME)
-        structured_llm.invoke.side_effect = [RenameResult(operations=[stray]), RenameResult(operations=[proper])]
+        structured_llm.invoke.side_effect = [
+            make_structured_answer(RenameResult(operations=[stray])),
+            make_structured_answer(RenameResult(operations=[proper])),
+        ]
         inputs = RenameInputs(paths)
 
         batches = _generate(mock_llm, inputs, max_tokens_per_batch=ONE_FILE_PER_BATCH)
@@ -388,11 +395,11 @@ class TestBatching:
 
     @pytest.mark.usefixtures("instant_retries")
     def test_completed_batches_stay_recorded_when_a_later_one_fails(
-        self, mock_llm, structured_llm, sample_rename_result
+        self, make_structured_answer, mock_llm, structured_llm, sample_rename_result
     ) -> None:
         """The caller's TokenUsage keeps what was billed, so the CLI can still report it."""
         completed_batches = len(LONG_NAMES) - 1
-        responses = iter([sample_rename_result] * completed_batches)
+        responses = iter([make_structured_answer(sample_rename_result)] * completed_batches)
 
         def invoke(messages):
             response = next(responses, None)
@@ -404,7 +411,7 @@ class TestBatching:
         usage = TokenUsage()
         inputs = RenameInputs(Path("/docs") / name for name in LONG_NAMES)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(LLMCallError):
             _generate(mock_llm, inputs, usage=usage, max_tokens_per_batch=ONE_FILE_PER_BATCH)
 
         assert usage.llm_calls == completed_batches
@@ -417,18 +424,50 @@ class TestBatching:
         structured_llm.invoke.assert_not_called()
 
     def test_retry_warning_renders_exception_message_verbatim(
-        self, mock_llm, sample_rename_result, recording_console, monkeypatch, instant_retries, markup_like_text
+        self,
+        make_structured_answer,
+        mock_llm,
+        structured_llm,
+        sample_rename_result,
+        recording_console,
+        monkeypatch,
+        instant_retries,
+        markup_like_text,
     ):
         monkeypatch.setattr(rename_processor_module, "console", recording_console)
-        error = RuntimeError(markup_like_text)
-        model = MagicMock()
-        model.invoke.side_effect = [error, sample_rename_result]
+        error = TimeoutError(markup_like_text)  # transient, so the call is retried
+        structured_llm.invoke.side_effect = [error, make_structured_answer(sample_rename_result)]
 
-        RenameProcessor(llm=mock_llm)._invoke_with_retry(
-            model, messages=[], batch_description=_BATCH_DESCRIPTION, input_tokens=0
-        )
+        _generate(mock_llm, RenameInputs(SAMPLE_PATHS))
 
         assert f"({type(error).__name__}: {markup_like_text})" in recording_console.export_text()
+
+    def test_unparsed_answers_are_retried(
+        self, make_structured_answer, mock_llm, structured_llm, sample_rename_result, instant_retries, parsing_failure
+    ):
+        """Regression: an answer with no parsed result crashed rename with AttributeError."""
+        unparsed_answers = [make_structured_answer(parsing_error=parsing_failure), make_structured_answer()]
+        structured_llm.invoke.side_effect = [*unparsed_answers, make_structured_answer(sample_rename_result)]
+        inputs = RenameInputs(SAMPLE_PATHS)
+
+        assert _generate(mock_llm, inputs) == _one_batch(inputs, *sample_rename_result.operations)
+        assert structured_llm.invoke.call_count == len(unparsed_answers) + 1
+
+    def test_non_retryable_errors_surface_on_the_first_attempt(
+        self,
+        make_structured_answer,
+        mock_llm,
+        structured_llm,
+        sample_rename_result,
+        instant_retries,
+        non_retryable_error,
+    ):
+        structured_llm.invoke.side_effect = [non_retryable_error, make_structured_answer(sample_rename_result)]
+        expected = LLMCallError if isinstance(non_retryable_error, Exception) else type(non_retryable_error)
+
+        with pytest.raises(expected):
+            _generate(mock_llm, RenameInputs(SAMPLE_PATHS))
+        assert structured_llm.invoke.call_count == 1
 
 
 class TestTargetNameRules:
@@ -687,16 +726,20 @@ class TestApplyRenames:
 
 
 class TestIntegration:
-    def test_full_workflow_with_inputs_sharing_a_name(self, mock_llm, structured_llm, make_rename_op, tmp_path):
+    def test_full_workflow_with_inputs_sharing_a_name(
+        self, make_structured_answer, mock_llm, structured_llm, make_rename_op, tmp_path
+    ):
         sources = [tmp_path / path.parent.name / path.name for path in SAME_NAME_PATHS]
         for source in sources:
             source.parent.mkdir()
             source.touch()
-        structured_llm.invoke.return_value = RenameResult(
-            operations=[
-                make_rename_op(FIRST_ID, sources[0].name, NEW_NAME),
-                make_rename_op(SECOND_ID, sources[1].name, OTHER_NEW_NAME),
-            ]
+        structured_llm.invoke.return_value = make_structured_answer(
+            RenameResult(
+                operations=[
+                    make_rename_op(FIRST_ID, sources[0].name, NEW_NAME),
+                    make_rename_op(SECOND_ID, sources[1].name, OTHER_NEW_NAME),
+                ]
+            )
         )
         processor = RenameProcessor(llm=mock_llm)
         inputs = RenameInputs(sources)

@@ -3,7 +3,7 @@
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pymupdf
@@ -71,10 +71,10 @@ def evals_dir(tmp_path: Path, synthetic_pdf_path: Path) -> Path:
 
 
 @pytest.fixture
-def mock_llm(make_toc: Callable[..., TOC]) -> MagicMock:
+def mock_llm(make_toc: Callable[..., TOC], make_structured_answer: Callable[..., dict[str, Any]]) -> MagicMock:
     llm = MagicMock()
     structured = MagicMock()
-    structured.invoke.return_value = make_toc(*GOLDEN_SPECS)
+    structured.invoke.return_value = make_structured_answer(make_toc(*GOLDEN_SPECS))
     llm.with_structured_output.return_value = structured
     return llm
 

@@ -21,6 +21,7 @@ classifiers = [
 requires-python = ">=3.13,<3.15"
 dependencies = [
     "click>=8.5.0",
+    "httpx>=0.28.1",
     "langchain>=1.4.4",
     "langchain-anthropic>=1.7.5",
     "langchain-ollama>=1.1.0",
@@ -39,6 +40,8 @@ dynamic = ["version"]
 [dependency-groups]
 dev = [
     "devtools>=0.12.2",
+    # The OpenAI and Anthropic SDKs' HTTP client; the retry tests build its requests.
+    "httpx2>=2.13.1",
     "ipython>=9.17.1",
     "mypy>=2.4.0",
     "pytest>=9.1.1",

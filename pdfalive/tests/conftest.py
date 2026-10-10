@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from langchain_core.exceptions import OutputParserException
 from langsmith import utils as langsmith_utils
+from pydantic import ValidationError
 from rich.console import Console
 
 from pdfalive.console import TerminalConsole
@@ -149,8 +151,70 @@ def instant_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
 
-class _MessageAttributeError(Exception):
-    """An SDK-style error: ``str()`` is empty and the text lives in a ``message`` attribute of any type."""
+class _StatusError(Exception):
+    """An API error carrying an HTTP status code, as OpenAI / Anthropic / Ollama SDK errors do."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+# HTTP statuses by retry class: transient (timeout, conflict, rate limit, server
+# errors) and deterministic client errors.
+RETRYABLE_STATUSES = (408, 409, 429, 500, 502, 503)
+NON_RETRYABLE_STATUSES = (400, 401, 403, 404, 422)
+
+
+@pytest.fixture
+def make_status_error() -> Callable[[int], Exception]:
+    """Factory for API errors with the given HTTP status code."""
+    return _StatusError
+
+
+@pytest.fixture(params=RETRYABLE_STATUSES)
+def retryable_status(request: pytest.FixtureRequest) -> int:
+    """Each HTTP status of a transient condition."""
+    return request.param
+
+
+@pytest.fixture(params=NON_RETRYABLE_STATUSES)
+def non_retryable_status(request: pytest.FixtureRequest) -> int:
+    """Each HTTP status of a deterministic client error."""
+    return request.param
+
+
+@pytest.fixture(params=["client-error", "keyboard-interrupt", "system-exit"])
+def non_retryable_error(request: pytest.FixtureRequest) -> BaseException:
+    """Each kind of LLM-call failure that must surface on the first attempt."""
+    errors: dict[str, Callable[[], BaseException]] = {
+        "client-error": lambda: _StatusError(NON_RETRYABLE_STATUSES[0]),
+        "keyboard-interrupt": KeyboardInterrupt,
+        "system-exit": SystemExit,
+    }
+    return errors[request.param]()
+
+
+def _validation_error() -> ValidationError:
+    """A real pydantic ValidationError, as structured output that does not fit the schema raises."""
+    try:
+        TOC.model_validate({"entries": "not a list"})
+    except ValidationError as error:
+        return error
+    raise AssertionError("the payload above must not validate")
+
+
+@pytest.fixture(params=["validation-error", "output-parser-error"])
+def parsing_failure(request: pytest.FixtureRequest) -> Exception:
+    """Each kind of parsing error a structured-output parser records for an answer that does not fit the schema."""
+    failures: dict[str, Callable[[], Exception]] = {
+        "validation-error": _validation_error,
+        "output-parser-error": lambda: OutputParserException("Invalid json output"),
+    }
+    return failures[request.param]()
+
+
+class _MessageAttributeError(TimeoutError):
+    """An SDK-style (transient) error: ``str()`` is empty and the text lives in a ``message`` attribute of any type."""
 
     def __init__(self, message: object) -> None:
         super().__init__()
@@ -175,6 +239,17 @@ def non_string_message_error(
 ) -> Exception:
     """An SDK-style error whose ``message`` attribute is ``non_string_error_message``."""
     return make_message_attribute_error(non_string_error_message)
+
+
+@pytest.fixture
+def make_structured_answer() -> Callable[..., dict[str, Any]]:
+    """Factory for what ``with_structured_output(schema, include_raw=True)`` answers: the raw message, the
+    parsed model (or None) and the parsing error (or None)."""
+
+    def _make(parsed: Any = None, *, parsing_error: BaseException | None = None, raw: Any = None) -> dict[str, Any]:
+        return {"raw": raw, "parsed": parsed, "parsing_error": parsing_error}
+
+    return _make
 
 
 @pytest.fixture

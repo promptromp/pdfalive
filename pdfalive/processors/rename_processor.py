@@ -8,17 +8,9 @@ from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PureWindowsPath
-from typing import cast
 
 from langchain.chat_models.base import BaseChatModel
 from langchain.messages import HumanMessage, SystemMessage
-from tenacity import (
-    RetryCallState,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from pdfalive.console import contains_unsafe_characters, create_console, visible
 from pdfalive.models.rename import (
@@ -35,7 +27,7 @@ from pdfalive.models.rename import (
 )
 from pdfalive.paths import entry_key, is_case_only_rename, name_key
 from pdfalive.prompts import RENAME_CONTINUATION_SYSTEM_PROMPT, RENAME_SYSTEM_PROMPT
-from pdfalive.retry import retry_warning
+from pdfalive.structured_output import invoke_structured_with_retry
 from pdfalive.tokens import TokenUsage, estimate_tokens
 
 
@@ -229,12 +221,6 @@ class _Request:
 # Delay between LLM calls (in seconds) to avoid rate limiting
 DEFAULT_REQUEST_DELAY_SECONDS = 2.0
 
-# Retry configuration for rate-limited requests
-MAX_RETRY_ATTEMPTS = 5
-RETRY_MULTIPLIER = 2  # Exponential backoff multiplier
-RETRY_MIN_WAIT_SECONDS = 10  # Minimum wait time between retries
-RETRY_MAX_WAIT_SECONDS = 120  # Maximum wait time between retries
-
 
 class RenameProcessor:
     """Processor for intelligent file renaming using LLM."""
@@ -280,52 +266,6 @@ class RenameProcessor:
             requests.append(_Request(tuple(current_paths), tuple(current_names)))
         return requests
 
-    def _invoke_with_retry(
-        self,
-        model,
-        messages,
-        batch_description: str,
-        input_tokens: int,
-    ) -> RenameResult:
-        """Invoke the LLM with retry logic for rate limiting.
-
-        Args:
-            model: The LLM model with structured output.
-            messages: The messages to send.
-            batch_description: Description of the current batch for logging.
-            input_tokens: Estimated input tokens for logging.
-
-        Returns:
-            The RenameResult response from the LLM.
-        """
-
-        def _log_retry(retry_state: RetryCallState) -> None:
-            console.print(retry_warning(retry_state, MAX_RETRY_ATTEMPTS))
-
-        @retry(
-            retry=retry_if_exception_type(Exception),
-            stop=stop_after_attempt(MAX_RETRY_ATTEMPTS),
-            wait=wait_exponential(
-                multiplier=RETRY_MULTIPLIER,
-                min=RETRY_MIN_WAIT_SECONDS,
-                max=RETRY_MAX_WAIT_SECONDS,
-            ),
-            before_sleep=_log_retry,
-            reraise=True,
-        )
-        def _invoke():
-            return model.invoke(messages)
-
-        console.print(f"  Invoking LLM for {batch_description} (~{input_tokens:,} input tokens)...", style="dim")
-        start_time = time.time()
-
-        response = _invoke()
-
-        elapsed = time.time() - start_time
-        console.print(f"  Completed {batch_description} in {elapsed:.1f}s", style="green")
-
-        return cast(RenameResult, response)
-
     def generate_renames(
         self,
         inputs: RenameInputs,
@@ -359,7 +299,9 @@ class RenameProcessor:
             return []
 
         results: list[RenameBatch] = []
-        model = self.llm.with_structured_output(RenameResult)
+        # include_raw=True exposes the provider's actual token usage, and parsing
+        # failures as data rather than exceptions (see pdfalive.structured_output).
+        model = self.llm.with_structured_output(RenameResult, include_raw=True)
 
         # Only file names are sent, never directories.
         requests = self._batch_files(inputs.paths, max_tokens_per_batch, max_output_tokens_per_batch)
@@ -408,16 +350,14 @@ class RenameProcessor:
             input_tokens = estimate_tokens(input_text)
 
             # Make LLM call with retry logic
-            batch_result = self._invoke_with_retry(model, messages, batch_description, input_tokens)
-
-            # Estimate output tokens (rough estimate based on response)
-            output_tokens = estimate_tokens(str([op.model_dump() for op in batch_result.operations]))
-
-            # Record token usage
-            usage.add_call(
+            batch_result = invoke_structured_with_retry(
+                console,
+                model,
+                messages,
+                RenameResult,
+                usage=usage,
+                description=batch_description,
                 input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                description=f"Batch {batch_idx + 1}/{total_batches}" if total_batches > 1 else "Rename request",
             )
 
             # Log operations found

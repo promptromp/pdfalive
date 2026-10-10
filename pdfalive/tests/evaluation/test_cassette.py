@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain.messages import HumanMessage, SystemMessage
+from rich.console import Console
 
 from pdfalive.evaluation.cassette import (
     Cassette,
@@ -16,11 +17,15 @@ from pdfalive.evaluation.cassette import (
     ReplayChatModel,
 )
 from pdfalive.models.toc import TOC
+from pdfalive.retry import llm_retry
 
 
 SYSTEM_PROMPT = "You are an expert TOC generator."
 USER_PROMPT_BATCH_1 = "Generate a TOC for batch 1."
 USER_PROMPT_BATCH_2 = "Generate a TOC for batch 2."
+# A recorded response that is not a TOC, and the name of a schema the calls were not recorded for.
+INVALID_TOC_RESPONSE = {"entries": "not a list"}
+OTHER_SCHEMA_NAME = "RenameResult"
 
 
 def make_messages(user_content: str) -> list:
@@ -125,6 +130,43 @@ class TestReplay:
     def test_missing_cassette_file_raises_with_guidance(self, tmp_path: Path) -> None:
         with pytest.raises(CassetteMissError, match="record"):
             ReplayChatModel(cassette_path=tmp_path / "does_not_exist.json")
+
+    @pytest.mark.parametrize("strict", [True, False], ids=["strict", "loose"])
+    def test_a_recorded_response_that_does_not_fit_the_schema_is_a_miss_that_keeps_the_cursor(
+        self, recorded_cassette_path: Path, strict: bool
+    ) -> None:
+        """Regression: the cursor advanced before validating, so a retry was served the next call's response."""
+        cassette = Cassette.load(recorded_cassette_path)
+        cassette.entries[0].response = INVALID_TOC_RESPONSE
+        cassette.save(recorded_cassette_path)
+        model = ReplayChatModel(cassette_path=recorded_cassette_path, strict=strict).with_structured_output(TOC)
+
+        with pytest.raises(CassetteMissError, match="not a valid TOC"):
+            model.invoke(make_messages(USER_PROMPT_BATCH_1))
+        # Still at the first call: the second call's request does not get the second response.
+        with pytest.raises(CassetteMissError):
+            model.invoke(make_messages(USER_PROMPT_BATCH_2))
+
+    def test_a_response_recorded_for_another_schema_is_a_miss(self, recorded_cassette_path: Path) -> None:
+        """Loose replay ignores the prompt, but not what kind of answer was recorded."""
+        cassette = Cassette.load(recorded_cassette_path)
+        cassette.entries[0].schema_name = OTHER_SCHEMA_NAME
+        cassette.save(recorded_cassette_path)
+        model = ReplayChatModel(cassette_path=recorded_cassette_path, strict=False).with_structured_output(TOC)
+
+        with pytest.raises(CassetteMissError, match=OTHER_SCHEMA_NAME):
+            model.invoke(make_messages(USER_PROMPT_BATCH_1))
+
+    def test_a_miss_is_raised_once_under_the_retry_policy(
+        self, recorded_cassette_path: Path, recording_console: Console, instant_retries: None
+    ) -> None:
+        """Replay is deterministic, so the policy never retries a miss."""
+        model = ReplayChatModel(cassette_path=recorded_cassette_path).with_structured_output(TOC)
+        unrecorded = make_messages("A prompt that was never recorded.")
+
+        with pytest.raises(CassetteMissError):
+            llm_retry(recording_console)(lambda: model.invoke(unrecorded))()
+        assert "Error encountered" not in recording_console.export_text()
 
 
 class TestIncludeRawSupport:

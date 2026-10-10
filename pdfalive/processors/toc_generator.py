@@ -11,15 +11,7 @@ from multiprocessing import Pool, cpu_count
 import pymupdf
 from langchain.chat_models.base import BaseChatModel
 from langchain.messages import HumanMessage, SystemMessage
-from langchain_core.runnables import Runnable
 from pydantic import BaseModel
-from tenacity import (
-    RetryCallState,
-    retry,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from pdfalive.console import create_console, create_progress, safe_text
 from pdfalive.models.toc import TOC, PostprocessedTOC, TOCEntry, TOCFeature
@@ -29,7 +21,7 @@ from pdfalive.prompts import (
     TOC_GENERATOR_SYSTEM_PROMPT,
     TOC_POSTPROCESSOR_SYSTEM_PROMPT,
 )
-from pdfalive.retry import retry_warning
+from pdfalive.structured_output import StructuredModel, invoke_structured_with_retry
 from pdfalive.tokens import TokenUsage, estimate_tokens
 
 
@@ -182,10 +174,6 @@ _DEFAULT_PAGE_HEIGHT = 1.0
 
 # Minimum process count when deriving parallelism from CPU count.
 _MIN_PROCESS_COUNT = 1
-
-# HTTP status semantics for retry classification.
-_HTTP_RATE_LIMIT_STATUS = 429
-_HTTP_SERVER_ERROR_MIN_STATUS = 500
 
 # TOC reference-text filtering thresholds.
 _TOC_DOT_LEADER_MIN_RUN_LENGTH = 3
@@ -392,86 +380,8 @@ PROMPT_OVERHEAD_TOKENS = 3000
 # Default is 10s to stay under typical rate limits (e.g., 30k input tokens/minute)
 DEFAULT_REQUEST_DELAY_SECONDS = 10.0
 
-# Retry configuration for rate-limited requests
-MAX_RETRY_ATTEMPTS = 5
-RETRY_MULTIPLIER = 2  # Exponential backoff multiplier
-RETRY_MIN_WAIT_SECONDS = 10  # Minimum wait time between retries
-RETRY_MAX_WAIT_SECONDS = 120  # Maximum wait time between retries
-
-# Exception class name fragments that indicate non-retryable client errors
-_NON_RETRYABLE_PATTERNS = (
-    "ContextOverflow",
-    "BadRequest",
-    "InvalidRequest",
-    "ValidationError",
-    # An eval cassette miss is deterministic: the same request will miss again.
-    "CassetteMiss",
-)
-
-
-def _unpack_structured_response[StructuredT: BaseModel](
-    response, schema: type[StructuredT]
-) -> tuple[StructuredT, dict | None]:
-    """Unpack a structured-output response into (parsed, usage_metadata).
-
-    The parsed result is validated into ``schema``, so callers always receive the
-    declared structured-output type.
-
-    Handles both shapes:
-    - include_raw=True dicts: {"raw": AIMessage, "parsed": model, "parsing_error": ...}
-      — raises the recorded parsing error if present (so retry logic applies),
-      and reads the provider's actual token usage from the raw message.
-    - plain parsed models (legacy/mocked paths) — no usage metadata available.
-    """
-    if isinstance(response, dict) and "parsed" in response:
-        parsing_error = response.get("parsing_error")
-        if parsing_error is not None:
-            raise parsing_error
-        parsed = response["parsed"]
-        if parsed is None:
-            # Empty/refusal completions can yield parsed=None without a recorded
-            # error; raise so the retry policy can absorb a transient flake.
-            raise ValueError("Structured output response contained no parsed result")
-        raw = response.get("raw")
-        usage_metadata = getattr(raw, "usage_metadata", None) if raw is not None else None
-        return schema.model_validate(parsed, from_attributes=True), usage_metadata
-    return schema.model_validate(response, from_attributes=True), getattr(response, "usage_metadata", None)
-
-
-def _resolve_token_counts(
-    usage_metadata: dict | None, estimated_input: int, parsed: TOC | PostprocessedTOC
-) -> tuple[int, int]:
-    """Resolve (input, output) token counts for a structured LLM call.
-
-    Prefers the provider's actual usage_metadata (which includes reasoning
-    tokens); falls back to tiktoken estimates when unavailable (legacy cassette
-    replays, providers without usage reporting).
-    """
-    estimated_output = estimate_tokens(str(parsed.entries))
-    if not usage_metadata:
-        return estimated_input, estimated_output
-    return (
-        usage_metadata.get("input_tokens") or estimated_input,
-        usage_metadata.get("output_tokens") or estimated_output,
-    )
-
-
-def _is_retryable_error(exception: BaseException) -> bool:
-    """Determine if an LLM API exception is retryable.
-
-    Only rate-limit (429) and server errors (5xx) are retried.
-    Client errors like context overflow (400) are deterministic and
-    will always fail with the same input, so retrying is pointless.
-    """
-    # Check HTTP status code (available on OpenAI / LangChain API errors)
-    status_code = getattr(exception, "status_code", None)
-    if isinstance(status_code, int):
-        return status_code == _HTTP_RATE_LIMIT_STATUS or status_code >= _HTTP_SERVER_ERROR_MIN_STATUS
-
-    # Fallback: match exception class name for known non-retryable types.
-    # Default to True (retry) for transient network errors, timeouts, etc.
-    exc_name = type(exception).__name__
-    return not any(pattern in exc_name for pattern in _NON_RETRYABLE_PATTERNS)
+# What the postprocessing LLM call is reported as.
+_POSTPROCESS_DESCRIPTION = "TOC postprocessing"
 
 
 # Pattern for lines that look like TOC entries: trailing page numbers,
@@ -1056,7 +966,7 @@ class TOCGenerator:
         self.doc = doc
         self.llm = llm
         self.num_processes = num_processes or max(_MIN_PROCESS_COUNT, cpu_count() - 1)
-        self._structured_models: dict[type[BaseModel], Runnable] = {}
+        self._structured_models: dict[type[BaseModel], StructuredModel] = {}
 
     def run(
         self,
@@ -1117,6 +1027,16 @@ class TOCGenerator:
             self.doc.save(output_file)
 
         return usage
+
+    def _structured_model(self, schema: type[BaseModel]) -> StructuredModel:
+        """The LLM wrapped for ``schema``'s structured output, built once per schema.
+
+        include_raw=True exposes the provider's actual token usage (including
+        reasoning tokens) on the raw message instead of relying on estimates.
+        """
+        if schema not in self._structured_models:
+            self._structured_models[schema] = self.llm.with_structured_output(schema, include_raw=True)
+        return self._structured_models[schema]
 
     def _check_for_existing_toc(self) -> list:
         """Check if the document already has a TOC."""
@@ -1497,56 +1417,6 @@ class TOCGenerator:
         if current_batch:
             yield current_batch
 
-    def _invoke_with_retry[StructuredT: BaseModel](
-        self, schema: type[StructuredT], messages, batch_description: str, input_tokens: int
-    ) -> tuple[StructuredT, dict | None]:
-        """Invoke the LLM for structured output with retry logic for rate limiting.
-
-        Args:
-            schema: The structured-output schema to request and validate the response into
-                (TOC for the first pass, PostprocessedTOC for postprocessing).
-            messages: The messages to send.
-            batch_description: Description of the current batch for logging.
-            input_tokens: Estimated input tokens for logging.
-
-        Returns:
-            Tuple of (parsed response, provider usage_metadata or None when unavailable).
-        """
-        # include_raw=True exposes the provider's actual token usage (including
-        # reasoning tokens) on the raw message instead of relying on estimates.
-        if schema not in self._structured_models:
-            self._structured_models[schema] = self.llm.with_structured_output(schema, include_raw=True)
-        model = self._structured_models[schema]
-
-        def _log_retry(retry_state: RetryCallState) -> None:
-            console.print(retry_warning(retry_state, MAX_RETRY_ATTEMPTS))
-
-        @retry(
-            retry=retry_if_exception(_is_retryable_error),
-            stop=stop_after_attempt(MAX_RETRY_ATTEMPTS),
-            wait=wait_exponential(
-                multiplier=RETRY_MULTIPLIER,
-                min=RETRY_MIN_WAIT_SECONDS,
-                max=RETRY_MAX_WAIT_SECONDS,
-            ),
-            before_sleep=_log_retry,
-            reraise=True,
-        )
-        def _invoke() -> tuple[StructuredT, dict | None]:
-            # Unpack inside the retried call so structured-output parsing
-            # errors participate in the retry policy.
-            return _unpack_structured_response(model.invoke(messages), schema)
-
-        console.print(f"  Invoking LLM for {batch_description} (~{input_tokens:,} input tokens)...", style="dim")
-        start_time = time.time()
-
-        parsed, usage_metadata = _invoke()
-
-        elapsed = time.time() - start_time
-        console.print(f"  Completed {batch_description} in {elapsed:.1f}s", style="green")
-
-        return parsed, usage_metadata
-
     def _extract_toc_paginated(
         self,
         features: list,
@@ -1615,14 +1485,14 @@ class TOCGenerator:
             input_tokens = estimate_tokens(input_text)
 
             # Make LLM call with retry logic
-            batch_toc, usage_metadata = self._invoke_with_retry(TOC, messages, batch_description, input_tokens)
-
-            actual_input, actual_output = _resolve_token_counts(usage_metadata, input_tokens, batch_toc)
-
-            usage.add_call(
-                input_tokens=actual_input,
-                output_tokens=actual_output,
-                description=f"Batch {batch_idx + 1}/{total_batches}",
+            batch_toc = invoke_structured_with_retry(
+                console,
+                self._structured_model(TOC),
+                messages,
+                TOC,
+                usage=usage,
+                description=batch_description,
+                input_tokens=input_tokens,
             )
 
             # Log entries found
@@ -1752,20 +1622,18 @@ number exactly as printed.
 
         # Make LLM call with retry logic
         console.print("Postprocessing TOC...", style="bold")
-        postprocessed_toc, usage_metadata = self._invoke_with_retry(
-            PostprocessedTOC, messages, "TOC postprocessing", input_tokens
+        postprocessed_toc = invoke_structured_with_retry(
+            console,
+            self._structured_model(PostprocessedTOC),
+            messages,
+            PostprocessedTOC,
+            usage=usage,
+            description=_POSTPROCESS_DESCRIPTION,
+            input_tokens=input_tokens,
         )
 
         # Place the postprocessed entries on PDF pages and verify them.
         refined_toc = self._correct_postprocessed_page_numbers(toc, postprocessed_toc, reference_text=reference_text)
-
-        actual_input, actual_output = _resolve_token_counts(usage_metadata, input_tokens, postprocessed_toc)
-
-        usage.add_call(
-            input_tokens=actual_input,
-            output_tokens=actual_output,
-            description="TOC postprocessing",
-        )
 
         console.print(
             f"Postprocessing complete. Refined TOC has {len(refined_toc.entries)} entries (was {len(toc.entries)})",

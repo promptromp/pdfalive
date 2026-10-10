@@ -4,6 +4,7 @@ import os
 import stat
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pymupdf
@@ -28,7 +29,13 @@ from pdfalive.evaluation.runner import EvalCase, GoldenFile
 from pdfalive.models.rename import FIRST_FILE_ID, RenameOp, RenameResult
 from pdfalive.models.toc import TOCEntry
 from pdfalive.processors.rename_processor import REJECTED_PATH, REJECTED_UNKNOWN_INPUT, RenameProcessor
+from pdfalive.retry import LLMCallError
 from pdfalive.tokens import TokenUsage
+
+
+# Click's exit status for a usage error, and the CLI's for an LLM call that failed for good.
+USAGE_ERROR_EXIT_CODE = 2
+LLM_FAILURE_EXIT_CODE = 1
 
 
 # A --input-file line naming a missing file, with an erase-line sequence in it, and how errors show it.
@@ -144,6 +151,112 @@ class TestExtractTextInplace:
         assert result.exit_code == 0
         assert "--inplace" in result.output
         assert "Modify the input file in place" in result.output
+
+
+class TestOutputChoice:
+    """OUTPUT_FILE versus --inplace, decided the same way (``is not None``) by validation and the output path."""
+
+    INPUT_NAME = "input.pdf"
+    EMPTY_OUTPUT = ""
+
+    @pytest.fixture
+    def input_pdf(self) -> Path:
+        path = Path(self.INPUT_NAME)
+        path.write_bytes(b"%PDF-1.4 dummy")
+        return path
+
+    @pytest.mark.parametrize("command", ["generate-toc", "extract-text"])
+    @pytest.mark.parametrize(
+        ("inplace", "message"),
+        [(True, "Cannot specify both OUTPUT_FILE and --inplace"), (False, "OUTPUT_FILE must not be empty")],
+        ids=["with-inplace", "without-inplace"],
+    )
+    def test_an_empty_output_file_is_a_usage_error(
+        self, runner: CliRunner, input_pdf: Path, command: str, inplace: bool, message: str
+    ) -> None:
+        """Regression: an empty OUTPUT_FILE with --inplace passed the falsy checks and was then used as the output."""
+        result = runner.invoke(cli, [command, str(input_pdf), self.EMPTY_OUTPUT, *(["--inplace"] if inplace else [])])
+
+        assert result.exit_code == USAGE_ERROR_EXIT_CODE
+        assert message in result.output
+        assert list(Path().iterdir()) == [input_pdf]
+
+
+class TestLlmFailuresAreReported:
+    """An LLM call the retry policy gives up on is an Error: line and exit status 1, not a traceback."""
+
+    FAILURE = LLMCallError("LLM call for batch 1/1 failed: StructuredOutputError: The answer held no TOC")
+    CASE_NAME = "case"
+
+    @patch("pdfalive.cli.TOCGenerator")
+    @patch("pdfalive.cli.build_chat_model")
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_generate_toc(
+        self,
+        mock_ocr_cls: MagicMock,
+        mock_build_chat_model: MagicMock,
+        mock_toc_cls: MagicMock,
+        runner: CliRunner,
+        cli_console: Console,
+        tmp_path: Path,
+    ) -> None:
+        input_pdf = tmp_path / "input.pdf"
+        _create_valid_pdf(input_pdf)
+        mock_ocr_cls.return_value.needs_ocr.return_value = False
+        mock_toc_cls.return_value.run.side_effect = self.FAILURE
+
+        result = runner.invoke(cli, ["generate-toc", "--inplace", str(input_pdf)])
+
+        assert result.exit_code == LLM_FAILURE_EXIT_CODE
+        assert f"Error: {self.FAILURE}" in cli_console.export_text()
+        assert list(tmp_path.iterdir()) == [input_pdf]  # the in-place temp file is gone too
+
+    @patch.object(RenameProcessor, "generate_renames")
+    @patch("pdfalive.cli.build_chat_model")
+    def test_rename(
+        self,
+        mock_build_chat_model: MagicMock,
+        mock_generate_renames: MagicMock,
+        runner: CliRunner,
+        cli_console: Console,
+        tmp_path: Path,
+    ) -> None:
+        """Regression: rename caught only ValueError, so a StructuredOutputError or refusal was a traceback."""
+        input_pdf = tmp_path / "input.pdf"
+        _create_valid_pdf(input_pdf)
+        mock_generate_renames.side_effect = self.FAILURE
+
+        result = runner.invoke(cli, ["rename", "-q", "Rename", str(input_pdf)])
+
+        assert result.exit_code == LLM_FAILURE_EXIT_CODE
+        assert f"Error: {self.FAILURE}" in cli_console.export_text()
+
+    @patch("pdfalive.cli.run_eval_case")
+    @patch("pdfalive.cli.discover_cases")
+    def test_eval(
+        self,
+        mock_discover_cases: MagicMock,
+        mock_run_eval_case: MagicMock,
+        runner: CliRunner,
+        cli_console: Console,
+        tmp_path: Path,
+    ) -> None:
+        input_pdf = tmp_path / "input.pdf"
+        mock_discover_cases.return_value = [
+            EvalCase(
+                name=self.CASE_NAME,
+                pdf_path=input_pdf,
+                golden_path=tmp_path / "golden.json",
+                cassette_path=tmp_path / "cassette.json",
+                golden=GoldenFile(name=self.CASE_NAME, source_pdf=str(input_pdf), entries=[]),
+            )
+        ]
+        mock_run_eval_case.side_effect = self.FAILURE
+
+        result = runner.invoke(cli, ["eval", "--evals-dir", str(tmp_path)])
+
+        assert result.exit_code == LLM_FAILURE_EXIT_CODE
+        assert f"Error: {self.FAILURE}" in cli_console.export_text()
 
 
 class TestSaveInplace:
@@ -471,6 +584,33 @@ def _create_valid_pdf(path: Path) -> None:
     doc.close()
 
 
+@pytest.fixture(params=["error", "ctrl-c"])
+def run_failure(request: pytest.FixtureRequest) -> BaseException:
+    """A failure partway through a command: an ordinary exception, or Ctrl-C."""
+    failures: dict[str, BaseException] = {"error": RuntimeError("processing failed"), "ctrl-c": KeyboardInterrupt()}
+    return failures[request.param]
+
+
+class TestInplaceTempFileLifetime:
+    """The --inplace temporary file is removed on every way out, however early the command stops."""
+
+    INPUT_NAME = "input.pdf"
+
+    @pytest.mark.parametrize("command", ["generate-toc", "extract-text"])
+    def test_a_failure_before_any_processing_leaves_no_temp_file(
+        self, tmp_path: Path, run_failure: BaseException, command: str
+    ) -> None:
+        """Regression: the temp file was created before the cleanup's try, so a failure in between leaked it."""
+        input_pdf = tmp_path / self.INPUT_NAME
+        _create_valid_pdf(input_pdf)
+
+        with patch("pdfalive.cli._in_place_note", side_effect=run_failure):
+            result = CliRunner().invoke(cli, [command, "--inplace", str(input_pdf)])
+
+        assert result.exit_code != 0
+        assert list(tmp_path.iterdir()) == [input_pdf]
+
+
 class TestGenerateTocTempFileCleanup:
     """Tests for temp file cleanup in generate-toc --inplace mode.
 
@@ -494,14 +634,15 @@ class TestGenerateTocTempFileCleanup:
         mock_toc_cls: MagicMock,
         runner: CliRunner,
         tmp_path: Path,
+        run_failure: BaseException,
     ) -> None:
-        """On inplace failure, the temp file must be removed."""
+        """On inplace failure, including Ctrl-C, the temp file must be removed."""
         input_pdf = tmp_path / "input.pdf"
         _create_valid_pdf(input_pdf)
 
-        # Make OCR say no OCR is needed, then TOCGenerator.run raises
+        # Make OCR say no OCR is needed, then TOCGenerator.run fails
         mock_ocr_cls.return_value.needs_ocr.return_value = False
-        mock_toc_cls.return_value.run.side_effect = RuntimeError("LLM exploded")
+        mock_toc_cls.return_value.run.side_effect = run_failure
 
         result = runner.invoke(cli, ["generate-toc", "--inplace", str(input_pdf)])
         assert result.exit_code != 0
@@ -576,14 +717,15 @@ class TestGenerateTocTempFileCleanup:
         mock_toc_cls: MagicMock,
         runner: CliRunner,
         tmp_path: Path,
+        run_failure: BaseException,
     ) -> None:
-        """If OCR processing fails in inplace mode, temp file must be cleaned up."""
+        """If OCR processing fails or is interrupted in inplace mode, temp file must be cleaned up."""
         input_pdf = tmp_path / "input.pdf"
         _create_valid_pdf(input_pdf)
 
-        # OCR says it's needed, then process_in_memory raises
+        # OCR says it's needed, then process_in_memory fails
         mock_ocr_cls.return_value.needs_ocr.return_value = True
-        mock_ocr_cls.return_value.process_in_memory.side_effect = RuntimeError("OCR failed")
+        mock_ocr_cls.return_value.process_in_memory.side_effect = run_failure
 
         result = runner.invoke(cli, ["generate-toc", "--inplace", str(input_pdf)])
         assert result.exit_code != 0
@@ -614,14 +756,15 @@ class TestExtractTextTempFileCleanup:
         mock_ocr_cls: MagicMock,
         runner: CliRunner,
         tmp_path: Path,
+        run_failure: BaseException,
     ) -> None:
-        """On inplace failure, the temp file must be removed."""
+        """On inplace failure, including Ctrl-C, the temp file must be removed."""
         input_pdf = tmp_path / "input.pdf"
         _create_valid_pdf(input_pdf)
 
-        # OCR needed, but process_in_memory raises
+        # OCR needed, but process_in_memory fails
         mock_ocr_cls.return_value.needs_ocr.return_value = True
-        mock_ocr_cls.return_value.process_in_memory.side_effect = RuntimeError("OCR failed")
+        mock_ocr_cls.return_value.process_in_memory.side_effect = run_failure
 
         result = runner.invoke(cli, ["extract-text", "--inplace", str(input_pdf)])
         assert result.exit_code != 0
@@ -736,11 +879,13 @@ def rename_llm() -> Iterator[MagicMock]:
 
 
 @pytest.fixture
-def suggest_rename(rename_llm: MagicMock) -> Callable[[RenameOp], None]:
+def suggest_rename(
+    rename_llm: MagicMock, make_structured_answer: Callable[..., dict[str, Any]]
+) -> Callable[[RenameOp], None]:
     """Set the rename suggestion the real RenameProcessor gets back from the patched chat model."""
 
     def suggest(op: RenameOp) -> None:
-        rename_llm.invoke.return_value = RenameResult(operations=[op])
+        rename_llm.invoke.return_value = make_structured_answer(RenameResult(operations=[op]))
 
     return suggest
 
@@ -1143,6 +1288,7 @@ class TestRenameCommand:
 
     def test_files_sharing_a_name_in_different_directories_are_renamed_together(
         self,
+        make_structured_answer,
         runner: CliRunner,
         cli_console: Console,
         rename_llm: MagicMock,
@@ -1154,11 +1300,13 @@ class TestRenameCommand:
         for source in sources:
             source.parent.mkdir()
             _create_valid_pdf(source)
-        rename_llm.invoke.return_value = RenameResult(
-            operations=[
-                make_rename_op(file_id, PLAIN_PDF_NAME, f"{directory} {NEW_NAME}")
-                for file_id, directory in enumerate(self.SUBDIRECTORIES, start=FIRST_FILE_ID)
-            ]
+        rename_llm.invoke.return_value = make_structured_answer(
+            RenameResult(
+                operations=[
+                    make_rename_op(file_id, PLAIN_PDF_NAME, f"{directory} {NEW_NAME}")
+                    for file_id, directory in enumerate(self.SUBDIRECTORIES, start=FIRST_FILE_ID)
+                ]
+            )
         )
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, "--yes", *map(str, sources)])
@@ -1170,6 +1318,7 @@ class TestRenameCommand:
 
     def test_a_suggestion_whose_id_names_no_file_is_shown_with_the_name_it_gave(
         self,
+        make_structured_answer,
         runner: CliRunner,
         cli_console: Console,
         rename_llm: MagicMock,
@@ -1179,7 +1328,7 @@ class TestRenameCommand:
     ) -> None:
         """Without a trustworthy id the input cannot be named, so the echoed name helps tell which file was meant."""
         op = make_rename_op(FIRST_FILE_ID + 1, markup_like_text, NEW_NAME)  # the request lists one file
-        rename_llm.invoke.return_value = RenameResult(operations=[op])
+        rename_llm.invoke.return_value = make_structured_answer(RenameResult(operations=[op]))
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, str(plain_pdf)], input=DECLINE_CONFIRMATION)
 
@@ -1189,6 +1338,7 @@ class TestRenameCommand:
 
     def test_inputs_sharing_a_name_are_shown_with_their_directories(
         self,
+        make_structured_answer,
         runner: CliRunner,
         cli_console: Console,
         rename_llm: MagicMock,
@@ -1204,7 +1354,7 @@ class TestRenameCommand:
             make_rename_op(file_id, PLAIN_PDF_NAME, new_name)
             for file_id, new_name in enumerate((NEW_NAME, UNSAFE_TARGET_NAME), start=FIRST_FILE_ID)
         )
-        rename_llm.invoke.return_value = RenameResult(operations=[planned, rejected])
+        rename_llm.invoke.return_value = make_structured_answer(RenameResult(operations=[planned, rejected]))
         shown = [f"{directory}/{PLAIN_PDF_NAME}" for directory in self.SUBDIRECTORIES]
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, *map(str, sources)], input=DECLINE_CONFIRMATION)
@@ -1218,6 +1368,7 @@ class TestRenameCommand:
     @pytest.mark.parametrize("outcome", ["no-suggestions", "all-rejected", "declined", "applied"])
     def test_token_usage_follows_the_flag_on_every_path_past_the_llm(
         self,
+        make_structured_answer,
         runner: CliRunner,
         cli_console: Console,
         rename_llm: MagicMock,
@@ -1233,7 +1384,7 @@ class TestRenameCommand:
             "declined": [make_rename_op(FIRST_FILE_ID, plain_pdf.name, NEW_NAME)],
             "applied": [make_rename_op(FIRST_FILE_ID, plain_pdf.name, NEW_NAME)],
         }[outcome]
-        rename_llm.invoke.return_value = RenameResult(operations=operations)
+        rename_llm.invoke.return_value = make_structured_answer(RenameResult(operations=operations))
         confirmation = ["--yes"] if outcome == "applied" else []
         token_usage_flag = SHOW_TOKEN_USAGE_FLAG if show_token_usage else NO_SHOW_TOKEN_USAGE_FLAG
 
@@ -1371,6 +1522,7 @@ class TestRenameExitPaths:
     )
     def test_unattended_exit_status(
         self,
+        make_structured_answer,
         runner: CliRunner,
         rename_llm: MagicMock,
         make_rename_op: Callable[..., RenameOp],
@@ -1393,7 +1545,7 @@ class TestRenameExitPaths:
                 make_rename_op(FIRST_FILE_ID + 1, other_pdf.name, NEW_NAME),
             ],
         }[outcome]
-        rename_llm.invoke.return_value = RenameResult(operations=operations)
+        rename_llm.invoke.return_value = make_structured_answer(RenameResult(operations=operations))
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, "--yes", str(plain_pdf), str(other_pdf)])
 
