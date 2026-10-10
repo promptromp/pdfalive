@@ -12,6 +12,7 @@ from pdfalive.console import (
     ELLIPSIS,
     ESCAPE_STYLE,
     TerminalConsole,
+    contains_unsafe_characters,
     create_progress,
     safe_text,
     truncate_visible,
@@ -137,6 +138,20 @@ class TestVisible:
 
     def test_multiline_keeps_newlines(self) -> None:
         assert visible("a\r\nb", multiline=True) == "a\nb"
+
+
+class TestContainsUnsafeCharacters:
+    """The one definition of an unsafe character, shared with checks outside the console (new file names)."""
+
+    @pytest.mark.parametrize("raw", [raw for raw, _shown in ALWAYS_ESCAPED], ids=ALWAYS_ESCAPED_IDS)
+    def test_every_escaped_character_is_unsafe(self, raw: str) -> None:
+        assert contains_unsafe_characters(f"before {raw} after")
+
+    def test_a_newline_is_unsafe(self) -> None:
+        assert contains_unsafe_characters("line\nbreak")
+
+    def test_markup_like_text_is_safe(self, markup_like_text: str) -> None:
+        assert not contains_unsafe_characters(markup_like_text)
 
 
 class TestTerminalConsole:

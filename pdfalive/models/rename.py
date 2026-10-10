@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 @dataclass
@@ -39,7 +39,9 @@ class ApplyRenamesResult:
 
 
 class RenameOp(BaseModel):
-    """A single file rename operation."""
+    """A single file rename operation; immutable, so the resolved renames that hold one are hashable."""
+
+    model_config = ConfigDict(frozen=True)
 
     input_filename: str = Field(description="Original filename (without directory path)")
     output_filename: str = Field(description="New filename (without directory path)")
@@ -55,6 +57,36 @@ class RenameOp(BaseModel):
 
     def __str__(self) -> str:
         return f"RenameOp('{self.input_filename}' -> '{self.output_filename}', confidence={self.confidence})"
+
+
+@dataclass(frozen=True)
+class PlannedRename:
+    """A rename suggestion resolved to the file it renames and its new path."""
+
+    op: RenameOp
+    source: Path
+    target: Path
+
+
+@dataclass(frozen=True)
+class RejectedRename:
+    """A rename suggestion that will not be applied, and why."""
+
+    op: RenameOp
+    reason: str
+
+
+@dataclass
+class ResolvedRenames:
+    """Rename suggestions resolved against the input files: the renames to apply and the ones rejected."""
+
+    planned: list[PlannedRename] = field(default_factory=list)
+    rejected: list[RejectedRename] = field(default_factory=list)
+
+    @property
+    def source_target_pairs(self) -> list[tuple[Path, Path]]:
+        """The planned renames as (source, target) paths, as ``RenameProcessor.apply_renames`` takes them."""
+        return [(rename.source, rename.target) for rename in self.planned]
 
 
 class RenameResult(BaseModel):

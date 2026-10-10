@@ -18,19 +18,25 @@ from pdfalive.console import TextPart, create_console, safe_text, truncate_visib
 from pdfalive.evaluation.metrics import SUMMARY_PAGE_TOLERANCE, EvalReport, GoldenEntry
 from pdfalive.evaluation.runner import EvalCase, EvalMode, discover_cases, run_eval_case
 from pdfalive.llm import build_chat_model
+from pdfalive.models.rename import PlannedRename, RejectedRename, RenameOp
 from pdfalive.models.toc import TOCEntry
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
-from pdfalive.processors.rename_processor import RenameProcessor
+from pdfalive.processors.rename_processor import DuplicateInputNameError, RenameProcessor, build_input_mapping
 from pdfalive.processors.toc_generator import (
     DEFAULT_REQUEST_DELAY_SECONDS,
     TOCGenerator,
     apply_toc_to_document,
 )
+from pdfalive.tokens import TokenUsage
 
 
 # Rename preview table: reasoning shown wider than this many terminal cells is cut, ending in an ellipsis.
 _RENAME_REASONING_PREVIEW_WIDTH = 50
+
+# Exit status of a command that ran but did not fully succeed (a threshold missed, an input
+# rejected, a rename failed), as opposed to Click's usage errors (2).
+_EXIT_FAILURE = 1
 
 # Rename preview table: confidence at or above these thresholds shows green / yellow, below them red.
 _HIGH_CONFIDENCE_THRESHOLD = 0.9
@@ -69,13 +75,98 @@ def _done_line(path: str, inplace: bool) -> Text:
     return safe_text(("All done.", "bold green"), " Saved to ", (path, "bold cyan"), ".")
 
 
-def _confidence_style(confidence: float | None) -> str:
-    """Style of a rename's confidence cell: green when high, yellow when medium, red when low or unknown."""
-    if confidence is not None and confidence >= _HIGH_CONFIDENCE_THRESHOLD:
+def _confidence_style(confidence: float) -> str:
+    """Style of a rename's confidence cell: green when high, yellow when medium, red when low."""
+    if confidence >= _HIGH_CONFIDENCE_THRESHOLD:
         return "green"
-    if confidence is not None and confidence >= _MEDIUM_CONFIDENCE_THRESHOLD:
+    if confidence >= _MEDIUM_CONFIDENCE_THRESHOLD:
         return "yellow"
     return "red"
+
+
+def _print_rejected_renames(rejected: list[RejectedRename]) -> None:
+    """List the rename suggestions that will not be applied, each with the reason."""
+    if not rejected:
+        return
+    console.print(f"Skipped {len(rejected)} suggestion(s):", style="yellow")
+    for rejection in rejected:
+        console.print(
+            safe_text(
+                "  - ",
+                rejection.op.input_filename,
+                " -> ",
+                rejection.op.output_filename,
+                ": ",
+                (rejection.reason, "yellow"),
+            )
+        )
+
+
+def _rename_preview_table(planned: list[PlannedRename]) -> Table:
+    """The table of planned renames shown before confirmation."""
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        padding=(1, 1),  # Add vertical and horizontal padding for better readability
+        show_lines=True,  # Add horizontal lines between rows
+    )
+    table.add_column("Original", style="cyan", overflow="fold")
+    table.add_column("New Name", style="green", overflow="fold")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Reasoning", style="dim", overflow="fold")
+
+    for rename in planned:
+        reasoning = safe_text(truncate_visible(rename.op.reasoning, _RENAME_REASONING_PREVIEW_WIDTH))
+        table.add_row(
+            safe_text(rename.source.name),
+            safe_text(rename.target.name),
+            safe_text((f"{rename.op.confidence:.0%}", _confidence_style(rename.op.confidence))),
+            reasoning,
+        )
+    return table
+
+
+def _review_and_apply_renames(
+    processor: RenameProcessor, operations: list[RenameOp], inputs: dict[str, Path], yes: bool
+) -> bool:
+    """Preview the suggested renames, report the rejected ones, and apply the rest once confirmed.
+
+    Returns:
+        False if a confirmed rename failed, or, under --yes, if any suggestion was rejected,
+        whether or not the others were applied: nobody reads the skipped list of an
+        unattended run. True otherwise, including when nothing was suggested, every
+        suggestion kept the current name, or the prompt was declined.
+    """
+    if not operations:
+        console.print("No rename operations suggested.", style="yellow")
+        return True
+
+    resolved = processor.resolve_renames(operations, inputs)
+    _print_rejected_renames(resolved.rejected)
+    rejected_unattended = yes and bool(resolved.rejected)
+    if not resolved.planned:
+        console.print("No valid rename operations to apply.", style="yellow")
+        return not rejected_unattended
+
+    console.print()
+    console.print("Proposed renames:", style="bold")
+    console.print(_rename_preview_table(resolved.planned))
+    console.print()
+
+    if not yes and not click.confirm("Apply these renames?", default=False):
+        console.print("Aborted. No files were renamed.", style="yellow")
+        return True
+
+    console.print("Applying renames...", style="cyan")
+    apply_result = processor.apply_renames(resolved.source_target_pairs)
+
+    for error in apply_result.failed:
+        console.print(safe_text(("Error:", "bold red"), " ", error.error))
+    if apply_result.success_count > 0:
+        console.print(f"Successfully renamed {apply_result.success_count} file(s).", style="bold green")
+    if apply_result.failure_count > 0:
+        console.print(f"Failed to rename {apply_result.failure_count} file(s).", style="bold yellow")
+    return apply_result.all_succeeded and not rejected_unattended
 
 
 def _load_config_callback(ctx: click.Context, param: click.Parameter, value: str | None) -> None:
@@ -132,7 +223,7 @@ def cli(ctx: click.Context) -> None:
 @click.argument("output_file", type=click.Path(), required=False)
 @click.option("--model-identifier", type=str, default="gpt-5.6", help="LLM model to use.")
 @click.option("--force", is_flag=True, default=False, help="Force overwrite existing TOC if present.")
-@click.option("--show-token-usage", is_flag=True, default=True, help="Display token usage statistics.")
+@click.option("--show-token-usage/--no-show-token-usage", default=True, help="Display token usage statistics.")
 @click.option(
     "--request-delay",
     type=float,
@@ -572,7 +663,7 @@ def eval_command(
         console.print()
         for failure in failures:
             console.print(safe_text(("Threshold failure:", "bold red"), " ", failure))
-        raise SystemExit(1)
+        raise SystemExit(_EXIT_FAILURE)
 
 
 @cli.command("rename")
@@ -600,7 +691,7 @@ def eval_command(
     default=False,
     help="Automatically apply renames without asking for confirmation.",
 )
-@click.option("--show-token-usage", is_flag=True, default=True, help="Display token usage statistics.")
+@click.option("--show-token-usage/--no-show-token-usage", default=True, help="Display token usage statistics.")
 @click.option(
     "--reasoning-effort",
     type=str,
@@ -665,10 +756,18 @@ def rename(
     else:
         resolved_input_files = input_files
 
+    # Built once, before any LLM call: a file given more than once, in any spelling, is
+    # renamed once, and different files sharing a name are reported as an error.
+    try:
+        inputs = build_input_mapping(Path(f) for f in resolved_input_files)
+    except DuplicateInputNameError as e:
+        console.print(safe_text(("Error:", "bold red"), " ", str(e)))
+        raise SystemExit(_EXIT_FAILURE) from e
+
     console.print(
         safe_text(
             "Renaming ",
-            (str(len(resolved_input_files)), "bold cyan"),
+            (str(len(inputs)), "bold cyan"),
             " file(s) using model ",
             (model_identifier, "bold magenta"),
             "...",
@@ -677,86 +776,20 @@ def rename(
     console.print(safe_text("Query: ", (query, "italic")))
     console.print()
 
-    # Convert to Path objects
-    paths = [Path(f) for f in resolved_input_files]
-
     # Initialize LLM and processor
     llm = build_chat_model(model_identifier, reasoning_effort)
     processor = RenameProcessor(llm=llm)
 
     # Generate rename suggestions
     console.print("Generating rename suggestions...", style="cyan")
+    # The processor records each LLM call here as it completes, so the calls are
+    # reported even if a later batch, the prompt, or applying the renames fails.
+    usage = TokenUsage()
     try:
-        result, usage = processor.generate_renames(paths, query)
-    except ValueError as e:
-        console.print(safe_text(("Error:", "bold red"), " ", str(e)))
-        raise SystemExit(1) from e
-
-    if not result.operations:
-        console.print("No rename operations suggested.", style="yellow")
-        return
-
-    # Resolve full paths
-    resolved = processor._resolve_full_paths(result.operations, paths)
-
-    if not resolved:
-        console.print("No valid rename operations to apply.", style="yellow")
-        return
-
-    # Build operation lookup for display
-    op_lookup = {op.input_filename: op for op in result.operations}
-
-    # Display proposed renames in a table
-    console.print()
-    console.print("Proposed renames:", style="bold")
-
-    table = Table(
-        show_header=True,
-        header_style="bold",
-        padding=(1, 1),  # Add vertical and horizontal padding for better readability
-        show_lines=True,  # Add horizontal lines between rows
-    )
-    table.add_column("Original", style="cyan", overflow="fold")
-    table.add_column("New Name", style="green", overflow="fold")
-    table.add_column("Confidence", justify="right")
-    table.add_column("Reasoning", style="dim", overflow="fold")
-
-    for source, target in resolved:
-        op = op_lookup.get(source.name)
-        confidence = op.confidence if op else None
-        confidence_label = f"{confidence:.0%}" if confidence is not None else "N/A"
-        reasoning = safe_text(truncate_visible(op.reasoning if op else "", _RENAME_REASONING_PREVIEW_WIDTH))
-
-        table.add_row(
-            safe_text(source.name),
-            safe_text(target.name),
-            safe_text((confidence_label, _confidence_style(confidence))),
-            reasoning,
-        )
-
-    console.print(table)
-    console.print()
-
-    # Ask for confirmation unless --yes is provided
-    if not yes and not click.confirm("Apply these renames?", default=False):
-        console.print("Aborted. No files were renamed.", style="yellow")
-        if show_token_usage:
+        result = processor.generate_renames(inputs, query, usage=usage)
+        all_succeeded = _review_and_apply_renames(processor, result.operations, inputs, yes)
+    finally:
+        if show_token_usage and usage.llm_calls:
             usage.print_summary(console)
-        return
-
-    # Apply renames
-    console.print("Applying renames...", style="cyan")
-    apply_result = processor.apply_renames(resolved)
-
-    # Report any failures
-    for error in apply_result.failed:
-        console.print(safe_text(("Error:", "bold red"), " ", error.error))
-
-    # Report summary
-    if apply_result.success_count > 0:
-        console.print(f"Successfully renamed {apply_result.success_count} file(s).", style="bold green")
-    if apply_result.failure_count > 0:
-        console.print(f"Failed to rename {apply_result.failure_count} file(s).", style="bold yellow")
-
-    if show_token_usage:
-        usage.print_summary(console)
+    if not all_succeeded:
+        raise SystemExit(_EXIT_FAILURE)

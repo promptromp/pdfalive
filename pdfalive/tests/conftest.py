@@ -3,6 +3,7 @@
 import os
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -11,6 +12,7 @@ from rich.console import Console
 
 from pdfalive.console import TerminalConsole
 from pdfalive.evaluation.metrics import GoldenEntry
+from pdfalive.models.rename import RenameOp
 from pdfalive.models.toc import TOC, TOCEntry
 
 
@@ -41,6 +43,25 @@ DEFAULT_TITLE = "Chapter 1: Distance and Angles"
 DEFAULT_PAGE_NUMBER = 14
 DEFAULT_LEVEL = 1
 DEFAULT_CONFIDENCE = 0.9
+DEFAULT_RENAME_REASONING = "Applied the naming instruction"
+
+# Environment variables naming the home directory that config discovery searches (POSIX, Windows).
+HOME_VARIABLES = ("HOME", "USERPROFILE")
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the home directory at an empty temporary one for every test, and return it.
+
+    Config discovery searches the home directory, so a developer's
+    ~/pdfalive.toml or ~/.config/pdfalive/pdfalive.toml could otherwise change
+    test outcomes.
+    """
+    home = tmp_path_factory.mktemp("home")
+    for variable in HOME_VARIABLES:
+        monkeypatch.setenv(variable, str(home))
+    return home
+
 
 # File names Rich would parse as markup, each a valid single path component on
 # every OS (no "/", "\" or ":"): a bracketed author name starting with a lowercase
@@ -181,6 +202,24 @@ def make_toc_entry() -> Callable[..., TOCEntry]:
         confidence: float = DEFAULT_CONFIDENCE,
     ) -> TOCEntry:
         return TOCEntry(title=title, page_number=page_number, level=level, confidence=confidence)
+
+    return _make
+
+
+@pytest.fixture
+def make_rename_op() -> Callable[..., RenameOp]:
+    """Factory for RenameOp suggestions with sensible defaults."""
+
+    def _make(
+        input_filename: str,
+        output_filename: str,
+        *,
+        confidence: float = DEFAULT_CONFIDENCE,
+        reasoning: str = DEFAULT_RENAME_REASONING,
+    ) -> RenameOp:
+        return RenameOp(
+            input_filename=input_filename, output_filename=output_filename, confidence=confidence, reasoning=reasoning
+        )
 
     return _make
 

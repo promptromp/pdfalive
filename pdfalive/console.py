@@ -108,6 +108,16 @@ def _visible_runs(value: str, *, multiline: bool) -> Iterator[tuple[str, bool]]:
         yield value[position:], False
 
 
+def contains_unsafe_characters(value: str) -> bool:
+    """Whether value, taken as one line, has a character safe_text() would replace with a visible escape.
+
+    That is a control character (tab and newline included), a bidi control or
+    line/paragraph separator, or a lone surrogate: characters that act on the
+    terminal or the displayed line, or cannot be encoded.
+    """
+    return _UNSAFE_IN_SINGLE_LINE.search(value) is not None
+
+
 def visible(value: str, *, multiline: bool = False) -> str:
     """value with unsafe characters replaced by visible escapes, for plain-string messages.
 
