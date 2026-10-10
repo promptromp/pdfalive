@@ -224,6 +224,17 @@ def _extract_section_prefix(title: str) -> str | None:
     return match.group(1) if match else None
 
 
+# A section prefix occurs as a whole number when neither a digit nor a digit and
+# a dot precede it ("11.1", "21.1" for "1.1"), and neither a digit nor a dot and
+# a digit follow it ("1.10", "1.1.2").
+_WHOLE_NUMBER_PATTERN_TEMPLATE = r"(?<!\d)(?<!\d\.){number}(?!\.?\d)"
+
+
+def _contains_whole_number(text: str, number: str) -> bool:
+    """Whether a dotted ``number``, as written ("6.6", "1.01"), occurs in ``text`` as a whole number."""
+    return re.search(_WHOLE_NUMBER_PATTERN_TEMPLATE.format(number=re.escape(number)), text) is not None
+
+
 # Leading designator tokens in normalized (punctuation-free, lowercased) titles:
 # bare numbers ("34", "1 2") and label words with an optional short identifier
 # ("chapter 7", "appendix b", "part iii", or a bare "chapter" when OCR loses
@@ -341,7 +352,7 @@ class _HeadingTitle:
             return False
         if self.section_prefix is None:
             return True
-        return self.section_prefix in _numbering_key(candidate)
+        return _contains_whole_number(_numbering_key(candidate), self.section_prefix)
 
     @staticmethod
     def _search_key_matches(
