@@ -4,13 +4,15 @@ import re
 import time
 import warnings
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from functools import cached_property
 from multiprocessing import Pool, cpu_count
-from typing import cast
 
 import pymupdf
 from langchain.chat_models.base import BaseChatModel
 from langchain.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import Runnable
+from pydantic import BaseModel
 from tenacity import (
     RetryCallState,
     retry,
@@ -20,7 +22,8 @@ from tenacity import (
 )
 
 from pdfalive.console import create_console, create_progress, safe_text
-from pdfalive.models.toc import TOC, TOCFeature
+from pdfalive.models.toc import TOC, PostprocessedTOC, TOCEntry, TOCFeature
+from pdfalive.processors.printed_pages import PrintedPageMap
 from pdfalive.prompts import (
     TOC_GENERATOR_CONTINUATION_SYSTEM_PROMPT,
     TOC_GENERATOR_SYSTEM_PROMPT,
@@ -406,8 +409,13 @@ _NON_RETRYABLE_PATTERNS = (
 )
 
 
-def _unpack_structured_response(response) -> tuple[TOC, dict | None]:
+def _unpack_structured_response[StructuredT: BaseModel](
+    response, schema: type[StructuredT]
+) -> tuple[StructuredT, dict | None]:
     """Unpack a structured-output response into (parsed, usage_metadata).
+
+    The parsed result is validated into ``schema``, so callers always receive the
+    declared structured-output type.
 
     Handles both shapes:
     - include_raw=True dicts: {"raw": AIMessage, "parsed": model, "parsing_error": ...}
@@ -426,11 +434,13 @@ def _unpack_structured_response(response) -> tuple[TOC, dict | None]:
             raise ValueError("Structured output response contained no parsed result")
         raw = response.get("raw")
         usage_metadata = getattr(raw, "usage_metadata", None) if raw is not None else None
-        return parsed, usage_metadata
-    return response, getattr(response, "usage_metadata", None)
+        return schema.model_validate(parsed, from_attributes=True), usage_metadata
+    return schema.model_validate(response, from_attributes=True), getattr(response, "usage_metadata", None)
 
 
-def _resolve_token_counts(usage_metadata: dict | None, estimated_input: int, parsed: TOC) -> tuple[int, int]:
+def _resolve_token_counts(
+    usage_metadata: dict | None, estimated_input: int, parsed: TOC | PostprocessedTOC
+) -> tuple[int, int]:
     """Resolve (input, output) token counts for a structured LLM call.
 
     Prefers the provider's actual usage_metadata (which includes reasoning
@@ -916,6 +926,116 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list
     return start_page, end_page, features, remaining_spans_buffer
 
 
+def _title_match_key(title: str) -> str:
+    """Normalize a title for matching postprocessed entries to first-pass ones (case/punctuation-blind)."""
+    title = re.sub(r"[^\w\s]", "", title)  # strip all punctuation
+    return re.sub(r"\s+", " ", title.strip().lower())
+
+
+# An exact first-pass match may override a page located through the printed page numbers
+# only this close to it: the same heading's two placements differ by a few pages at most
+# (a misread printed page, a heading starting at the foot of a page); farther apart they
+# are different occurrences of a repeated title ("Exercises", "Summary").
+_MAX_FOLIO_MATCH_DISTANCE = 5
+
+
+class _OriginalEntryMatcher:
+    """Matches postprocessed entries to first-pass (original) entries, one-to-one.
+
+    Each original entry restores at most one refined entry, so a title repeated per
+    chapter ("Exercises") is not collapsed onto one original occurrence. Exact title
+    matches are assigned first, globally and nearest position first; a fuzzy (prefix)
+    match can then claim an original that no entry matched exactly.
+    """
+
+    def __init__(self, original_toc: TOC) -> None:
+        self._pages_by_key: dict[str, list[tuple[int, int]]] = {}  # title key -> [(page_number, level)]
+        for entry in original_toc.entries:
+            self._pages_by_key.setdefault(_title_match_key(entry.title), []).append((entry.page_number, entry.level))
+        self._claimed: set[tuple[str, int, int]] = set()  # (title key, page, level) already matched
+
+    def claim_exact(self, requests: Sequence[tuple[str, int, int, bool]]) -> dict[int, int]:
+        """Assign same-title, same-level originals to requests, nearest first.
+
+        Each request is (title, level, position, position_is_located): a position
+        located through the printed page numbers accepts only originals within
+        _MAX_FOLIO_MATCH_DISTANCE; an estimated position accepts any. Same-level only:
+        avoids restoring new same-title child entries to unrelated parent or
+        front-matter pages.
+
+        Returns:
+            Request index -> original page, for the requests that were matched.
+        """
+        candidates = sorted(
+            (abs(page - position), index, key, page, level)
+            for index, (title, level, position, position_is_located) in enumerate(requests)
+            for key in (_title_match_key(title),)
+            for page, original_level in self._pages_by_key.get(key, [])
+            if original_level == level
+            and (not position_is_located or abs(page - position) <= _MAX_FOLIO_MATCH_DISTANCE)
+        )
+        assigned: dict[int, int] = {}
+        for _distance, index, key, page, level in candidates:
+            if index not in assigned and (key, page, level) not in self._claimed:
+                self._claimed.add((key, page, level))
+                assigned[index] = page
+        return assigned
+
+    def has_title(self, title: str, level: int) -> bool:
+        """Whether any original entry has exactly this title (normalized) at this level."""
+        return any(
+            original_level == level for _page, original_level in self._pages_by_key.get(_title_match_key(title), [])
+        )
+
+    def claim_fuzzy(self, title: str, level: int, position: int) -> int | None:
+        """Claim the best unclaimed prefix-aligned original at the same level; return its page or None.
+
+        Among equally good candidates the one closest to ``position`` wins.
+        """
+        key = _title_match_key(title)
+        # Collect ALL prefix-aligned matches at the same level, then pick the
+        # best one (highest coverage ratio = shorter/longer).
+        # Titles are compared on their designator-stripped cores, and the
+        # shorter core must be a PREFIX of the longer one: this accepts
+        # end-truncated snippets ("Chapter 3 Risk Manag") and printed-TOC
+        # designator drops ("Distance" vs "1, §2. Distance"), but rejects
+        # leading-word variants ("Preface..." vs "Translator's preface...")
+        # which name different sections.
+        key_core = _strip_leading_designators(key)
+        key_digits = re.findall(r"\d+", key)
+        best: tuple[float, int, str, int] | None = None  # (ratio, -distance to position, orig_key, orig_page)
+
+        for orig_key, matches in self._pages_by_key.items():
+            # Numbering is identity: when BOTH titles carry numbers and they
+            # disagree, they are different sections even if their cores
+            # match ("1.8 Exercises" vs "2.9 Exercises"). A missing number
+            # on one side is fine (printed TOCs often drop designators).
+            orig_digits = re.findall(r"\d+", orig_key)
+            if key_digits and orig_digits and key_digits != orig_digits:
+                continue
+            orig_core = _strip_leading_designators(orig_key)
+            shorter, longer = sorted((key_core, orig_core), key=len)
+            if len(shorter) < _FUZZY_MIN_SUBSTRING_LEN:
+                continue
+            if not longer.startswith(shorter):
+                continue
+            ratio = len(shorter) / len(longer)
+            if ratio < _FUZZY_MIN_COVERAGE_RATIO:
+                continue
+            for orig_page, orig_level in matches:
+                if orig_level != level or (orig_key, orig_page, orig_level) in self._claimed:
+                    continue
+                candidate = (ratio, -abs(orig_page - position), orig_key, orig_page)
+                if best is None or candidate[:2] > best[:2]:
+                    best = candidate
+
+        if best is None:
+            return None
+        _ratio, _distance, best_key, best_page = best
+        self._claimed.add((best_key, best_page, level))
+        return best_page
+
+
 class TOCGenerator:
     """Class to generate table of contents for a PDF document."""
 
@@ -936,6 +1056,7 @@ class TOCGenerator:
         self.doc = doc
         self.llm = llm
         self.num_processes = num_processes or max(_MIN_PROCESS_COUNT, cpu_count() - 1)
+        self._structured_models: dict[type[BaseModel], Runnable] = {}
 
     def run(
         self,
@@ -1004,13 +1125,12 @@ class TOCGenerator:
     def _drop_out_of_range_entries(self, toc: TOC) -> TOC:
         """Drop entries whose page number does not exist in the document, with a console warning.
 
-        LLM page numbers are not guaranteed to be in range. In particular, the
-        postprocessor converts printed-TOC pages with a single front-matter
-        offset, which overshoots the last page for back matter when the PDF
-        omits pages the printed book numbers (e.g. stripped blank pages), and
-        heading verification cannot always relocate those entries. Such an
-        entry has no known destination; pointing it at the nearest valid page
-        would produce a bookmark to unrelated content, so it is dropped.
+        LLM page numbers are not guaranteed to be in range: an entry the pipeline
+        could not place through the document itself (no first-pass match and no
+        locatable printed page) keeps the LLM's estimate, which can overshoot the
+        last page when a front-matter offset is applied to a PDF that omits printed
+        pages. Such an entry has no known destination; pointing it at the nearest
+        valid page would produce a bookmark to unrelated content, so it is dropped.
         """
         in_range, out_of_range = toc.partition_by_page_range(self.doc.page_count)
         if out_of_range:
@@ -1377,18 +1497,26 @@ class TOCGenerator:
         if current_batch:
             yield current_batch
 
-    def _invoke_with_retry(self, model, messages, batch_description: str, input_tokens: int) -> tuple[TOC, dict | None]:
-        """Invoke the LLM with retry logic for rate limiting.
+    def _invoke_with_retry[StructuredT: BaseModel](
+        self, schema: type[StructuredT], messages, batch_description: str, input_tokens: int
+    ) -> tuple[StructuredT, dict | None]:
+        """Invoke the LLM for structured output with retry logic for rate limiting.
 
         Args:
-            model: The LLM model with structured output (include_raw supported).
+            schema: The structured-output schema to request and validate the response into
+                (TOC for the first pass, PostprocessedTOC for postprocessing).
             messages: The messages to send.
             batch_description: Description of the current batch for logging.
             input_tokens: Estimated input tokens for logging.
 
         Returns:
-            Tuple of (parsed TOC, provider usage_metadata or None when unavailable).
+            Tuple of (parsed response, provider usage_metadata or None when unavailable).
         """
+        # include_raw=True exposes the provider's actual token usage (including
+        # reasoning tokens) on the raw message instead of relying on estimates.
+        if schema not in self._structured_models:
+            self._structured_models[schema] = self.llm.with_structured_output(schema, include_raw=True)
+        model = self._structured_models[schema]
 
         def _log_retry(retry_state: RetryCallState) -> None:
             console.print(retry_warning(retry_state, MAX_RETRY_ATTEMPTS))
@@ -1404,11 +1532,10 @@ class TOCGenerator:
             before_sleep=_log_retry,
             reraise=True,
         )
-        def _invoke() -> tuple[TOC, dict | None]:
+        def _invoke() -> tuple[StructuredT, dict | None]:
             # Unpack inside the retried call so structured-output parsing
             # errors participate in the retry policy.
-            parsed, usage_metadata = _unpack_structured_response(model.invoke(messages))
-            return cast(TOC, parsed), usage_metadata
+            return _unpack_structured_response(model.invoke(messages), schema)
 
         console.print(f"  Invoking LLM for {batch_description} (~{input_tokens:,} input tokens)...", style="dim")
         start_time = time.time()
@@ -1445,9 +1572,6 @@ class TOCGenerator:
         """
         usage = TokenUsage()
         merged_toc = TOC(entries=[])
-        # include_raw=True exposes the provider's actual token usage (including
-        # reasoning tokens) on the raw message instead of relying on estimates.
-        model = self.llm.with_structured_output(TOC, include_raw=True)
 
         batches = list(self._batch_features(features, max_tokens_per_batch, overlap_blocks))
         total_batches = len(batches)
@@ -1491,7 +1615,7 @@ class TOCGenerator:
             input_tokens = estimate_tokens(input_text)
 
             # Make LLM call with retry logic
-            batch_toc, usage_metadata = self._invoke_with_retry(model, messages, batch_description, input_tokens)
+            batch_toc, usage_metadata = self._invoke_with_retry(TOC, messages, batch_description, input_tokens)
 
             actual_input, actual_output = _resolve_token_counts(usage_metadata, input_tokens, batch_toc)
 
@@ -1573,7 +1697,6 @@ class TOCGenerator:
             A tuple of (refined TOC, TokenUsage) with the improved TOC.
         """
         usage = TokenUsage()
-        model = self.llm.with_structured_output(TOC, include_raw=True)
 
         # Extract reference text from first pages (may contain printed TOC)
         reference_text = self._extract_reference_toc_text(max_pages=max_pages_for_reference_toc)
@@ -1613,8 +1736,9 @@ For existing entries, prefer keeping these page numbers unchanged.
 {features_summary}
 
 Please return a cleaned and improved TOC. It is very important that you add any missing \
-sections or chapters visible in the printed TOC above. ALL page numbers in your output \
-must be PDF page numbers (not printed page numbers).
+sections or chapters visible in the printed TOC above. Every `page_number` in your output \
+must be a PDF page number (not a printed page number); `printed_page` holds the printed TOC's \
+number exactly as printed.
 """
 
         messages = [
@@ -1628,12 +1752,14 @@ must be PDF page numbers (not printed page numbers).
 
         # Make LLM call with retry logic
         console.print("Postprocessing TOC...", style="bold")
-        refined_toc, usage_metadata = self._invoke_with_retry(model, messages, "TOC postprocessing", input_tokens)
+        postprocessed_toc, usage_metadata = self._invoke_with_retry(
+            PostprocessedTOC, messages, "TOC postprocessing", input_tokens
+        )
 
-        # Validate and correct page numbers if the LLM shifted to printed page numbers
-        refined_toc = self._correct_postprocessed_page_numbers(toc, refined_toc, reference_text=reference_text)
+        # Place the postprocessed entries on PDF pages and verify them.
+        refined_toc = self._correct_postprocessed_page_numbers(toc, postprocessed_toc, reference_text=reference_text)
 
-        actual_input, actual_output = _resolve_token_counts(usage_metadata, input_tokens, refined_toc)
+        actual_input, actual_output = _resolve_token_counts(usage_metadata, input_tokens, postprocessed_toc)
 
         usage.add_call(
             input_tokens=actual_input,
@@ -1750,8 +1876,7 @@ must be PDF page numbers (not printed page numbers).
 
         front_matter_anchor_page = 0
         for entry in candidates:
-            title_clean = re.sub(r"[^\w\s]", "", entry.title.strip().lower())
-            title_clean = re.sub(r"\s+", " ", title_clean)
+            title_clean = _title_match_key(entry.title)
             if _FRONT_MATTER_TITLE_PATTERN.match(title_clean):
                 front_matter_anchor_page = max(front_matter_anchor_page, entry.page_number)
 
@@ -1766,8 +1891,7 @@ must be PDF page numbers (not printed page numbers).
                 return entry.page_number - 1
 
         for entry in candidates_after_front_matter:
-            title_clean = re.sub(r"[^\w\s]", "", entry.title.strip().lower())
-            title_clean = re.sub(r"\s+", " ", title_clean)
+            title_clean = _title_match_key(entry.title)
             if not _FRONT_MATTER_TITLE_PATTERN.match(title_clean):
                 return entry.page_number - 1
         return 0
@@ -2033,133 +2157,111 @@ must be PDF page numbers (not printed page numbers).
 
         return TOC(entries=corrected)
 
-    def _correct_postprocessed_page_numbers(self, original_toc: TOC, refined_toc: TOC, reference_text: str = "") -> TOC:
+    def _correct_postprocessed_page_numbers(
+        self, original_toc: TOC, refined_toc: PostprocessedTOC, reference_text: str = ""
+    ) -> TOC:
         """Correct page numbers for entries added or modified by the postprocessor.
 
         Uses a deterministic strategy:
         1. Detect the front matter offset from Phase 1 data.
-        2. For matched entries (exist in both original and refined): restore the
-           original PDF page number.
-        3. For new entries (only in refined) with significant front matter: verify
-           and apply the offset by checking the actual PDF text.
+        2. Index the original entries by normalized title.
+        3. Place each refined entry: matched entries (in both original and refined)
+           get their original PDF page back; other entries citing a printed-TOC page
+           (``printed_page``) are placed through the printed page numbers found on
+           the pages; the rest keep the postprocessor's page.
+        4. With significant front matter, verify every entry by searching the PDF
+           text for its heading within ±offset pages.
 
         Args:
             original_toc: The pre-postprocessing TOC with correct PDF page numbers.
             refined_toc: The postprocessed TOC that may have shifted page numbers.
+            reference_text: Text of the document's first pages (printed TOC), used to
+                detect the front matter offset.
 
         Returns:
             The corrected TOC with PDF page numbers restored.
         """
         if not refined_toc.entries:
-            return refined_toc
+            return TOC(entries=[])
 
         # Step 1: Detect front matter offset from Phase 1 data
         offset = self._detect_front_matter_offset(original_toc, reference_text=reference_text)
 
-        # Step 2: Build map of original entries (normalized title -> page_number)
-        def normalize(title: str) -> str:
-            title = re.sub(r"[^\w\s]", "", title)  # strip all punctuation
-            return re.sub(r"\s+", " ", title.strip().lower())
+        # Step 2: Index the original entries for one-to-one matching.
+        originals = _OriginalEntryMatcher(original_toc)
 
-        original_map: dict[str, list[tuple[int, int]]] = {}  # normalized title -> [(page_number, level)]
-        for entry in original_toc.entries:
-            original_map.setdefault(normalize(entry.title), []).append((entry.page_number, entry.level))
+        # Step 3: Place each refined entry, by the strongest evidence available:
+        #         1. an exact first-pass match (the first pass saw the heading there);
+        #         2. the printed-TOC page it cites, located through the printed page
+        #            numbers on the pages themselves (correct where a single
+        #            front-matter offset drifts);
+        #         3. a fuzzy (prefix) first-pass match;
+        #         4. the postprocessor's own estimate (verified below).
+        #         An exact-title repeat left over once every same-title original was
+        #         claimed, with nothing else locating it, is dropped as a duplicate.
+        #         Exact matches are assigned globally, nearest first, with the printed
+        #         page (when locatable) as each entry's position.
+        entries = refined_toc.entries
+        printed_pdf_pages = [
+            None if entry.printed_page is None else self._printed_page_map.pdf_page(entry.printed_page)
+            for entry in entries
+        ]
+        positions = [
+            entry.page_number if printed is None else printed
+            for entry, printed in zip(entries, printed_pdf_pages, strict=True)
+        ]
+        exact_pages = originals.claim_exact(
+            [
+                (entry.title, entry.level, position, printed is not None)
+                for entry, position, printed in zip(entries, positions, printed_pdf_pages, strict=True)
+            ]
+        )
 
-        def _fuzzy_match(key: str, level: int) -> int | None:
-            """Try multi-strategy matching against original_map.
-
-            Returns the original page number if matched, or None.
-            Strategies (in order):
-            1. Exact normalized match
-            2. Best substring containment (same level, min length and coverage ratio)
-            """
-            # Strategy 1: exact match at the same level. Avoid restoring new
-            # same-title child entries to unrelated parent/front-matter pages.
-            for orig_page, orig_level in original_map.get(key, []):
-                if orig_level == level:
-                    return orig_page
-
-            # Strategy 2: collect ALL prefix-aligned matches at the same level,
-            # then pick the best one (highest coverage ratio = shorter/longer).
-            # Titles are compared on their designator-stripped cores, and the
-            # shorter core must be a PREFIX of the longer one: this accepts
-            # end-truncated snippets ("Chapter 3 Risk Manag") and printed-TOC
-            # designator drops ("Distance" vs "1, §2. Distance"), but rejects
-            # leading-word variants ("Preface..." vs "Translator's preface...")
-            # which name different sections.
-            key_core = _strip_leading_designators(key)
-            key_digits = re.findall(r"\d+", key)
-            best_page: int | None = None
-            best_ratio: float = 0.0
-
-            for orig_key, matches in original_map.items():
-                # Numbering is identity: when BOTH titles carry numbers and they
-                # disagree, they are different sections even if their cores
-                # match ("1.8 Exercises" vs "2.9 Exercises"). A missing number
-                # on one side is fine (printed TOCs often drop designators).
-                orig_digits = re.findall(r"\d+", orig_key)
-                if key_digits and orig_digits and key_digits != orig_digits:
-                    continue
-                orig_core = _strip_leading_designators(orig_key)
-                shorter, longer = sorted((key_core, orig_core), key=len)
-                if len(shorter) < _FUZZY_MIN_SUBSTRING_LEN:
-                    continue
-                if not longer.startswith(shorter):
-                    continue
-                ratio = len(shorter) / len(longer)
-                if ratio < _FUZZY_MIN_COVERAGE_RATIO:
-                    continue
-                for orig_page, orig_level in matches:
-                    if orig_level != level:
-                        continue
-                    if ratio > best_ratio:
-                        best_ratio = ratio
-                        best_page = orig_page
-
-            return best_page
-
-        corrected = []
+        placed: list[TOCEntry] = []
         restored_count = 0
-
-        # Step 3: For matched entries, restore original page numbers.
-        #         For new entries, keep the LLM's output (to be verified below).
-        for entry in refined_toc.entries:
-            key = normalize(entry.title)
-
-            matched_page = _fuzzy_match(key, entry.level)
-            if matched_page is not None:
-                # MATCHED: restore original PDF page number
-                if entry.page_number != matched_page:
-                    restored_count += 1
-                corrected.append(entry.model_copy(update={"page_number": matched_page}))
+        mapped_count = 0
+        for index, (entry, printed_pdf_page, position) in enumerate(
+            zip(entries, printed_pdf_pages, positions, strict=True)
+        ):
+            if index in exact_pages:
+                page = exact_pages[index]
+                restored_count += entry.page_number != page
+            elif printed_pdf_page is not None:
+                page = printed_pdf_page
+                mapped_count += entry.page_number != page
+            elif originals.has_title(entry.title, entry.level):
+                # Every same-title original was claimed by another refined entry and
+                # nothing else locates this one: the postprocessor repeated an entry.
+                continue
+            elif (fuzzy_page := originals.claim_fuzzy(entry.title, entry.level, position)) is not None:
+                page = fuzzy_page
+                restored_count += entry.page_number != page
             else:
-                corrected.append(entry)
+                page = entry.page_number
+            placed.append(entry.to_toc_entry(page_number=page))
 
-        # Step 4: Verify ALL entries using running-header-aware page search.
-        # This catches errors from both matched entries (initial extraction was wrong)
-        # and new entries (LLM used printed page numbers or guessed incorrectly).
-        # Search a window of ±offset around each entry's current page.
+        if any(entry.printed_page is not None for entry in entries) and not self._printed_page_map:
+            console.print("  No printed page numbers detected on the pages; keeping page estimates", style="dim")
+
+        # Step 4: Verify ALL entries using running-header-aware page search: a heading
+        # found on a page outranks every page source. This catches matched entries whose
+        # initial extraction was wrong, estimates, and printed pages the LLM misread (or
+        # a printed TOC that is off by a page). Search ±offset around each entry's page.
         verified_count = 0
-        if offset >= _SIGNIFICANT_FRONT_MATTER_OFFSET:
-            window = offset
-            for i, entry in enumerate(corrected):
-                search_text = _normalize_snippet(entry.title)
-                if len(search_text) < _FUZZY_MIN_SUBSTRING_LEN:
-                    continue
-                # Center on the nearest in-document page: an entry claimed past the
-                # last page (printed page + offset overshooting a PDF that omits
-                # printed pages) is most likely among the final pages.
-                center = min(max(entry.page_number, 1), self.doc.page_count)
-                search_start = max(1, center - window)
-                search_end = min(self.doc.page_count, center + window) + 1
-                actual_page = self._find_heading_page(entry.title, search_start, search_end, hint_page=center)
-                if actual_page is not None and actual_page != entry.page_number:
-                    corrected[i] = entry.model_copy(update={"page_number": actual_page})
+        corrected: list[TOCEntry] = []
+        for placed_entry in placed:
+            if offset >= _SIGNIFICANT_FRONT_MATTER_OFFSET:
+                verified_page = self._verify_heading_page(placed_entry, window=offset)
+                if verified_page != placed_entry.page_number:
+                    placed_entry = placed_entry.model_copy(update={"page_number": verified_page})
                     verified_count += 1
+            corrected.append(placed_entry)
 
         # Log corrections
         if restored_count > 0:
             console.print(f"  Restored page numbers for {restored_count} existing entries", style="yellow")
+        if mapped_count > 0:
+            console.print(f"  Placed {mapped_count} entries via the document's printed page numbers", style="yellow")
         if verified_count > 0:
             console.print(
                 f"  Verified and corrected {verified_count} entries via heading search (±{offset} page window)",
@@ -2167,6 +2269,26 @@ must be PDF page numbers (not printed page numbers).
             )
 
         return TOC(entries=corrected)
+
+    def _verify_heading_page(self, entry: TOCEntry, window: int) -> int:
+        """Return the page within ±window of the entry's page where its heading is found, or its page.
+
+        Searches outward from the nearest in-document page: an entry claimed past the
+        last page (printed page + offset overshooting a PDF that omits printed pages)
+        is most likely among the final pages.
+        """
+        if len(_normalize_snippet(entry.title)) < _FUZZY_MIN_SUBSTRING_LEN:
+            return entry.page_number
+        center = min(max(entry.page_number, 1), self.doc.page_count)
+        search_start = max(1, center - window)
+        search_end = min(self.doc.page_count, center + window) + 1
+        found_page = self._find_heading_page(entry.title, search_start, search_end, hint_page=center)
+        return entry.page_number if found_page is None else found_page
+
+    @cached_property
+    def _printed_page_map(self) -> PrintedPageMap:
+        """The document's printed-to-PDF page map, built on first use (one pass over all pages)."""
+        return PrintedPageMap.from_document(self.doc)
 
     def _summarize_features_for_postprocessing(
         self, features: list, max_entries: int = DEFAULT_POSTPROCESS_FEATURE_SUMMARY_MAX_ENTRIES

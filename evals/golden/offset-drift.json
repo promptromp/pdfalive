@@ -1,0 +1,898 @@
+{
+  "name": "offset-drift",
+  "source_pdf": "data/offset-drift.pdf",
+  "postprocess": true,
+  "description": "Human-verified golden built from the document's printed Contents: every numbered entry was located two independent ways that agree (heading text on the page; printed page via on-page folios), the rest by hand. The PDF omits pages its printed numbering counts, so the printed-to-PDF offset drifts from +13 at the first chapter to -11 at the index: the regression case for offset drift. Text PDF, no OCR needed. The committed cassette is a draw in which the LLM's own page estimates drift: without printed-page placement the pipeline scores page accuracy 0.58 (one entry dropped past the last page), with it 1.00.",
+  "entries": [
+    {
+      "level": 1,
+      "title": "Foreword",
+      "page_number": 5
+    },
+    {
+      "level": 1,
+      "title": "Contents",
+      "page_number": 7
+    },
+    {
+      "level": 1,
+      "title": "Introduction",
+      "page_number": 13
+    },
+    {
+      "level": 1,
+      "title": "Part I: Symplectic Manifolds",
+      "page_number": 15
+    },
+    {
+      "level": 2,
+      "title": "Chapter 1: Symplectic Forms",
+      "page_number": 16
+    },
+    {
+      "level": 3,
+      "title": "1.1 Skew-Symmetric Bilinear Maps",
+      "page_number": 16
+    },
+    {
+      "level": 3,
+      "title": "1.2 Symplectic Vector Spaces",
+      "page_number": 17
+    },
+    {
+      "level": 3,
+      "title": "1.3 Symplectic Manifolds",
+      "page_number": 19
+    },
+    {
+      "level": 3,
+      "title": "1.4 Symplectomorphisms",
+      "page_number": 20
+    },
+    {
+      "level": 3,
+      "title": "Homework 1: Symplectic Linear Algebra",
+      "page_number": 21
+    },
+    {
+      "level": 2,
+      "title": "Chapter 2: Symplectic Form on the Cotangent Bundle",
+      "page_number": 22
+    },
+    {
+      "level": 3,
+      "title": "2.1 Cotangent Bundle",
+      "page_number": 22
+    },
+    {
+      "level": 3,
+      "title": "2.2 Tautological and Canonical Forms in Coordinates",
+      "page_number": 23
+    },
+    {
+      "level": 3,
+      "title": "2.3 Coordinate-Free Definitions",
+      "page_number": 23
+    },
+    {
+      "level": 3,
+      "title": "2.4 Naturality of the Tautological and Canonical Forms",
+      "page_number": 24
+    },
+    {
+      "level": 3,
+      "title": "Homework 2: Symplectic Volume",
+      "page_number": 27
+    },
+    {
+      "level": 1,
+      "title": "Part II: Symplectomorphisms",
+      "page_number": 28
+    },
+    {
+      "level": 2,
+      "title": "Chapter 3: Lagrangian Submanifolds",
+      "page_number": 29
+    },
+    {
+      "level": 3,
+      "title": "3.1 Submanifolds",
+      "page_number": 29
+    },
+    {
+      "level": 3,
+      "title": "3.2 Lagrangian Submanifolds of T*X",
+      "page_number": 30
+    },
+    {
+      "level": 3,
+      "title": "3.3 Conormal Bundles",
+      "page_number": 31
+    },
+    {
+      "level": 3,
+      "title": "3.4 Application to Symplectomorphisms",
+      "page_number": 32
+    },
+    {
+      "level": 3,
+      "title": "Homework 3: Tautological Form and Symplectomorphisms",
+      "page_number": 34
+    },
+    {
+      "level": 2,
+      "title": "Chapter 4: Generating Functions",
+      "page_number": 36
+    },
+    {
+      "level": 3,
+      "title": "4.1 Constructing Symplectomorphisms",
+      "page_number": 36
+    },
+    {
+      "level": 3,
+      "title": "4.2 Method of Generating Functions",
+      "page_number": 37
+    },
+    {
+      "level": 3,
+      "title": "4.3 Application to Geodesic Flow",
+      "page_number": 39
+    },
+    {
+      "level": 3,
+      "title": "Homework 4: Geodesic Flow",
+      "page_number": 41
+    },
+    {
+      "level": 2,
+      "title": "Chapter 5: Recurrence",
+      "page_number": 43
+    },
+    {
+      "level": 3,
+      "title": "5.1 Periodic Points",
+      "page_number": 43
+    },
+    {
+      "level": 3,
+      "title": "5.2 Billiards",
+      "page_number": 45
+    },
+    {
+      "level": 3,
+      "title": "5.3 Poincaré Recurrence",
+      "page_number": 46
+    },
+    {
+      "level": 1,
+      "title": "Part III: Local Forms",
+      "page_number": 48
+    },
+    {
+      "level": 2,
+      "title": "Chapter 6: Preparation for the Local Theory",
+      "page_number": 49
+    },
+    {
+      "level": 3,
+      "title": "6.1 Isotopies and Vector Fields",
+      "page_number": 49
+    },
+    {
+      "level": 3,
+      "title": "6.2 Tubular Neighborhood Theorem",
+      "page_number": 51
+    },
+    {
+      "level": 3,
+      "title": "6.3 Homotopy Formula",
+      "page_number": 53
+    },
+    {
+      "level": 3,
+      "title": "Homework 5: Tubular Neighborhoods in Rⁿ",
+      "page_number": 55
+    },
+    {
+      "level": 2,
+      "title": "Chapter 7: Moser Theorems",
+      "page_number": 56
+    },
+    {
+      "level": 3,
+      "title": "7.1 Notions of Equivalence for Symplectic Structures",
+      "page_number": 56
+    },
+    {
+      "level": 3,
+      "title": "7.2 Moser Trick",
+      "page_number": 57
+    },
+    {
+      "level": 3,
+      "title": "7.3 Moser Relative Theorem",
+      "page_number": 59
+    },
+    {
+      "level": 2,
+      "title": "Chapter 8: Darboux-Moser-Weinstein Theory",
+      "page_number": 61
+    },
+    {
+      "level": 3,
+      "title": "8.1 Darboux Theorem",
+      "page_number": 61
+    },
+    {
+      "level": 3,
+      "title": "8.2 Lagrangian Subspaces",
+      "page_number": 62
+    },
+    {
+      "level": 3,
+      "title": "8.3 Weinstein Lagrangian Neighborhood Theorem",
+      "page_number": 63
+    },
+    {
+      "level": 3,
+      "title": "Homework 6: Oriented Surfaces",
+      "page_number": 66
+    },
+    {
+      "level": 2,
+      "title": "Chapter 9: Weinstein Tubular Neighborhood Theorem",
+      "page_number": 67
+    },
+    {
+      "level": 3,
+      "title": "9.1 Observation from Linear Algebra",
+      "page_number": 67
+    },
+    {
+      "level": 3,
+      "title": "9.2 Tubular Neighborhoods",
+      "page_number": 67
+    },
+    {
+      "level": 3,
+      "title": "9.3 Application 1: Tangent Space to the Group of Symplectomorphisms",
+      "page_number": 69
+    },
+    {
+      "level": 3,
+      "title": "9.4 Application 2: Fixed Points of Symplectomorphisms",
+      "page_number": 71
+    },
+    {
+      "level": 1,
+      "title": "Part IV: Contact Manifolds",
+      "page_number": 73
+    },
+    {
+      "level": 2,
+      "title": "Chapter 10: Contact Forms",
+      "page_number": 74
+    },
+    {
+      "level": 3,
+      "title": "10.1 Contact Structures",
+      "page_number": 74
+    },
+    {
+      "level": 3,
+      "title": "10.2 Examples",
+      "page_number": 75
+    },
+    {
+      "level": 3,
+      "title": "10.3 First Properties",
+      "page_number": 76
+    },
+    {
+      "level": 3,
+      "title": "Homework 7: Manifolds of Contact Elements",
+      "page_number": 78
+    },
+    {
+      "level": 2,
+      "title": "Chapter 11: Contact Dynamics",
+      "page_number": 80
+    },
+    {
+      "level": 3,
+      "title": "11.1 Reeb Vector Fields",
+      "page_number": 80
+    },
+    {
+      "level": 3,
+      "title": "11.2 Symplectization",
+      "page_number": 81
+    },
+    {
+      "level": 3,
+      "title": "11.3 Conjectures of Seifert and Weinstein",
+      "page_number": 82
+    },
+    {
+      "level": 1,
+      "title": "Part V: Compatible Almost Complex Structures",
+      "page_number": 85
+    },
+    {
+      "level": 2,
+      "title": "Chapter 12: Almost Complex Structures",
+      "page_number": 86
+    },
+    {
+      "level": 3,
+      "title": "12.1 Three Geometries",
+      "page_number": 86
+    },
+    {
+      "level": 3,
+      "title": "12.2 Complex Structures on Vector Spaces",
+      "page_number": 87
+    },
+    {
+      "level": 3,
+      "title": "12.3 Compatible Structures",
+      "page_number": 89
+    },
+    {
+      "level": 3,
+      "title": "Homework 8: Compatible Linear Structures",
+      "page_number": 91
+    },
+    {
+      "level": 2,
+      "title": "Chapter 13: Compatible Triples",
+      "page_number": 92
+    },
+    {
+      "level": 3,
+      "title": "13.1 Compatibility",
+      "page_number": 92
+    },
+    {
+      "level": 3,
+      "title": "13.2 Triple of Structures",
+      "page_number": 93
+    },
+    {
+      "level": 3,
+      "title": "13.3 First Consequences",
+      "page_number": 94
+    },
+    {
+      "level": 3,
+      "title": "Homework 9: Contractibility",
+      "page_number": 95
+    },
+    {
+      "level": 2,
+      "title": "Chapter 14: Dolbeault Theory",
+      "page_number": 96
+    },
+    {
+      "level": 3,
+      "title": "14.1 Splittings",
+      "page_number": 96
+    },
+    {
+      "level": 3,
+      "title": "14.2 Forms of Type (ℓ,m)",
+      "page_number": 97
+    },
+    {
+      "level": 3,
+      "title": "14.3 J-Holomorphic Functions",
+      "page_number": 98
+    },
+    {
+      "level": 3,
+      "title": "14.4 Dolbeault Cohomology",
+      "page_number": 99
+    },
+    {
+      "level": 3,
+      "title": "Homework 10: Integrability",
+      "page_number": 101
+    },
+    {
+      "level": 1,
+      "title": "Part VI: Kähler Manifolds",
+      "page_number": 102
+    },
+    {
+      "level": 2,
+      "title": "Chapter 15: Complex Manifolds",
+      "page_number": 103
+    },
+    {
+      "level": 3,
+      "title": "15.1 Complex Charts",
+      "page_number": 103
+    },
+    {
+      "level": 3,
+      "title": "15.2 Forms on Complex Manifolds",
+      "page_number": 105
+    },
+    {
+      "level": 3,
+      "title": "15.3 Differentials",
+      "page_number": 106
+    },
+    {
+      "level": 3,
+      "title": "Homework 11: Complex Projective Space",
+      "page_number": 109
+    },
+    {
+      "level": 2,
+      "title": "Chapter 16: Kähler Forms",
+      "page_number": 110
+    },
+    {
+      "level": 3,
+      "title": "16.1 Kähler Forms",
+      "page_number": 110
+    },
+    {
+      "level": 3,
+      "title": "16.2 An Application",
+      "page_number": 112
+    },
+    {
+      "level": 3,
+      "title": "16.3 Recipe to Obtain Kähler Forms",
+      "page_number": 113
+    },
+    {
+      "level": 3,
+      "title": "16.4 Local Canonical Form for Kähler Forms",
+      "page_number": 114
+    },
+    {
+      "level": 3,
+      "title": "Homework 12: The Fubini-Study Structure",
+      "page_number": 116
+    },
+    {
+      "level": 2,
+      "title": "Chapter 17: Compact Kähler Manifolds",
+      "page_number": 118
+    },
+    {
+      "level": 3,
+      "title": "17.1 Hodge Theory",
+      "page_number": 118
+    },
+    {
+      "level": 3,
+      "title": "17.2 Immediate Topological Consequences",
+      "page_number": 120
+    },
+    {
+      "level": 3,
+      "title": "17.3 Compact Examples and Counterexamples",
+      "page_number": 121
+    },
+    {
+      "level": 3,
+      "title": "17.4 Main Kähler Manifolds",
+      "page_number": 123
+    },
+    {
+      "level": 1,
+      "title": "Part VII: Hamiltonian Mechanics",
+      "page_number": 125
+    },
+    {
+      "level": 2,
+      "title": "Chapter 18: Hamiltonian Vector Fields",
+      "page_number": 126
+    },
+    {
+      "level": 3,
+      "title": "18.1 Hamiltonian and Symplectic Vector Fields",
+      "page_number": 126
+    },
+    {
+      "level": 3,
+      "title": "18.2 Classical Mechanics",
+      "page_number": 128
+    },
+    {
+      "level": 3,
+      "title": "18.3 Brackets",
+      "page_number": 129
+    },
+    {
+      "level": 3,
+      "title": "18.4 Integrable Systems",
+      "page_number": 130
+    },
+    {
+      "level": 3,
+      "title": "Homework 13: Simple Pendulum",
+      "page_number": 133
+    },
+    {
+      "level": 2,
+      "title": "Chapter 19: Variational Principles",
+      "page_number": 134
+    },
+    {
+      "level": 3,
+      "title": "19.1 Equations of Motion",
+      "page_number": 134
+    },
+    {
+      "level": 3,
+      "title": "19.2 Principle of Least Action",
+      "page_number": 135
+    },
+    {
+      "level": 3,
+      "title": "19.3 Variational Problems",
+      "page_number": 136
+    },
+    {
+      "level": 3,
+      "title": "19.4 Solving the Euler-Lagrange Equations",
+      "page_number": 137
+    },
+    {
+      "level": 3,
+      "title": "19.5 Minimizing Properties",
+      "page_number": 139
+    },
+    {
+      "level": 3,
+      "title": "Homework 14: Minimizing Geodesics",
+      "page_number": 140
+    },
+    {
+      "level": 2,
+      "title": "Chapter 20: Legendre Transform",
+      "page_number": 142
+    },
+    {
+      "level": 3,
+      "title": "20.1 Strict Convexity",
+      "page_number": 142
+    },
+    {
+      "level": 3,
+      "title": "20.2 Legendre Transform",
+      "page_number": 143
+    },
+    {
+      "level": 3,
+      "title": "20.3 Application to Variational Problems",
+      "page_number": 144
+    },
+    {
+      "level": 3,
+      "title": "Homework 15: Legendre Transform",
+      "page_number": 146
+    },
+    {
+      "level": 1,
+      "title": "Part VIII: Moment Maps",
+      "page_number": 148
+    },
+    {
+      "level": 2,
+      "title": "Chapter 21: Actions",
+      "page_number": 149
+    },
+    {
+      "level": 3,
+      "title": "21.1 One-Parameter Groups of Diffeomorphisms",
+      "page_number": 149
+    },
+    {
+      "level": 3,
+      "title": "21.2 Lie Groups",
+      "page_number": 150
+    },
+    {
+      "level": 3,
+      "title": "21.3 Smooth Actions",
+      "page_number": 150
+    },
+    {
+      "level": 3,
+      "title": "21.4 Symplectic and Hamiltonian Actions",
+      "page_number": 151
+    },
+    {
+      "level": 3,
+      "title": "21.5 Adjoint and Coadjoint Representations",
+      "page_number": 152
+    },
+    {
+      "level": 3,
+      "title": "Homework 16: Hermitian Matrices",
+      "page_number": 154
+    },
+    {
+      "level": 2,
+      "title": "Chapter 22: Hamiltonian Actions",
+      "page_number": 155
+    },
+    {
+      "level": 3,
+      "title": "22.1 Moment and Comoment Maps",
+      "page_number": 155
+    },
+    {
+      "level": 3,
+      "title": "22.2 Orbit Spaces",
+      "page_number": 157
+    },
+    {
+      "level": 3,
+      "title": "22.3 Preview of Reduction",
+      "page_number": 158
+    },
+    {
+      "level": 3,
+      "title": "22.4 Classical Examples",
+      "page_number": 159
+    },
+    {
+      "level": 3,
+      "title": "Homework 17: Coadjoint Orbits",
+      "page_number": 161
+    },
+    {
+      "level": 1,
+      "title": "Part IX: Symplectic Reduction",
+      "page_number": 162
+    },
+    {
+      "level": 2,
+      "title": "Chapter 23: The Marsden-Weinstein-Meyer Theorem",
+      "page_number": 163
+    },
+    {
+      "level": 3,
+      "title": "23.1 Statement",
+      "page_number": 163
+    },
+    {
+      "level": 3,
+      "title": "23.2 Ingredients",
+      "page_number": 164
+    },
+    {
+      "level": 3,
+      "title": "23.3 Proof of the Marsden-Weinstein-Meyer Theorem",
+      "page_number": 167
+    },
+    {
+      "level": 2,
+      "title": "Chapter 24: Reduction",
+      "page_number": 168
+    },
+    {
+      "level": 3,
+      "title": "24.1 Noether Principle",
+      "page_number": 168
+    },
+    {
+      "level": 3,
+      "title": "24.2 Elementary Theory of Reduction",
+      "page_number": 168
+    },
+    {
+      "level": 3,
+      "title": "24.3 Reduction for Product Groups",
+      "page_number": 170
+    },
+    {
+      "level": 3,
+      "title": "24.4 Reduction at Other Levels",
+      "page_number": 171
+    },
+    {
+      "level": 3,
+      "title": "24.5 Orbifolds",
+      "page_number": 171
+    },
+    {
+      "level": 3,
+      "title": "Homework 18: Spherical Pendulum",
+      "page_number": 173
+    },
+    {
+      "level": 1,
+      "title": "Part X: Moment Maps Revisited",
+      "page_number": 175
+    },
+    {
+      "level": 2,
+      "title": "Chapter 25: Moment Map in Gauge Theory",
+      "page_number": 176
+    },
+    {
+      "level": 3,
+      "title": "25.1 Connections on a Principal Bundle",
+      "page_number": 176
+    },
+    {
+      "level": 3,
+      "title": "25.2 Connection and Curvature Forms",
+      "page_number": 177
+    },
+    {
+      "level": 3,
+      "title": "25.3 Symplectic Structure on the Space of Connections",
+      "page_number": 179
+    },
+    {
+      "level": 3,
+      "title": "25.4 Action of the Gauge Group",
+      "page_number": 180
+    },
+    {
+      "level": 3,
+      "title": "25.5 Case of Circle Bundles",
+      "page_number": 180
+    },
+    {
+      "level": 3,
+      "title": "Homework 19: Examples of Moment Maps",
+      "page_number": 184
+    },
+    {
+      "level": 2,
+      "title": "Chapter 26: Existence and Uniqueness of Moment Maps",
+      "page_number": 186
+    },
+    {
+      "level": 3,
+      "title": "26.1 Lie Algebras of Vector Fields",
+      "page_number": 186
+    },
+    {
+      "level": 3,
+      "title": "26.2 Lie Algebra Cohomology",
+      "page_number": 187
+    },
+    {
+      "level": 3,
+      "title": "26.3 Existence of Moment Maps",
+      "page_number": 188
+    },
+    {
+      "level": 3,
+      "title": "26.4 Uniqueness of Moment Maps",
+      "page_number": 189
+    },
+    {
+      "level": 3,
+      "title": "Homework 20: Examples of Reduction",
+      "page_number": 191
+    },
+    {
+      "level": 2,
+      "title": "Chapter 27: Convexity",
+      "page_number": 192
+    },
+    {
+      "level": 3,
+      "title": "27.1 Convexity Theorem",
+      "page_number": 192
+    },
+    {
+      "level": 3,
+      "title": "27.2 Effective Actions",
+      "page_number": 194
+    },
+    {
+      "level": 3,
+      "title": "27.3 Examples",
+      "page_number": 195
+    },
+    {
+      "level": 3,
+      "title": "Homework 21: Connectedness",
+      "page_number": 197
+    },
+    {
+      "level": 1,
+      "title": "Part XI: Symplectic Toric Manifolds",
+      "page_number": 199
+    },
+    {
+      "level": 2,
+      "title": "Chapter 28: Classification of Symplectic Toric Manifolds",
+      "page_number": 200
+    },
+    {
+      "level": 3,
+      "title": "28.1 Delzant Polytopes",
+      "page_number": 200
+    },
+    {
+      "level": 3,
+      "title": "28.2 Delzant Theorem",
+      "page_number": 202
+    },
+    {
+      "level": 3,
+      "title": "28.3 Sketch of Delzant Construction",
+      "page_number": 203
+    },
+    {
+      "level": 2,
+      "title": "Chapter 29: Delzant Construction",
+      "page_number": 206
+    },
+    {
+      "level": 3,
+      "title": "29.1 Algebraic Set-Up",
+      "page_number": 206
+    },
+    {
+      "level": 3,
+      "title": "29.2 The Zero-Level",
+      "page_number": 207
+    },
+    {
+      "level": 3,
+      "title": "29.3 Conclusion of the Delzant Construction",
+      "page_number": 209
+    },
+    {
+      "level": 3,
+      "title": "29.4 Idea Behind the Delzant Construction",
+      "page_number": 210
+    },
+    {
+      "level": 3,
+      "title": "Homework 22: Delzant Theorem",
+      "page_number": 212
+    },
+    {
+      "level": 2,
+      "title": "Chapter 30: Duistermaat-Heckman Theorems",
+      "page_number": 214
+    },
+    {
+      "level": 3,
+      "title": "30.1 Duistermaat-Heckman Polynomial",
+      "page_number": 214
+    },
+    {
+      "level": 3,
+      "title": "30.2 Local Form for Reduced Spaces",
+      "page_number": 216
+    },
+    {
+      "level": 3,
+      "title": "30.3 Variation of the Symplectic Volume",
+      "page_number": 218
+    },
+    {
+      "level": 3,
+      "title": "Homework 23: S¹-Equivariant Cohomology",
+      "page_number": 220
+    },
+    {
+      "level": 1,
+      "title": "References",
+      "page_number": 223
+    },
+    {
+      "level": 1,
+      "title": "Index",
+      "page_number": 228
+    }
+  ]
+}

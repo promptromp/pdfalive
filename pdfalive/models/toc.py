@@ -1,6 +1,12 @@
 """Table of Contents entry data model."""
 
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, field_validator
+
+
+# A page number as printed in a table of contents, in ASCII digits.
+_ARABIC_NUMBER = re.compile(r"[0-9]+")
 
 
 class TOCEntry(BaseModel):
@@ -160,6 +166,47 @@ class TOC(BaseModel):
         merged_entries = sorted(seen.values(), key=lambda e: (e.page_number, e.level))
 
         return TOC(entries=merged_entries)
+
+
+class PostprocessedTOCEntry(TOCEntry):
+    """A TOC entry returned by the postprocessor, citing its printed-TOC page when listed there."""
+
+    printed_page: int | None = Field(
+        default=None,
+        description=(
+            "Page number exactly as printed for this entry in the document's own printed table of contents, "
+            "if it is listed there with an Arabic page number; otherwise null"
+        ),
+    )
+
+    @field_validator("printed_page", mode="before")
+    @classmethod
+    def _non_arabic_printed_page_is_absent(cls, value: object) -> object:
+        """Read anything but a plain Arabic page number (e.g. "xii" from front matter) as absent.
+
+        Providers without strict schema enforcement may return the printed TOC's page
+        verbatim (roman numerals, other scripts' digits, fractions); such values carry no
+        folio to map, and must not fail the whole response.
+        """
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value) if value.is_integer() else None
+        if isinstance(value, str) and _ARABIC_NUMBER.fullmatch(value.strip()):
+            return int(value.strip())
+        return None
+
+    def to_toc_entry(self, page_number: int) -> TOCEntry:
+        """Return the plain TOC entry for this entry, placed on ``page_number``."""
+        return TOCEntry.model_validate(self.model_dump(exclude={"printed_page"}) | {"page_number": page_number})
+
+
+class PostprocessedTOC(BaseModel):
+    """Table of Contents returned by the postprocessor (its structured-output schema)."""
+
+    entries: list[PostprocessedTOCEntry]
 
 
 class TOCFeature(BaseModel):
