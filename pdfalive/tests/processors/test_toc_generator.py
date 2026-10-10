@@ -1,6 +1,6 @@
 """Unit tests for TOC generator processor."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pymupdf
 import pytest
@@ -28,18 +28,40 @@ from pdfalive.processors.toc_generator import (
     _heading_text_matches_title,
     _is_bold_font,
     _is_heading_candidate,
-    _is_retryable_error,
     _normalize_snippet,
     _strip_subset_prefix,
-    _unpack_structured_response,
     filter_features_for_llm,
     serialize_features_compact,
 )
+from pdfalive.retry import LLMCallError
 from pdfalive.tokens import TokenUsage
 
 
-# Batch label passed to _invoke_with_retry for its progress messages.
-_BATCH_DESCRIPTION = "batch 1/1"
+# One heading on one page: features for a single-batch extraction.
+_ONE_HEADING_FEATURES = [
+    [
+        [
+            TOCFeature(
+                page_number=1,
+                font_name="Times-Bold",
+                font_size=16,
+                text_length=23,
+                text_snippet="Chapter 1: Introduction",
+                y_position=0.1,
+                is_bold=True,
+            )
+        ]
+    ]
+]
+
+
+def _extract(mock_doc: MagicMock, mock_llm: MagicMock) -> TOC:
+    """One single-batch extraction through the generator, so its LLM call runs under the retry policy."""
+    toc, _usage = TOCGenerator(doc=mock_doc, llm=mock_llm)._extract_toc_paginated(
+        _ONE_HEADING_FEATURES, request_delay=0
+    )
+    return toc
+
 
 # Two titles, each harmless alone, that form a "[x' ... 'y]" markup tag once joined into one message.
 _TAG_FORMING_TITLES = ("[x", "y]")
@@ -189,13 +211,13 @@ class TestTOCGenerator:
 
         assert generator.num_processes == 4
 
-    def test_run_success(self, mock_doc, mock_llm, sample_toc_response, tmp_path):
+    def test_run_success(self, make_structured_answer, mock_doc, mock_llm, sample_toc_response, tmp_path):
         """Test successful TOC generation run."""
         output_file = tmp_path / "output.pdf"
 
         # Setup LLM mock to return structured TOC
         mock_structured_llm = MagicMock()
-        mock_structured_llm.invoke.return_value = sample_toc_response
+        mock_structured_llm.invoke.return_value = make_structured_answer(sample_toc_response)
         mock_llm.with_structured_output.return_value = mock_structured_llm
 
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
@@ -218,13 +240,13 @@ class TestTOCGenerator:
         with pytest.raises(ValueError, match="already has a Table of Contents"):
             generator.run(output_file="output.pdf", force=False)
 
-    def test_run_overwrites_with_force(self, mock_doc, mock_llm, sample_toc_response, tmp_path):
+    def test_run_overwrites_with_force(self, make_structured_answer, mock_doc, mock_llm, sample_toc_response, tmp_path):
         """Test that run overwrites existing TOC when force=True."""
         output_file = tmp_path / "output.pdf"
         mock_doc.get_toc.return_value = [[1, "Existing", 1]]
 
         mock_structured_llm = MagicMock()
-        mock_structured_llm.invoke.return_value = sample_toc_response
+        mock_structured_llm.invoke.return_value = make_structured_answer(sample_toc_response)
         mock_llm.with_structured_output.return_value = mock_structured_llm
 
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
@@ -247,7 +269,9 @@ class TestTOCGenerator:
         yield doc
         doc.close()
 
-    def test_run_drops_entries_outside_document(self, real_doc, mock_llm, chapter_titles, make_toc_entry):
+    def test_run_drops_entries_outside_document(
+        self, make_structured_answer, real_doc, mock_llm, chapter_titles, make_toc_entry
+    ):
         """Entries whose page lies outside the document are dropped instead of crashing set_toc().
 
         Regression: the postprocessor converted printed back-matter pages with a
@@ -262,7 +286,9 @@ class TestTOCGenerator:
             make_toc_entry(title="Index", page_number=page_count + 13),
             make_toc_entry(title="Nowhere", page_number=0),
         ]
-        mock_llm.with_structured_output.return_value.invoke.return_value = TOC(entries=in_range + out_of_range)
+        mock_llm.with_structured_output.return_value.invoke.return_value = make_structured_answer(
+            TOC(entries=in_range + out_of_range)
+        )
 
         TOCGenerator(doc=real_doc, llm=mock_llm).run(output_file=None, force=True, request_delay=0)
 
@@ -317,21 +343,31 @@ class TestTOCGenerator:
         assert all(f"'{entry.title}' (page {entry.page_number})" in output for entry in dropped)
 
     def test_retry_warning_renders_exception_message_verbatim(
-        self, mock_doc, mock_llm, sample_toc_response, recording_console, monkeypatch, instant_retries, markup_like_text
+        self,
+        make_structured_answer,
+        mock_doc,
+        mock_llm,
+        sample_toc_response,
+        recording_console,
+        monkeypatch,
+        instant_retries,
+        markup_like_text,
     ):
         """Exception text is shown verbatim, e.g. pydantic's "[type=missing, ...]" in a parsing error."""
         monkeypatch.setattr(toc_generator_module, "console", recording_console)
-        error = RuntimeError(markup_like_text)
-        mock_llm.with_structured_output.return_value.invoke.side_effect = [error, sample_toc_response]
+        error = TimeoutError(markup_like_text)  # transient, so the call is retried
+        mock_llm.with_structured_output.return_value.invoke.side_effect = [
+            error,
+            make_structured_answer(sample_toc_response),
+        ]
 
-        TOCGenerator(doc=mock_doc, llm=mock_llm)._invoke_with_retry(
-            TOC, messages=[], batch_description=_BATCH_DESCRIPTION, input_tokens=0
-        )
+        _extract(mock_doc, mock_llm)
 
         assert f"({type(error).__name__}: {markup_like_text})" in recording_console.export_text()
 
     def test_retry_survives_a_non_string_exception_message(
         self,
+        make_structured_answer,
         mock_doc,
         mock_llm,
         sample_toc_response,
@@ -345,16 +381,41 @@ class TestTOCGenerator:
         monkeypatch.setattr(toc_generator_module, "console", recording_console)
         mock_llm.with_structured_output.return_value.invoke.side_effect = [
             non_string_message_error,
-            sample_toc_response,
+            make_structured_answer(sample_toc_response),
         ]
 
-        parsed, _ = TOCGenerator(doc=mock_doc, llm=mock_llm)._invoke_with_retry(
-            TOC, messages=[], batch_description=_BATCH_DESCRIPTION, input_tokens=0
-        )
-
-        assert parsed == sample_toc_response
+        assert _extract(mock_doc, mock_llm).entries == sample_toc_response.entries
         expected = f"({type(non_string_message_error).__name__}: {non_string_error_message})"
         assert expected in recording_console.export_text()
+
+    def test_unparsed_answers_are_retried(
+        self, make_structured_answer, mock_doc, mock_llm, sample_toc_response, instant_retries, parsing_failure
+    ):
+        """A recorded parsing error, or an answer with no parsed result at all, is retried."""
+        unparsed_answers = [make_structured_answer(parsing_error=parsing_failure), make_structured_answer()]
+        structured_llm = mock_llm.with_structured_output.return_value
+        structured_llm.invoke.side_effect = [*unparsed_answers, make_structured_answer(sample_toc_response)]
+
+        assert _extract(mock_doc, mock_llm).entries == sample_toc_response.entries
+        assert structured_llm.invoke.call_count == len(unparsed_answers) + 1
+
+    def test_non_retryable_errors_surface_on_the_first_attempt(
+        self, make_structured_answer, mock_doc, mock_llm, sample_toc_response, instant_retries, non_retryable_error
+    ):
+        """Regression: Ctrl-C during an LLM call was retried like a transient error.
+
+        Other errors arrive wrapped as the LLMCallError the CLI reports; Ctrl-C and SystemExit unwrapped.
+        """
+        structured_llm = mock_llm.with_structured_output.return_value
+        structured_llm.invoke.side_effect = [non_retryable_error, make_structured_answer(sample_toc_response)]
+        expected = LLMCallError if isinstance(non_retryable_error, Exception) else type(non_retryable_error)
+
+        with pytest.raises(expected) as raised:
+            _extract(mock_doc, mock_llm)
+
+        assert structured_llm.invoke.call_count == 1
+        if expected is LLMCallError:
+            assert raised.value.__cause__ is non_retryable_error
 
 
 class TestTOCGeneratorPagination:
@@ -456,7 +517,7 @@ class TestTOCGeneratorPagination:
         assert len(batches[0][0]) == 1  # One line in first block
         assert len(batches[0][0][0]) == 2  # Two features in first line
 
-    def test_extract_toc_paginated_merges_results(self, mock_doc, mock_llm, sample_features):
+    def test_extract_toc_paginated_merges_results(self, make_structured_answer, mock_doc, mock_llm, sample_features):
         """Test that paginated extraction merges results from multiple batches."""
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
 
@@ -465,15 +526,17 @@ class TestTOCGeneratorPagination:
 
         def mock_invoke(messages):
             call_count[0] += 1
-            return TOC(
-                entries=[
-                    TOCEntry(
-                        title=f"Chapter from batch {call_count[0]}",
-                        page_number=call_count[0] * 10,
-                        level=1,
-                        confidence=0.9,
-                    )
-                ]
+            return make_structured_answer(
+                TOC(
+                    entries=[
+                        TOCEntry(
+                            title=f"Chapter from batch {call_count[0]}",
+                            page_number=call_count[0] * 10,
+                            level=1,
+                            confidence=0.9,
+                        )
+                    ]
+                )
             )
 
         mock_structured_llm = MagicMock()
@@ -489,7 +552,7 @@ class TestTOCGeneratorPagination:
         assert len(toc.entries) >= 1
         assert usage.llm_calls > 0
 
-    def test_extract_toc_paginated_tracks_token_usage(self, mock_doc, mock_llm):
+    def test_extract_toc_paginated_tracks_token_usage(self, make_structured_answer, mock_doc, mock_llm):
         """Test that token usage is tracked across paginated calls."""
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
 
@@ -497,8 +560,8 @@ class TestTOCGeneratorPagination:
         features = [[[TOCFeature(page_number=1, font_name="Bold", font_size=16, text_length=10, text_snippet="Ch 1")]]]
 
         mock_structured_llm = MagicMock()
-        mock_structured_llm.invoke.return_value = TOC(
-            entries=[TOCEntry(title="Chapter 1", page_number=1, level=1, confidence=0.9)]
+        mock_structured_llm.invoke.return_value = make_structured_answer(
+            TOC(entries=[TOCEntry(title="Chapter 1", page_number=1, level=1, confidence=0.9)])
         )
         mock_llm.with_structured_output.return_value = mock_structured_llm
 
@@ -509,7 +572,7 @@ class TestTOCGeneratorPagination:
         # Token usage should be estimated (input) and recorded
         assert usage.input_tokens > 0
 
-    def test_extract_toc_paginated_handles_duplicates(self, mock_doc, mock_llm):
+    def test_extract_toc_paginated_handles_duplicates(self, make_structured_answer, mock_doc, mock_llm):
         """Test that pagination correctly deduplicates overlapping entries."""
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
 
@@ -523,11 +586,13 @@ class TestTOCGeneratorPagination:
 
         # LLM returns the same entry for overlapping batches
         def mock_invoke(messages):
-            return TOC(
-                entries=[
-                    TOCEntry(title="Duplicate Chapter", page_number=5, level=1, confidence=0.9),
-                    TOCEntry(title="Unique Entry", page_number=7, level=1, confidence=0.85),
-                ]
+            return make_structured_answer(
+                TOC(
+                    entries=[
+                        TOCEntry(title="Duplicate Chapter", page_number=5, level=1, confidence=0.9),
+                        TOCEntry(title="Unique Entry", page_number=7, level=1, confidence=0.85),
+                    ]
+                )
             )
 
         mock_structured_llm = MagicMock()
@@ -540,7 +605,9 @@ class TestTOCGeneratorPagination:
         titles = [e.title for e in toc.entries]
         assert titles.count("Duplicate Chapter") == 1  # Only one copy
 
-    def test_extract_toc_paginated_uses_continuation_prompt(self, mock_doc, mock_llm, sample_features):
+    def test_extract_toc_paginated_uses_continuation_prompt(
+        self, make_structured_answer, mock_doc, mock_llm, sample_features
+    ):
         """Test that continuation prompts are used for batches after the first."""
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
 
@@ -548,7 +615,7 @@ class TestTOCGeneratorPagination:
 
         def mock_invoke(messages):
             messages_received.append(messages)
-            return TOC(entries=[])
+            return make_structured_answer(TOC(entries=[]))
 
         mock_structured_llm = MagicMock()
         mock_structured_llm.invoke.side_effect = mock_invoke
@@ -1146,21 +1213,27 @@ class TestTOCPostprocessing:
 
     @pytest.fixture
     def cleaned_toc_response(self):
-        """Expected cleaned TOC from postprocessing."""
-        return TOC(
+        """The postprocessor's answer: the cleaned TOC, in the postprocessing schema."""
+        return PostprocessedTOC(
             entries=[
-                TOCEntry(title="Introduction", page_number=3, level=1, confidence=0.95),
-                TOCEntry(title="Methods", page_number=17, level=1, confidence=0.95),
-                TOCEntry(title="Results", page_number=32, level=1, confidence=0.95),
+                PostprocessedTOCEntry(title="Introduction", page_number=3, level=1, confidence=0.95),
+                PostprocessedTOCEntry(title="Methods", page_number=17, level=1, confidence=0.95),
+                PostprocessedTOCEntry(title="Results", page_number=32, level=1, confidence=0.95),
             ]
         )
 
     def test_postprocess_toc_removes_duplicates(
-        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response
+        self,
+        make_structured_answer,
+        mock_doc,
+        mock_llm,
+        sample_toc_with_duplicates,
+        sample_features,
+        cleaned_toc_response,
     ):
         """Test that postprocessing removes duplicate entries."""
         mock_structured_llm = MagicMock()
-        mock_structured_llm.invoke.return_value = cleaned_toc_response
+        mock_structured_llm.invoke.return_value = make_structured_answer(cleaned_toc_response)
         mock_llm.with_structured_output.return_value = mock_structured_llm
 
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
@@ -1175,11 +1248,17 @@ class TestTOCPostprocessing:
         assert result.entries[2].title == "Results"
 
     def test_postprocess_toc_returns_toc_structure(
-        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response
+        self,
+        make_structured_answer,
+        mock_doc,
+        mock_llm,
+        sample_toc_with_duplicates,
+        sample_features,
+        cleaned_toc_response,
     ):
         """Test that postprocessing returns a TOC structure."""
         mock_structured_llm = MagicMock()
-        mock_structured_llm.invoke.return_value = cleaned_toc_response
+        mock_structured_llm.invoke.return_value = make_structured_answer(cleaned_toc_response)
         mock_llm.with_structured_output.return_value = mock_structured_llm
 
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
@@ -1192,11 +1271,17 @@ class TestTOCPostprocessing:
         assert all(isinstance(entry, TOCEntry) for entry in result.entries)
 
     def test_postprocess_toc_tracks_token_usage(
-        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response
+        self,
+        make_structured_answer,
+        mock_doc,
+        mock_llm,
+        sample_toc_with_duplicates,
+        sample_features,
+        cleaned_toc_response,
     ):
         """Test that postprocessing tracks token usage."""
         mock_structured_llm = MagicMock()
-        mock_structured_llm.invoke.return_value = cleaned_toc_response
+        mock_structured_llm.invoke.return_value = make_structured_answer(cleaned_toc_response)
         mock_llm.with_structured_output.return_value = mock_structured_llm
 
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
@@ -1209,14 +1294,20 @@ class TestTOCPostprocessing:
         assert usage.input_tokens > 0
 
     def test_postprocess_toc_uses_document_text_for_reference_toc(
-        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response
+        self,
+        make_structured_answer,
+        mock_doc,
+        mock_llm,
+        sample_toc_with_duplicates,
+        sample_features,
+        cleaned_toc_response,
     ):
         """Test that postprocessing extracts reference TOC from document pages."""
         messages_received = []
 
         def capture_messages(messages):
             messages_received.append(messages)
-            return cleaned_toc_response
+            return make_structured_answer(cleaned_toc_response)
 
         mock_structured_llm = MagicMock()
         mock_structured_llm.invoke.side_effect = capture_messages
@@ -1235,14 +1326,20 @@ class TestTOCPostprocessing:
         assert "Introduction" in user_message or "generated TOC" in user_message.lower()
 
     def test_postprocess_toc_includes_existing_toc_in_prompt(
-        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response
+        self,
+        make_structured_answer,
+        mock_doc,
+        mock_llm,
+        sample_toc_with_duplicates,
+        sample_features,
+        cleaned_toc_response,
     ):
         """Test that the existing generated TOC is included in the prompt."""
         messages_received = []
 
         def capture_messages(messages):
             messages_received.append(messages)
-            return cleaned_toc_response
+            return make_structured_answer(cleaned_toc_response)
 
         mock_structured_llm = MagicMock()
         mock_structured_llm.invoke.side_effect = capture_messages
@@ -1260,13 +1357,13 @@ class TestTOCPostprocessing:
         assert "Methods" in user_message
         assert "Results" in user_message
 
-    def test_postprocess_toc_handles_empty_toc(self, mock_doc, mock_llm, sample_features):
+    def test_postprocess_toc_handles_empty_toc(self, make_structured_answer, mock_doc, mock_llm, sample_features):
         """Test that postprocessing handles empty TOC gracefully."""
         empty_toc = TOC(entries=[])
-        empty_response = TOC(entries=[])
+        empty_response = PostprocessedTOC(entries=[])
 
         mock_structured_llm = MagicMock()
-        mock_structured_llm.invoke.return_value = empty_response
+        mock_structured_llm.invoke.return_value = make_structured_answer(empty_response)
         mock_llm.with_structured_output.return_value = mock_structured_llm
 
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
@@ -1278,7 +1375,7 @@ class TestTOCPostprocessing:
         assert isinstance(result, TOC)
         assert len(result.entries) == 0
 
-    def test_postprocess_toc_preserves_valid_entries(self, mock_doc, mock_llm, sample_features):
+    def test_postprocess_toc_preserves_valid_entries(self, make_structured_answer, mock_doc, mock_llm, sample_features):
         """Test that postprocessing preserves valid entries when no cleanup needed."""
         valid_toc = TOC(
             entries=[
@@ -1288,7 +1385,9 @@ class TestTOCPostprocessing:
         )
 
         mock_structured_llm = MagicMock()
-        mock_structured_llm.invoke.return_value = valid_toc
+        mock_structured_llm.invoke.return_value = make_structured_answer(
+            PostprocessedTOC.model_validate(valid_toc, from_attributes=True)
+        )
         mock_llm.with_structured_output.return_value = mock_structured_llm
 
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
@@ -1306,11 +1405,18 @@ class TestTOCPostprocessing:
         [5, 10, 20],
     )
     def test_postprocess_toc_respects_max_pages_for_reference_toc(
-        self, mock_doc, mock_llm, sample_toc_with_duplicates, sample_features, cleaned_toc_response, max_pages_to_scan
+        self,
+        make_structured_answer,
+        mock_doc,
+        mock_llm,
+        sample_toc_with_duplicates,
+        sample_features,
+        cleaned_toc_response,
+        max_pages_to_scan,
     ):
         """Test that postprocessing respects the max pages limit for scanning reference TOC."""
         mock_structured_llm = MagicMock()
-        mock_structured_llm.invoke.return_value = cleaned_toc_response
+        mock_structured_llm.invoke.return_value = make_structured_answer(cleaned_toc_response)
         mock_llm.with_structured_output.return_value = mock_structured_llm
 
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
@@ -3395,64 +3501,6 @@ class TestHeadingCandidateCap:
         assert len(heading_candidates) <= _MAX_HEADING_CANDIDATES_PER_PAGE
 
 
-class TestIsRetryableError:
-    """Tests for _is_retryable_error predicate."""
-
-    def _make_exc_with_status(self, status_code: int) -> Exception:
-        """Create an exception with a status_code attribute."""
-        exc = Exception("test error")
-        exc.status_code = status_code  # type: ignore[attr-defined]
-        return exc
-
-    @pytest.mark.parametrize(
-        "status_code,expected",
-        [
-            (400, False),  # Bad request (includes context overflow)
-            (401, False),  # Unauthorized
-            (403, False),  # Forbidden
-            (404, False),  # Not found
-            (422, False),  # Unprocessable entity
-            (429, True),  # Rate limited — retryable
-            (500, True),  # Internal server error — retryable
-            (502, True),  # Bad gateway — retryable
-            (503, True),  # Service unavailable — retryable
-        ],
-    )
-    def test_status_code_based(self, status_code, expected):
-        """Retryability based on HTTP status code."""
-        exc = self._make_exc_with_status(status_code)
-        assert _is_retryable_error(exc) is expected
-
-    @pytest.mark.parametrize(
-        "exc_class_name,expected",
-        [
-            ("OpenAIContextOverflowError", False),
-            ("BadRequestError", False),
-            ("InvalidRequestError", False),
-            ("ValidationError", False),
-            ("CassetteMissError", False),  # Eval replay drift — same request always misses
-            ("RateLimitError", True),  # No matching pattern → defaults to True
-            ("ConnectionError", True),
-            ("TimeoutError", True),
-        ],
-    )
-    def test_class_name_based(self, exc_class_name, expected):
-        """Retryability based on exception class name (no status_code)."""
-        # Dynamically create a class with the given name
-        exc_type = type(exc_class_name, (Exception,), {})
-        exc = exc_type("test error")
-        assert _is_retryable_error(exc) is expected
-
-    def test_status_code_takes_precedence_over_name(self):
-        """When status_code is present, it takes precedence over class name."""
-        # Even if class name matches a non-retryable pattern, status_code wins
-        exc_type = type("ContextOverflowError", (Exception,), {})
-        exc = exc_type("test")
-        exc.status_code = 429  # type: ignore[attr-defined]
-        # Status code 429 → retryable, even though name contains "ContextOverflow"
-        assert _is_retryable_error(exc) is True
-
-
 class TestIsHeadingCandidateFontSizeRatio:
     """Tests for the font_size_ratio parameter of _is_heading_candidate."""
 
@@ -4273,7 +4321,7 @@ class TestFilterFeaturesForLlm:
     def test_empty_features_yield_empty_list(self) -> None:
         assert filter_features_for_llm([]) == []
 
-    def test_run_sends_filtered_payload_to_llm(self, mock_llm) -> None:
+    def test_run_sends_filtered_payload_to_llm(self, make_structured_answer, mock_llm) -> None:
         """Integration: run() must send the filtered features to the LLM."""
         doc = MagicMock()
         doc.page_count = 1
@@ -4320,7 +4368,9 @@ class TestFilterFeaturesForLlm:
 
         def capture(messages):
             captured_messages.append(messages)
-            return TOC(entries=[TOCEntry(title="Chapter 1: Introduction", page_number=1, level=1, confidence=0.9)])
+            return make_structured_answer(
+                TOC(entries=[TOCEntry(title="Chapter 1: Introduction", page_number=1, level=1, confidence=0.9)])
+            )
 
         mock_structured.invoke.side_effect = capture
         mock_llm.with_structured_output.return_value = mock_structured
@@ -4362,38 +4412,13 @@ class TestRealTokenAccounting:
     def parsed_toc(self):
         return TOC(entries=[TOCEntry(title="Chapter 1: Introduction", page_number=1, level=1, confidence=0.9)])
 
-    def test_unpack_include_raw_dict_returns_parsed_and_usage(self, parsed_toc) -> None:
-        raw = MagicMock()
-        raw.usage_metadata = dict(self.USAGE)
-
-        parsed, usage = _unpack_structured_response({"raw": raw, "parsed": parsed_toc, "parsing_error": None}, TOC)
-
-        assert parsed == parsed_toc
-        assert usage == self.USAGE
-
-    def test_unpack_plain_response_has_no_usage(self, parsed_toc) -> None:
-        parsed, usage = _unpack_structured_response(parsed_toc, TOC)
-
-        assert parsed == parsed_toc
-        assert usage is None
-
-    def test_unpack_raises_recorded_parsing_error(self) -> None:
-        parsing_error = ValueError("malformed structured output")
-
-        with pytest.raises(ValueError, match="malformed structured output"):
-            _unpack_structured_response({"raw": MagicMock(), "parsed": None, "parsing_error": parsing_error}, TOC)
-
-    def test_unpack_include_raw_dict_without_raw_message(self, parsed_toc) -> None:
-        parsed, usage = _unpack_structured_response({"raw": None, "parsed": parsed_toc, "parsing_error": None}, TOC)
-
-        assert parsed == parsed_toc
-        assert usage is None
-
-    def test_extraction_records_real_usage_when_available(self, mock_llm, small_features, parsed_toc) -> None:
+    def test_extraction_records_real_usage_when_available(
+        self, make_structured_answer, mock_llm, small_features, parsed_toc
+    ) -> None:
         raw = MagicMock()
         raw.usage_metadata = dict(self.USAGE)
         structured = MagicMock()
-        structured.invoke.return_value = {"raw": raw, "parsed": parsed_toc, "parsing_error": None}
+        structured.invoke.return_value = make_structured_answer(parsed_toc, raw=raw)
         mock_llm.with_structured_output.return_value = structured
 
         generator = TOCGenerator(doc=MagicMock(), llm=mock_llm)
@@ -4404,11 +4429,23 @@ class TestRealTokenAccounting:
         assert usage.output_tokens == self.USAGE["output_tokens"]
         mock_llm.with_structured_output.assert_called_once_with(TOC, include_raw=True)
 
+    def test_structured_model_is_built_once_per_schema(self, mock_llm) -> None:
+        schemas = (TOC, PostprocessedTOC)
+        mock_llm.with_structured_output.side_effect = lambda schema, include_raw: MagicMock(name=schema.__name__)
+        generator = TOCGenerator(doc=MagicMock(), llm=mock_llm)
+
+        first = [generator._structured_model(schema) for schema in schemas]
+        again = [generator._structured_model(schema) for schema in schemas]
+
+        assert first == again
+        assert first[0] is not first[1]
+        assert mock_llm.with_structured_output.call_args_list == [call(schema, include_raw=True) for schema in schemas]
+
     def test_extraction_falls_back_to_estimates_without_usage_metadata(
-        self, mock_llm, small_features, parsed_toc
+        self, make_structured_answer, mock_llm, small_features, parsed_toc
     ) -> None:
         structured = MagicMock()
-        structured.invoke.return_value = parsed_toc  # plain response, no raw message
+        structured.invoke.return_value = make_structured_answer(parsed_toc)  # no raw message, so no reported usage
         mock_llm.with_structured_output.return_value = structured
 
         generator = TOCGenerator(doc=MagicMock(), llm=mock_llm)
@@ -4533,10 +4570,6 @@ class TestFuzzyRestorePrefixAlignment:
 
         chapter2_exercises = next(e for e in result.entries if e.title == "2.9 Exercises")
         assert chapter2_exercises.page_number == 95  # NOT restored to chapter 1's page
-
-    def test_unpack_missing_parsed_without_error_raises(self) -> None:
-        with pytest.raises(ValueError, match="parsed"):
-            _unpack_structured_response({"raw": MagicMock(), "parsed": None, "parsing_error": None}, TOC)
 
     def test_designator_dropped_by_printed_toc_still_restores(self, generator) -> None:
         """Printed TOCs often omit the section designator the extraction kept."""

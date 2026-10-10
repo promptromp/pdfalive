@@ -15,11 +15,15 @@ import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 
 class CassetteMissError(Exception):
-    """Raised when a replay request cannot be served from the cassette."""
+    """Raised when a replay request cannot be served from the cassette.
+
+    Replay is deterministic, so this is never retried (pdfalive.retry does not
+    list it): asking again would fail the same way.
+    """
 
 
 class CassetteEntry(BaseModel):
@@ -142,8 +146,7 @@ class _ReplayStructuredModel:
         self._include_raw = include_raw
 
     def invoke(self, messages: list) -> BaseModel | dict:
-        entry = self._replay_state._next_entry(_hash_request(messages, self._schema.__name__))
-        parsed = self._schema.model_validate(entry.response)
+        entry, parsed = self._replay_state._next_response(_hash_request(messages, self._schema.__name__), self._schema)
         if not self._include_raw:
             return parsed
         # Mimic the include_raw response shape. Legacy cassettes (no recorded
@@ -176,7 +179,14 @@ class ReplayChatModel:
     def with_structured_output(self, schema: type[BaseModel], include_raw: bool = False) -> _ReplayStructuredModel:
         return _ReplayStructuredModel(replay_state=self, schema=schema, include_raw=include_raw)
 
-    def _next_entry(self, request_hash: str) -> CassetteEntry:
+    def _next_response[T: BaseModel](self, request_hash: str, schema: type[T]) -> tuple[CassetteEntry, T]:
+        """The next recorded call and its response parsed as schema; the cursor advances only once both check out.
+
+        Raises:
+            CassetteMissError: The cassette is exhausted; in strict mode, the request differs from the
+                recorded one; or the recorded response is not a schema (in either mode).
+        """
+        call_number = self._position + 1
         if self._position >= len(self._cassette.entries):
             raise CassetteMissError(
                 f"Cassette exhausted after {len(self._cassette.entries)} call(s): {self._cassette_path}. "
@@ -185,9 +195,21 @@ class ReplayChatModel:
         entry = self._cassette.entries[self._position]
         if self._strict and entry.request_hash != request_hash:
             raise CassetteMissError(
-                f"Request hash mismatch at call {self._position + 1}: the pipeline's prompts have changed "
+                f"Request hash mismatch at call {call_number}: the pipeline's prompts have changed "
                 f"since this cassette was recorded ({self._cassette_path}). "
                 "Re-record the cassette, or use strict=False to replay by call order."
             )
+        if entry.schema_name != schema.__name__:
+            raise CassetteMissError(
+                f"Call {call_number} was recorded for {entry.schema_name}, but {schema.__name__} was requested "
+                f"({self._cassette_path}). The pipeline now makes its LLM calls in a different order."
+            )
+        try:
+            parsed = schema.model_validate(entry.response)
+        except ValidationError as error:
+            raise CassetteMissError(
+                f"The response recorded for call {call_number} is not a valid {schema.__name__} "
+                f"({self._cassette_path}); re-record the cassette."
+            ) from error
         self._position += 1
-        return entry
+        return entry, parsed

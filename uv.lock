@@ -998,6 +998,7 @@ name = "pdfalive"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
+    { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
     { name = "langchain-ollama" },
@@ -1015,6 +1016,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "devtools" },
+    { name = "httpx2" },
     { name = "ipython" },
     { name = "mypy" },
     { name = "pytest" },
@@ -1026,6 +1028,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.5.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain", specifier = ">=1.4.4" },
     { name = "langchain-anthropic", specifier = ">=1.7.5" },
     { name = "langchain-ollama", specifier = ">=1.1.0" },
@@ -1043,6 +1046,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "devtools", specifier = ">=0.12.2" },
+    { name = "httpx2", specifier = ">=2.13.1" },
     { name = "ipython", specifier = ">=9.17.1" },
     { name = "mypy", specifier = ">=2.4.0" },
     { name = "pytest", specifier = ">=9.1.1" },

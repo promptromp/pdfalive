@@ -3,7 +3,8 @@
 import os
 import shutil
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,19 +29,75 @@ from pdfalive.processors.toc_generator import (
     TOCGenerator,
     apply_toc_to_document,
 )
+from pdfalive.retry import LLMCallError
 from pdfalive.tokens import TokenUsage
 
 
 # Rename preview table: reasoning shown wider than this many terminal cells is cut, ending in an ellipsis.
 _RENAME_REASONING_PREVIEW_WIDTH = 50
 
-# Exit status of a command that ran but did not fully succeed (a threshold missed, a rename
-# failed), as opposed to Click's usage errors (2).
+# Exit status of a command that ran but did not fully succeed (an LLM call failed for good, a
+# threshold missed, a rename failed or skipped under --yes), as opposed to Click's usage errors (2).
 _EXIT_FAILURE = 1
 
 # Rename preview table: confidence at or above these thresholds shows green / yellow, below them red.
 _HIGH_CONFIDENCE_THRESHOLD = 0.9
 _MEDIUM_CONFIDENCE_THRESHOLD = 0.7
+
+
+def _check_output_choice(output_file: str | None, inplace: bool) -> None:
+    """Validate OUTPUT_FILE against --inplace.
+
+    Whether an output was given is decided by ``is not None`` here and in
+    _output_destination() alike, so an empty OUTPUT_FILE counts as given:
+    with --inplace it is the conflict it is, and without it an error rather
+    than a write to "".
+    """
+    if inplace and output_file is not None:
+        raise click.UsageError("Cannot specify both OUTPUT_FILE and --inplace.")
+    if output_file is None:
+        if not inplace:
+            raise click.UsageError("Either OUTPUT_FILE must be provided or --inplace must be set.")
+    elif not output_file:
+        raise click.UsageError("OUTPUT_FILE must not be empty.")
+
+
+@contextmanager
+def _llm_failures_reported() -> Iterator[None]:
+    """Report an LLM call that failed for good (an LLMCallError) as an Error: line, exiting with _EXIT_FAILURE.
+
+    That covers every failure the retry policy gives up on: a non-retryable
+    error, attempts run out, an answer that never parsed, a refusal, a
+    truncated answer, a replay miss. Ctrl-C passes through.
+    """
+    try:
+        yield
+    except LLMCallError as error:
+        console.print(safe_text(("Error:", "bold red"), " ", str(error)))
+        raise SystemExit(_EXIT_FAILURE) from error
+
+
+@contextmanager
+def _output_destination(input_file: str, output_file: str | None) -> Iterator[str]:
+    """Where a command writes its result: output_file, or for --inplace (no output_file) a temporary file.
+
+    PyMuPDF cannot save to the file it has open, so --inplace writes a temporary
+    file beside the input, which _save_inplace() then moves over it. Any other
+    way out (an error, Ctrl-C, nothing to write) leaves the temporary file,
+    which is removed on exit; it is created inside the managed block, so no
+    exception can leave it behind.
+    """
+    if output_file is not None:
+        yield output_file
+        return
+    input_path = Path(input_file)
+    temp_fd, temp_path = tempfile.mkstemp(suffix=input_path.suffix, dir=input_path.parent)
+    try:
+        os.close(temp_fd)
+        yield temp_path
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def _save_inplace(temp_file: str, target_file: str) -> None:
@@ -299,48 +356,34 @@ def generate_toc(
     reasoning_effort: str | None,
 ) -> None:
     """Generate a table of contents for a PDF file."""
-    # Validate that either output_file is provided or --inplace is set
-    if not inplace and not output_file:
-        raise click.UsageError("Either OUTPUT_FILE must be provided or --inplace must be set.")
-    if inplace and output_file:
-        raise click.UsageError("Cannot specify both OUTPUT_FILE and --inplace.")
+    _check_output_choice(output_file, inplace)
 
-    # Determine the actual output path
-    # For inplace mode, we use a temp file then replace the original (PyMuPDF limitation)
-    if inplace:
-        input_path = Path(input_file)
-        temp_fd, temp_path = tempfile.mkstemp(suffix=input_path.suffix, dir=input_path.parent)
-        os.close(temp_fd)
-        actual_output_file = temp_path
-    else:
-        assert output_file is not None  # Validated above
-        actual_output_file = output_file
-    console.print(
-        safe_text(
-            "Generating TOC for ",
-            (input_file, "bold cyan"),
-            *_in_place_note(inplace),
-            " using model ",
-            (model_identifier, "bold magenta"),
-            "...",
+    with _output_destination(input_file, output_file) as actual_output_file:
+        console.print(
+            safe_text(
+                "Generating TOC for ",
+                (input_file, "bold cyan"),
+                *_in_place_note(inplace),
+                " using model ",
+                (model_identifier, "bold magenta"),
+                "...",
+            )
         )
-    )
 
-    # Show active options summary
-    options_parts = []
-    if force:
-        options_parts.append("force")
-    if postprocess:
-        options_parts.append("postprocess")
-    if ocr:
-        options_parts.append(f"ocr ({ocr_language}, {ocr_dpi} DPI)")
-        if ocr_output:
-            options_parts.append("ocr-output")
-    else:
-        options_parts.append("ocr disabled")
-    console.print(safe_text("  Options: ", (", ".join(options_parts), "cyan")))
+        # Show active options summary
+        options_parts = []
+        if force:
+            options_parts.append("force")
+        if postprocess:
+            options_parts.append("postprocess")
+        if ocr:
+            options_parts.append(f"ocr ({ocr_language}, {ocr_dpi} DPI)")
+            if ocr_output:
+                options_parts.append("ocr-output")
+        else:
+            options_parts.append("ocr disabled")
+        console.print(safe_text("  Options: ", (", ".join(options_parts), "cyan")))
 
-    try:
         doc = pymupdf.open(input_file)
         original_doc = None  # Keep reference to original if we need to discard OCR
         performed_ocr = False
@@ -375,9 +418,10 @@ def generate_toc(
         llm = build_chat_model(model_identifier, reasoning_effort)
         processor = TOCGenerator(doc=doc, llm=llm)
 
-        usage = processor.run(
-            output_file=actual_output_file, force=force, request_delay=request_delay, postprocess=postprocess
-        )
+        with _llm_failures_reported():
+            usage = processor.run(
+                output_file=actual_output_file, force=force, request_delay=request_delay, postprocess=postprocess
+            )
 
         # If --ocr-output is not set and we performed OCR, apply TOC to original and save that instead
         if not ocr_output and performed_ocr and original_doc is not None:
@@ -397,11 +441,6 @@ def generate_toc(
 
         if show_token_usage:
             usage.print_summary(console)
-    except Exception:
-        # Clean up temp file on failure to avoid leaking it in the input file's directory
-        if inplace and os.path.exists(actual_output_file):
-            os.unlink(actual_output_file)
-        raise
 
 
 @cli.command("extract-text")
@@ -441,36 +480,21 @@ def extract_text(
     inplace: bool,
 ) -> None:
     """Extract text from a PDF using OCR and save to a new PDF with text layer."""
-    # Validate that either output_file is provided or --inplace is set
-    if not inplace and not output_file:
-        raise click.UsageError("Either OUTPUT_FILE must be provided or --inplace must be set.")
-    if inplace and output_file:
-        raise click.UsageError("Cannot specify both OUTPUT_FILE and --inplace.")
+    _check_output_choice(output_file, inplace)
 
-    # Determine the actual output path
-    # For inplace mode, we use a temp file then replace the original (PyMuPDF limitation)
-    if inplace:
-        input_path = Path(input_file)
-        temp_fd, temp_path = tempfile.mkstemp(suffix=input_path.suffix, dir=input_path.parent)
-        os.close(temp_fd)
-        actual_output_file = temp_path
-    else:
-        assert output_file is not None  # Validated above
-        actual_output_file = output_file
-
-    console.print(safe_text("Processing ", (input_file, "bold cyan"), *_in_place_note(inplace), "..."))
-    console.print(
-        safe_text(
-            "  Language: ",
-            (ocr_language, "cyan"),
-            ", DPI: ",
-            (str(ocr_dpi), "cyan"),
-            ", Force OCR: ",
-            (str(force), "cyan"),
+    with _output_destination(input_file, output_file) as actual_output_file:
+        console.print(safe_text("Processing ", (input_file, "bold cyan"), *_in_place_note(inplace), "..."))
+        console.print(
+            safe_text(
+                "  Language: ",
+                (ocr_language, "cyan"),
+                ", DPI: ",
+                (str(ocr_dpi), "cyan"),
+                ", Force OCR: ",
+                (str(force), "cyan"),
+            )
         )
-    )
 
-    try:
         doc = pymupdf.open(input_file)
 
         ocr_processor = OCRProcessor(
@@ -503,16 +527,8 @@ def extract_text(
             console.print(_done_line(input_file if inplace else actual_output_file, inplace))
         else:
             doc.close()
-            # Clean up temp file if it was created but not used
-            if inplace:
-                os.unlink(actual_output_file)
             console.print("Document already has sufficient extractable text. No OCR needed.", style="green")
             console.print("Use --force to process anyway.")
-    except Exception:
-        # Clean up temp file on failure to avoid leaking it in the input file's directory
-        if inplace and os.path.exists(actual_output_file):
-            os.unlink(actual_output_file)
-        raise
 
 
 @cli.command("eval")
@@ -605,15 +621,16 @@ def eval_command(
         console.print(
             safe_text("Evaluating case ", (case.name, "bold cyan"), " (", (eval_mode, "magenta"), " mode)...")
         )
-        report = run_eval_case(
-            case,
-            mode=eval_mode,
-            model_identifier=model_identifier,
-            strict_replay=not loose_replay,
-            request_delay=request_delay,
-            num_processes=num_processes,
-            reasoning_effort=reasoning_effort,
-        )
+        with _llm_failures_reported():
+            report = run_eval_case(
+                case,
+                mode=eval_mode,
+                model_identifier=model_identifier,
+                strict_replay=not loose_replay,
+                request_delay=request_delay,
+                num_processes=num_processes,
+                reasoning_effort=reasoning_effort,
+            )
         reports.append((case, report))
 
     table = Table(show_header=True, header_style="bold")
@@ -794,7 +811,8 @@ def rename(
     # reported even if a later batch, the prompt, or applying the renames fails.
     usage = TokenUsage()
     try:
-        batches = processor.generate_renames(inputs, query, usage=usage)
+        with _llm_failures_reported():
+            batches = processor.generate_renames(inputs, query, usage=usage)
         all_succeeded = _review_and_apply_renames(processor, batches, inputs, yes)
     finally:
         if show_token_usage and usage.llm_calls:
