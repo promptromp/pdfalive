@@ -4484,6 +4484,42 @@ class TestAnchoredHeadingMatching:
         assert _HeadingTitle.of(title).matches(candidate) is True
 
 
+class TestSectionPrefixWholeNumber:
+    """A title's dotted section prefix must occur in the candidate as a whole number, as written."""
+
+    SECTION_TITLE = "Fixed Point Iteration"
+
+    @pytest.mark.parametrize("anchored", [True, False])
+    @pytest.mark.parametrize(
+        ("title_number", "candidate_number", "expected"),
+        [
+            ("1.1", "1.1", True),
+            # A trailing dot ends the number.
+            ("1.1", "1.1.", True),
+            # Neither number lies inside the other, in either direction.
+            ("1.1", "1.10", False),
+            ("1.10", "1.1", False),
+            ("1.1", "1.1.2", False),
+            ("1.1.2", "1.1", False),
+            ("1.1", "11.1", False),
+            ("11.1", "1.1", False),
+            ("1.1", "2.1.1", False),
+            ("2.1", "2.11", False),
+            ("2.11", "2.1", False),
+            # The written form is compared, leading zeros included.
+            ("1.01", "1.01", True),
+            ("1.01", "1.1", False),
+            ("1.1", "1.01", False),
+        ],
+    )
+    def test_section_prefix_matches_whole(
+        self, title_number: str, candidate_number: str, expected: bool, anchored: bool
+    ) -> None:
+        heading = _HeadingTitle.of(f"{title_number} {self.SECTION_TITLE}")
+
+        assert heading.matches(f"{candidate_number} {self.SECTION_TITLE}", anchored=anchored) is expected
+
+
 class TestFuzzyRestorePrefixAlignment:
     """Postprocess page restore must not conflate leading-word title variants."""
 
