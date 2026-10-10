@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from pdfalive.text import artifact_neutral_form, has_extraction_artifacts
+
 
 class TOCEntry(BaseModel):
     """A single entry in a Table of Contents."""
@@ -24,6 +26,33 @@ class TOCEntry(BaseModel):
         level, title, page_number = toc_list
 
         return cls(title=title, page_number=page_number, level=level, confidence=1.0)
+
+    def identity_key(self) -> tuple[int, str]:
+        """(page_number, artifact-neutral title): entries with equal keys are one bookmark.
+
+        Only PDF extraction artifacts and accents are neutralized (see
+        pdfalive.text.artifact_neutral_form), so "Kähler Potentials" and an
+        extracted "K¨ahler Potentials" on the same page are duplicates, while
+        titles that differ in case, punctuation or symbols ("Case x > 0" and
+        "Case x < 0") stay distinct.
+        """
+        return (self.page_number, artifact_neutral_form(self.title))
+
+
+def _one_entry_per_identity(entries: list[TOCEntry]) -> list[TOCEntry]:
+    """One entry per identity key, in first-occurrence order.
+
+    Each key keeps its first entry with an artifact-free title, so a clean
+    spelling wins over an extracted one ("Kähler" over "K¨ahler"); if every
+    spelling has artifacts, the first entry is kept.
+    """
+    kept: dict[tuple[int, str], TOCEntry] = {}
+    for entry in entries:
+        key = entry.identity_key()
+        current = kept.get(key)
+        if current is None or (has_extraction_artifacts(current.title) and not has_extraction_artifacts(entry.title)):
+            kept[key] = entry
+    return list(kept.values())
 
 
 class TOC(BaseModel):
@@ -110,31 +139,26 @@ class TOC(BaseModel):
         return TOC(entries=sorted_entries)
 
     def deduplicate(self) -> "TOC":
-        """Remove duplicate entries with the same (page_number, title).
+        """Remove duplicate entries: those with the same identity key (see TOCEntry.identity_key).
 
-        Keeps the first occurrence of each duplicate. This is useful after
-        postprocessing, where the LLM may add multiple identical entries
-        (e.g., "Exercises" appearing once per chapter in a printed TOC but
-        all mapping to the same page after page number correction).
+        Of each group of duplicates, keeps the first entry whose title has no
+        extraction artifacts, or the first entry if every spelling has them.
+        This is useful after postprocessing, where the LLM may add multiple
+        identical entries (e.g., "Exercises" appearing once per chapter in a
+        printed TOC but all mapping to the same page after page number
+        correction).
 
         Returns:
             A new TOC with duplicates removed, preserving order.
         """
-        seen: set[tuple[int, str]] = set()
-        unique: list[TOCEntry] = []
-        for entry in self.entries:
-            key = (entry.page_number, entry.title)
-            if key not in seen:
-                seen.add(key)
-                unique.append(entry)
-        return TOC(entries=unique)
+        return TOC(entries=_one_entry_per_identity(self.entries))
 
     def merge(self, other: "TOC") -> "TOC":
         """Merge another TOC into this one, handling duplicates.
 
-        When entries have the same page_number and title, the entry from `self`
-        (the earlier batch) is preferred. Entries are sorted by page_number
-        after merging.
+        Duplicates are resolved as in deduplicate(), with entries from `self`
+        (the earlier batch) counting as earlier. Entries are sorted by
+        page_number after merging.
 
         Args:
             other: Another TOC to merge with this one.
@@ -142,22 +166,10 @@ class TOC(BaseModel):
         Returns:
             A new TOC containing entries from both, with duplicates removed.
         """
-        # Use (page_number, title) as key for deduplication
-        # Prefer entries from self (earlier batch)
-        seen: dict[tuple[int, str], TOCEntry] = {}
-
-        for entry in self.entries:
-            key = (entry.page_number, entry.title)
-            if key not in seen:
-                seen[key] = entry
-
-        for entry in other.entries:
-            key = (entry.page_number, entry.title)
-            if key not in seen:
-                seen[key] = entry
+        unique = _one_entry_per_identity([*self.entries, *other.entries])
 
         # Sort by page_number, then by level (for stable ordering)
-        merged_entries = sorted(seen.values(), key=lambda e: (e.page_number, e.level))
+        merged_entries = sorted(unique, key=lambda e: (e.page_number, e.level))
 
         return TOC(entries=merged_entries)
 

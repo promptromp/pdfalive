@@ -32,10 +32,63 @@ class TestNormalizeTitle:
             ("INDEX", "index"),
             ("Rates of Change", "rates of change"),
             ("", ""),
+            # Extraction artifacts and accents are neutralized; apostrophes join words.
+            ("6.4 K\N{DIAERESIS}ahler Potentials", "6 4 kahler potentials"),
+            ("De\N{LATIN SMALL LIGATURE FI}nitions and Notation", "definitions and notation"),
+            ("7.2 Čebyšev’s Bound", "7 2 cebysevs bound"),
+            ("Hilbert\N{ACUTE ACCENT}s Theorem", "hilberts theorem"),
+            ("O'Neill Spaces", "oneill spaces"),
+            # ASCII notation is not an accent artifact.
+            ("L^p Spaces", "l p spaces"),
         ],
     )
     def test_normalizes_case_punctuation_and_whitespace(self, raw: str, expected: str) -> None:
         assert normalize_title(raw) == expected
+
+
+class TestUnicodeSpellingTolerantMatching:
+    """A generated title spelling a heading differently in Unicode is still that heading."""
+
+    # Short titles, where one artifact character alone pushes an unneutralized
+    # similarity below the threshold.
+    SPELLING_VARIANTS = [
+        ("Kähler", "K\N{DIAERESIS}ahler"),
+        ("Gödel", "G\N{DIAERESIS}odel"),
+        ("Efficiency", "E\N{LATIN SMALL LIGATURE FFI}ciency"),
+        ("Čech", "\N{CARON}Cech"),
+    ]
+
+    @pytest.mark.parametrize(("golden_title", "generated_title"), SPELLING_VARIANTS)
+    def test_spelling_variants_are_identical_titles(self, golden_title: str, generated_title: str) -> None:
+        assert title_similarity(golden_title, generated_title) == 1.0
+
+    @pytest.mark.parametrize(("golden_title", "generated_title"), SPELLING_VARIANTS)
+    def test_spelling_variant_pairs_instead_of_missing_plus_spurious(
+        self,
+        make_golden_entry: Callable[..., GoldenEntry],
+        make_toc: Callable[..., TOC],
+        golden_title: str,
+        generated_title: str,
+    ) -> None:
+        golden = [make_golden_entry(title=golden_title)]
+        generated = make_toc((generated_title, golden[0].page_number, golden[0].level))
+
+        report = evaluate_toc(golden, generated)
+
+        assert report.f1 == 1.0
+        assert not report.missing
+        assert not report.spurious
+
+    @pytest.mark.parametrize(
+        ("golden_title", "generated_title"),
+        [
+            ("Hilbert's Theorem", "Hilbert\N{ACUTE ACCENT}s Theorem"),
+            ("O'Neill Spaces", "O\N{ACUTE ACCENT}Neill Spaces"),
+            ("Poincaré Maps", "Poincare Maps"),
+        ],
+    )
+    def test_apostrophe_and_accent_variants_are_identical_titles(self, golden_title: str, generated_title: str) -> None:
+        assert title_similarity(golden_title, generated_title) == 1.0
 
 
 class TestTitleSimilarity:

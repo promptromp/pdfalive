@@ -5,6 +5,7 @@ import time
 import warnings
 from collections import Counter
 from collections.abc import Iterator
+from dataclasses import dataclass
 from multiprocessing import Pool, cpu_count
 from typing import cast
 
@@ -26,6 +27,13 @@ from pdfalive.prompts import (
     TOC_GENERATOR_CONTINUATION_SYSTEM_PROMPT,
     TOC_GENERATOR_SYSTEM_PROMPT,
     TOC_POSTPROCESSOR_SYSTEM_PROMPT,
+)
+from pdfalive.text import (
+    PUNCTUATION_EXCEPT_DOTS_PATTERN,
+    PUNCTUATION_OUTSIDE_NUMBERS_PATTERN,
+    matching_form,
+    strip_punctuation,
+    title_key,
 )
 from pdfalive.tokens import TokenUsage, estimate_tokens
 
@@ -191,9 +199,6 @@ _REFERENCE_TOC_OFFSET_MIN_MATCHES = 3
 _REFERENCE_TOC_OFFSET_MIN_DOMINANCE_RATIO = 0.6
 _REFERENCE_TOC_OFFSET_MAX_TITLE_LENGTH = 200
 
-# Default local search window used for plain text heading checks.
-_DEFAULT_HEADING_SEARCH_WINDOW = 1
-
 # Output/prompt formatting precision.
 _CONFIDENCE_DECIMAL_PLACES = 2
 
@@ -201,24 +206,36 @@ _CONFIDENCE_DECIMAL_PLACES = 2
 _MAX_DROPPED_ENTRIES_SHOWN = 5
 
 
-def _normalize_snippet(text: str) -> str:
-    """Normalize text for fuzzy matching: strip numbering, punctuation, whitespace.
+# Title/heading keys for the deterministic matching below. Every comparison
+# starts from pdfalive.text.matching_form, applied once to each side at the
+# entry of a matching function. It removes ligatures, Latin accents and
+# spacing accents from both sides, so extracted PDF text ("Deﬁnitions",
+# "K¨ahler") compares equal to the LLM's spellings ("Definitions", "Kähler",
+# "Kahler"), and every length threshold applied to a key measures that form.
+# Keys are only ever compared: features, reference text and prompts sent to
+# the LLM, and titles written as bookmarks, keep their original spelling.
+_DOTTED_NUMBER = r"\d+(?:\.\d+)*"
+_DOTTED_NUMBER_PATTERN = re.compile(_DOTTED_NUMBER)
+_LEADING_NUMBERING_PATTERN = re.compile(rf"^{_DOTTED_NUMBER}[\.\)]*\s*")  # "1. ", "3.2 ", "1) "
+_NUMBER_PATTERN = re.compile(r"\d+")
 
-    Args:
-        text: Raw text to normalize.
 
-    Returns:
-        Lowercased text with numbering prefixes, punctuation, and extra whitespace removed.
+def _snippet_key(compared: str) -> str:
+    """Key of matching-form text with its leading numbering and punctuation removed.
+
+    Dots inside numbers are kept ("2.11" stays distinct from "21.1").
     """
-    text = re.sub(r"^\d+(?:\.\d+)*[\.\)]*\s*", "", text)  # Strip "1. ", "3.2 ", "1) " prefixes
-    text = re.sub(r"[^\w\s]", "", text)
-    return re.sub(r"\s+", " ", text.strip().lower())
+    return strip_punctuation(_LEADING_NUMBERING_PATTERN.sub("", compared), PUNCTUATION_OUTSIDE_NUMBERS_PATTERN)
 
 
-def _normalize_title_for_matching(title: str) -> str:
-    """Normalize a title without dropping leading section numbers."""
-    title = re.sub(r"[^\w\s\.]", "", title.strip().lower())
-    return re.sub(r"\s+", " ", title)
+def _numbering_key(compared: str) -> str:
+    """Key of matching-form text that keeps every dot, for reading section numbering ("6.6", "1.")."""
+    return strip_punctuation(compared, PUNCTUATION_EXCEPT_DOTS_PATTERN)
+
+
+def _normalize_snippet(text: str) -> str:
+    """Snippet key of raw text (see _snippet_key)."""
+    return _snippet_key(matching_form(text))
 
 
 def _extract_section_prefix(title: str) -> str | None:
@@ -227,13 +244,31 @@ def _extract_section_prefix(title: str) -> str | None:
     return match.group(1) if match else None
 
 
-# Leading designator tokens in normalized (punctuation-free, lowercased) titles:
-# bare numbers ("34", "1 2") and label words with an optional short identifier
-# ("chapter 7", "appendix b", "part iii", or a bare "chapter" when OCR loses
-# the number glyph).
-_LEADING_DESIGNATOR_PATTERN = re.compile(r"^(?:(?:chapter|part|appendix|section)\s+(?:\S{1,4}\s+)?|\d+\s+)")
+def _section_number_pattern(section_number: str) -> re.Pattern[str]:
+    """Match a section number as a whole number: "1.1" but not inside "1.10", "1.1.2" or "11.1"."""
+    return re.compile(rf"(?<![\d.]){re.escape(section_number)}(?!\d|\.\d)")
 
-_LEADING_NUMBER_PATTERN = re.compile(r"^\s*(\d+)")
+
+# Leading designator tokens in keys (punctuation-free, casefolded titles):
+# numbers ("34", "2.11", "1 2") and label words with an optional short
+# identifier ("chapter 7", "appendix b", "part iii", or a bare "chapter" when
+# OCR loses the number glyph).
+_LEADING_DESIGNATOR_PATTERN = re.compile(
+    rf"^(?:(?:chapter|part|appendix|section)\s+(?:\S{{1,4}}\s+)?|{_DOTTED_NUMBER}\s+)"
+)
+
+# Designator identifiers in matching-form text: the number or identifier a
+# label word carries ("chapter 7", "appendix b", "part iv"), a "§" number, or
+# a bare leading number ("34. ..."). Roman numerals are i through xxxix and a
+# letter identifier is a single letter, so ordinary words after a label word
+# ("part of ...") are not identifiers.
+_ROMAN_NUMERAL = r"(?=[ivx])x{0,3}(?:ix|iv|v?i{0,3})"
+_LABEL_WORD = r"(?:chapter|part|appendix|section|lecture)"
+_LABELED_IDENTIFIER = rf"{_LABEL_WORD}\s+(?P<label_id>{_DOTTED_NUMBER}|{_ROMAN_NUMERAL}|[a-z])\b"
+_LABELED_IDENTIFIER_PATTERN = re.compile(rf"\b{_LABELED_IDENTIFIER}")
+_LEADING_DESIGNATOR_IDENTIFIER_PATTERN = re.compile(
+    rf"^\s*(?:{_LABELED_IDENTIFIER}|§\s*(?P<section_number>{_DOTTED_NUMBER})\b|(?P<number>{_DOTTED_NUMBER})\b)"
+)
 
 
 def _strip_leading_designators(normalized_title: str) -> str:
@@ -251,103 +286,142 @@ def _strip_leading_designators(normalized_title: str) -> str:
         stripped = stripped[match.end() :]
 
 
-def _extract_leading_number(text: str) -> str | None:
-    """Extract a leading integer designator from raw (unnormalized) text."""
-    match = _LEADING_NUMBER_PATTERN.match(text)
-    return match.group(1) if match else None
+def _leading_designator(compared: str) -> str | None:
+    """The identifier of matching-form text's leading designator ("7", "b", "iv", "3.4"), if any."""
+    match = _LEADING_DESIGNATOR_IDENTIFIER_PATTERN.match(compared)
+    if match is None:
+        return None
+    return match.group("label_id") or match.group("section_number") or match.group("number")
 
 
-def _heading_text_matches_title(title: str, candidate_text: str, anchored: bool = False) -> bool:
-    """Match heading text while preserving section-prefix evidence when present.
-
-    In anchored mode (used when *locating* a heading's page), evidence must be
-    structural, not incidental:
-    - The title must match at the START of the candidate text. Headings begin
-      blocks; a title appearing mid-block ("...see Preface to the second
-      edition...") or behind extra leading words ("Translator's preface to the
-      second edition") is a different or merely-referenced section.
-    - A candidate that is a sub-phrase of the title (e.g. block "Differential
-      forms" for title "Chapter 7 Differential forms") is accepted only if the
-      candidate's own leading number designator, when present, agrees with the
-      title's numbering — block "34. Differential forms" must not satisfy a
-      title designated chapter 7.
-
-    The default (unanchored) mode keeps loose containment for presence checks
-    over large text spans (whole pages, page zones).
-    """
-    candidate_normalized = _normalize_snippet(candidate_text)
-    if len(candidate_normalized) < _HEADING_MIN_LENGTH:
+def _offset_keys_match(left_key: str, right_key: str) -> bool:
+    """Whether two title snippet keys are a strong enough printed-TOC offset signal."""
+    if len(left_key) < _FUZZY_MIN_SUBSTRING_LEN or len(right_key) < _FUZZY_MIN_SUBSTRING_LEN:
         return False
+    if left_key == right_key:
+        return True
+    shorter, longer = sorted((left_key, right_key), key=len)
+    return shorter in longer and len(shorter) / len(longer) >= _FUZZY_MIN_COVERAGE_RATIO
 
-    search_texts = [_normalize_snippet(title)]
-    appendix_without_prefix = _APPENDIX_PREFIX_PATTERN.sub("", title).strip()
-    if appendix_without_prefix != title:
-        search_texts.append(_normalize_snippet(appendix_without_prefix))
 
-    candidate_leading_number = _extract_leading_number(candidate_text)
-    title_numbers = re.findall(r"\d+", title)
-    candidate_consistent = (
-        candidate_leading_number is None or candidate_leading_number in title_numbers or not title_numbers
-    )
+@dataclass(frozen=True)
+class _HeadingTitle:
+    """A TOC title prepared once for matching against many candidate texts.
 
-    # Anchoring compares designator-stripped cores: a heading block may carry a
-    # designator the title lacks ("Chapter 4: Numerical Differentiation" for
-    # title "Numerical Differentiation") and vice versa.
-    candidate_core = _strip_leading_designators(candidate_normalized)
+    The title is converted to matching form once, here; ``matches`` converts
+    each candidate once. Callers prepare a title once and reuse it for every
+    page and text block they search.
+    """
 
-    content_matches = False
-    for search_text in search_texts:
-        if len(search_text) < _HEADING_MIN_LENGTH:
-            continue
+    search_keys: tuple[str, ...]
+    identifiers: frozenset[str]
+    section_number: re.Pattern[str] | None
+
+    @classmethod
+    def of(cls, title: str) -> "_HeadingTitle":
+        compared = matching_form(title)
+        search_keys = [_snippet_key(compared)]
+        without_appendix_prefix = _APPENDIX_PREFIX_PATTERN.sub("", compared).strip()
+        if without_appendix_prefix != compared:
+            search_keys.append(_snippet_key(without_appendix_prefix))
+        section_prefix = _extract_section_prefix(compared)
+        return cls(
+            search_keys=tuple(search_keys),
+            identifiers=frozenset(_DOTTED_NUMBER_PATTERN.findall(compared))
+            | {match.group("label_id") for match in _LABELED_IDENTIFIER_PATTERN.finditer(compared)},
+            section_number=_section_number_pattern(section_prefix) if section_prefix else None,
+        )
+
+    @property
+    def key(self) -> str:
+        """Snippet key of the full title."""
+        return self.search_keys[0]
+
+    def is_matchable(self, min_length: int = _HEADING_MIN_LENGTH) -> bool:
+        """Whether the title's key is long enough to match reliably (at least ``min_length``)."""
+        return len(self.key) >= min_length
+
+    def matches(self, candidate_text: str, anchored: bool = False) -> bool:
+        """Match heading text while preserving section-prefix evidence when present.
+
+        In anchored mode (used when *locating* a heading's page), evidence must be
+        structural, not incidental:
+        - The title must match at the START of the candidate text. Headings begin
+          blocks; a title appearing mid-block ("...see Preface to the second
+          edition...") or behind extra leading words ("Translator's preface to the
+          second edition") is a different or merely-referenced section.
+        - A candidate whose leading designator ("34.", "Chapter 8", "Appendix B",
+          "§3.5") names an identifier the title does not carry is a different
+          section: block "34. Differential forms" must not satisfy a title
+          designated chapter 7.
+
+        The default (unanchored) mode keeps loose containment for presence checks
+        over large text spans (whole pages, page zones).
+        """
+        candidate = matching_form(candidate_text)
+        candidate_key = _snippet_key(candidate)
+        if len(candidate_key) < _HEADING_MIN_LENGTH:
+            return False
+
+        candidate_identifier = _leading_designator(candidate)
+        candidate_consistent = (
+            candidate_identifier is None or not self.identifiers or candidate_identifier in self.identifiers
+        )
+        # Anchoring compares designator-stripped cores: a heading block may carry a
+        # designator the title lacks ("Chapter 4: Numerical Differentiation" for
+        # title "Numerical Differentiation") and vice versa.
+        candidate_core = _strip_leading_designators(candidate_key)
+
+        content_matches = any(
+            self._search_key_matches(search_key, candidate_key, candidate_core, candidate_consistent, anchored)
+            for search_key in self.search_keys
+        )
+        if not content_matches:
+            return False
+        if self.section_number is None:
+            return True
+        return self.section_number.search(_numbering_key(candidate)) is not None
+
+    @staticmethod
+    def _search_key_matches(
+        search_key: str, candidate_key: str, candidate_core: str, candidate_consistent: bool, anchored: bool
+    ) -> bool:
+        if len(search_key) < _HEADING_MIN_LENGTH:
+            return False
 
         # Forward: title contained in the candidate (anchored: at its start only).
         if anchored:
             if candidate_consistent:
                 # Full title at the candidate's start: heading may continue into
-                # merged body text. Checked against both the normalized candidate
-                # (block carries the same designator as the title) and its
+                # merged body text. Checked against both the candidate key (block
+                # carries the same designator as the title) and its
                 # designator-stripped core (block omits the designator).
-                if candidate_normalized.startswith(search_text) or candidate_core.startswith(search_text):
-                    content_matches = True
-                    break
+                if candidate_key.startswith(search_key) or candidate_core.startswith(search_key):
+                    return True
                 # Relaxed variant: both sides reduced to designator-stripped
                 # cores. With designators gone the cores carry all remaining
                 # identity, so they must match EXACTLY — a prefix match would
                 # conflate a short title with a longer different heading
                 # ("Distance" vs "Distance and Angles").
-                search_core = _strip_leading_designators(search_text)
+                search_core = _strip_leading_designators(search_key)
                 if (
-                    search_core != search_text
+                    search_core != search_key
                     and len(search_core) >= _FUZZY_MIN_SUBSTRING_LEN
                     and candidate_core == search_core
                 ):
-                    content_matches = True
-                    break
-        elif search_text in candidate_normalized:
-            content_matches = True
-            break
+                    return True
+        elif search_key in candidate_key:
+            return True
 
         # Reverse: candidate is a sub-phrase of the title (short heading block).
-        shorter_len = min(len(search_text), len(candidate_normalized))
-        longer_len = max(len(search_text), len(candidate_normalized))
-        if (
+        shorter_len = min(len(search_key), len(candidate_key))
+        longer_len = max(len(search_key), len(candidate_key))
+        is_sub_phrase = (
             shorter_len >= _FUZZY_MIN_SUBSTRING_LEN
-            and candidate_normalized in search_text
+            and candidate_key in search_key
             and shorter_len / longer_len >= _FUZZY_MIN_COVERAGE_RATIO
-        ):
-            if anchored and not candidate_consistent:
-                continue
-            content_matches = True
-            break
-
-    if not content_matches:
-        return False
-
-    section_prefix = _extract_section_prefix(title)
-    if section_prefix is None:
-        return True
-
-    return section_prefix in _normalize_title_for_matching(candidate_text)
+        )
+        return is_sub_phrase and (candidate_consistent or not anchored)
 
 
 def apply_toc_to_document(doc: pymupdf.Document, toc: list, output_file: str) -> None:
@@ -1676,8 +1750,8 @@ must be PDF page numbers (not printed page numbers).
 
         return refined_toc, usage
 
-    def _extract_reference_toc_page_entries(self, reference_text: str) -> list[tuple[str, int]]:
-        """Extract printed TOC title/page pairs from reference text.
+    def _extract_reference_toc_page_keys(self, reference_text: str) -> list[tuple[str, int]]:
+        """Extract printed TOC (title snippet key, printed page) pairs from reference text.
 
         This intentionally only accepts lines with an explicit trailing Arabic
         page number. More ambiguous OCR layouts are left to the LLM/postprocess
@@ -1697,41 +1771,25 @@ must be PDF page numbers (not printed page numbers).
             if not page_match:
                 continue
 
-            title = stripped[: page_match.start()].strip(" .·…\t")
-            if len(_normalize_snippet(title)) < _FUZZY_MIN_SUBSTRING_LEN:
+            key = _normalize_snippet(stripped[: page_match.start()].strip(" .·…\t"))
+            if len(key) < _FUZZY_MIN_SUBSTRING_LEN:
                 continue
-            entries.append((title, int(page_match.group(1))))
+            entries.append((key, int(page_match.group(1))))
 
         return entries
 
-    def _titles_match_for_offset_detection(self, left: str, right: str) -> bool:
-        """Return True when two TOC titles are a strong enough offset signal."""
-        left_norm = _normalize_snippet(left)
-        right_norm = _normalize_snippet(right)
-        if len(left_norm) < _FUZZY_MIN_SUBSTRING_LEN or len(right_norm) < _FUZZY_MIN_SUBSTRING_LEN:
-            return False
-        if left_norm == right_norm:
-            return True
-
-        shorter_len = min(len(left_norm), len(right_norm))
-        longer_len = max(len(left_norm), len(right_norm))
-        if shorter_len < _FUZZY_MIN_SUBSTRING_LEN:
-            return False
-        if not (left_norm in right_norm or right_norm in left_norm):
-            return False
-        return shorter_len / longer_len >= _FUZZY_MIN_COVERAGE_RATIO
-
     def _detect_reference_toc_offset(self, toc: TOC, reference_text: str) -> int:
         """Detect printed-to-PDF offset from repeated printed TOC title/page matches."""
-        reference_entries = self._extract_reference_toc_page_entries(reference_text)
-        if not reference_entries or not toc.entries:
+        reference_keys = self._extract_reference_toc_page_keys(reference_text)
+        if not reference_keys or not toc.entries:
             return 0
 
+        entry_keys = [(_normalize_snippet(entry.title), entry.page_number) for entry in toc.entries]
         offsets: list[int] = []
-        for reference_title, printed_page in reference_entries:
-            for entry in toc.entries:
-                if self._titles_match_for_offset_detection(reference_title, entry.title):
-                    offset = entry.page_number - printed_page
+        for reference_key, printed_page in reference_keys:
+            for entry_key, entry_page in entry_keys:
+                if _offset_keys_match(reference_key, entry_key):
+                    offset = entry_page - printed_page
                     if offset >= _SIGNIFICANT_FRONT_MATTER_OFFSET:
                         offsets.append(offset)
                     break
@@ -1778,9 +1836,7 @@ must be PDF page numbers (not printed page numbers).
 
         front_matter_anchor_page = 0
         for entry in candidates:
-            title_clean = re.sub(r"[^\w\s]", "", entry.title.strip().lower())
-            title_clean = re.sub(r"\s+", " ", title_clean)
-            if _FRONT_MATTER_TITLE_PATTERN.match(title_clean):
+            if _FRONT_MATTER_TITLE_PATTERN.match(title_key(entry.title)):
                 front_matter_anchor_page = max(front_matter_anchor_page, entry.page_number)
 
         candidates_after_front_matter = [
@@ -1790,13 +1846,11 @@ must be PDF page numbers (not printed page numbers).
         ]
 
         for entry in candidates_after_front_matter:
-            if _MAIN_CONTENT_START_PATTERN.match(_normalize_title_for_matching(entry.title)):
+            if _MAIN_CONTENT_START_PATTERN.match(_numbering_key(matching_form(entry.title))):
                 return entry.page_number - 1
 
         for entry in candidates_after_front_matter:
-            title_clean = re.sub(r"[^\w\s]", "", entry.title.strip().lower())
-            title_clean = re.sub(r"\s+", " ", title_clean)
-            if not _FRONT_MATTER_TITLE_PATTERN.match(title_clean):
+            if not _FRONT_MATTER_TITLE_PATTERN.match(title_key(entry.title)):
                 return entry.page_number - 1
         return 0
 
@@ -1830,35 +1884,8 @@ must be PDF page numbers (not printed page numbers).
             f"printed page N \u2192 PDF page N + {estimated_offset}."
         )
 
-    def _page_contains_heading(
-        self, page_number: int, title: str, window: int = _DEFAULT_HEADING_SEARCH_WINDOW
-    ) -> bool:
-        """Check if a heading's text appears on or near the given page.
-
-        Args:
-            page_number: 1-indexed PDF page number to check.
-            title: The heading title to search for.
-            window: Number of pages before/after to also check.
-
-        Returns:
-            True if the title text is found on or near the page.
-        """
-        search_text = _normalize_snippet(title)
-        if len(search_text) < _HEADING_MIN_LENGTH:
-            return False  # Too short to match reliably
-
-        start = max(0, page_number - 1 - window)
-        end = min(self.doc.page_count, page_number + window)
-
-        for page_idx in range(start, end):
-            page_text = self.doc[page_idx].get_text("text")
-            if _heading_text_matches_title(title, page_text):
-                return True
-
-        return False
-
     def _find_heading_page(
-        self, title: str, start_page: int, end_page: int, hint_page: int | None = None
+        self, heading: _HeadingTitle, start_page: int, end_page: int, hint_page: int | None = None
     ) -> int | None:
         """Find the page where a heading appears as an actual heading, not a running header.
 
@@ -1870,7 +1897,7 @@ must be PDF page numbers (not printed page numbers).
         closest match wins (avoids false matches in distant front matter).
 
         Args:
-            title: The heading title to search for.
+            heading: The prepared heading title to search for.
             start_page: First page to search (1-indexed, inclusive).
             end_page: Last page to search (1-indexed, exclusive).
             hint_page: Page to start searching from (1-indexed). If None,
@@ -1879,8 +1906,7 @@ must be PDF page numbers (not printed page numbers).
         Returns:
             The 1-indexed page number where the heading is found, or None.
         """
-        search_text = _normalize_snippet(title)
-        if len(search_text) < _HEADING_MIN_LENGTH:
+        if not heading.is_matchable():
             return None
 
         start_idx = max(0, start_page - 1)
@@ -1914,7 +1940,7 @@ must be PDF page numbers (not printed page numbers).
                     continue
                 block_text = " ".join(s.get("text", "") for s in block_spans)
                 # Anchored: only structural heading evidence may relocate a page.
-                if _heading_text_matches_title(title, block_text, anchored=True):
+                if heading.matches(block_text, anchored=True):
                     return page_idx + 1  # 1-indexed
 
         return None
@@ -1922,7 +1948,7 @@ must be PDF page numbers (not printed page numbers).
     def _page_has_heading_in_bottom(
         self,
         page_number: int,
-        title: str,
+        heading: _HeadingTitle,
         y_threshold: float = _PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD,
     ) -> bool:
         """Check if heading text appears in the bottom portion of a given page.
@@ -1932,7 +1958,7 @@ must be PDF page numbers (not printed page numbers).
 
         Args:
             page_number: 1-indexed PDF page number.
-            title: Heading title to search for.
+            heading: The prepared heading title to search for.
             y_threshold: Normalized y-position threshold (0.0=top, 1.0=bottom).
                 Only spans with y > y_threshold are searched.
 
@@ -1940,16 +1966,12 @@ must be PDF page numbers (not printed page numbers).
             True if the title is found in the bottom portion of the page.
         """
         page_idx = page_number - 1
-        if page_idx < 0 or page_idx >= self.doc.page_count:
+        if page_idx < 0 or page_idx >= self.doc.page_count or not heading.is_matchable():
             return False
 
         page = self.doc[page_idx]
         page_dict = page.get_text("dict")
         page_height = page_dict.get("height", _DEFAULT_PAGE_HEIGHT)
-
-        search_text = _normalize_snippet(title)
-        if len(search_text) < _HEADING_MIN_LENGTH:
-            return False
 
         for block in page_dict.get("blocks", []):
             if block.get("type") != _PYMUPDF_TEXT_BLOCK_TYPE:
@@ -1967,7 +1989,7 @@ must be PDF page numbers (not printed page numbers).
             if y_pos <= y_threshold:
                 continue
             block_text = " ".join(s.get("text", "") for s in block_spans)
-            if _heading_text_matches_title(title, block_text):
+            if heading.matches(block_text):
                 return True
         return False
 
@@ -2017,9 +2039,10 @@ must be PDF page numbers (not printed page numbers).
 
         for entry in toc.entries:
             page = entry.page_number
-            entry_text = _normalize_snippet(entry.title)
+            heading = _HeadingTitle.of(entry.title)
+            entry_text = heading.key
 
-            if len(entry_text) < _HEADING_MIN_LENGTH or page <= 1:
+            if not heading.is_matchable() or page <= 1:
                 corrected.append(entry)
                 continue
 
@@ -2046,7 +2069,7 @@ must be PDF page numbers (not printed page numbers).
 
             # Fallback: search the actual PDF for heading in bottom of previous page
             if not found_on_prev:
-                found_on_prev = self._page_has_heading_in_bottom(prev_page, entry.title)
+                found_on_prev = self._page_has_heading_in_bottom(prev_page, heading)
 
             if found_on_prev:
                 corrected.append(entry.model_copy(update={"page_number": prev_page}))
@@ -2085,13 +2108,9 @@ must be PDF page numbers (not printed page numbers).
         offset = self._detect_front_matter_offset(original_toc, reference_text=reference_text)
 
         # Step 2: Build map of original entries (normalized title -> page_number)
-        def normalize(title: str) -> str:
-            title = re.sub(r"[^\w\s]", "", title)  # strip all punctuation
-            return re.sub(r"\s+", " ", title.strip().lower())
-
         original_map: dict[str, list[tuple[int, int]]] = {}  # normalized title -> [(page_number, level)]
         for entry in original_toc.entries:
-            original_map.setdefault(normalize(entry.title), []).append((entry.page_number, entry.level))
+            original_map.setdefault(title_key(entry.title), []).append((entry.page_number, entry.level))
 
         def _fuzzy_match(key: str, level: int) -> int | None:
             """Try multi-strategy matching against original_map.
@@ -2116,7 +2135,7 @@ must be PDF page numbers (not printed page numbers).
             # leading-word variants ("Preface..." vs "Translator's preface...")
             # which name different sections.
             key_core = _strip_leading_designators(key)
-            key_digits = re.findall(r"\d+", key)
+            key_digits = _NUMBER_PATTERN.findall(key)
             best_page: int | None = None
             best_ratio: float = 0.0
 
@@ -2125,7 +2144,7 @@ must be PDF page numbers (not printed page numbers).
                 # disagree, they are different sections even if their cores
                 # match ("1.8 Exercises" vs "2.9 Exercises"). A missing number
                 # on one side is fine (printed TOCs often drop designators).
-                orig_digits = re.findall(r"\d+", orig_key)
+                orig_digits = _NUMBER_PATTERN.findall(orig_key)
                 if key_digits and orig_digits and key_digits != orig_digits:
                     continue
                 orig_core = _strip_leading_designators(orig_key)
@@ -2152,7 +2171,7 @@ must be PDF page numbers (not printed page numbers).
         # Step 3: For matched entries, restore original page numbers.
         #         For new entries, keep the LLM's output (to be verified below).
         for entry in refined_toc.entries:
-            key = normalize(entry.title)
+            key = title_key(entry.title)
 
             matched_page = _fuzzy_match(key, entry.level)
             if matched_page is not None:
@@ -2171,8 +2190,9 @@ must be PDF page numbers (not printed page numbers).
         if offset >= _SIGNIFICANT_FRONT_MATTER_OFFSET:
             window = offset
             for i, entry in enumerate(corrected):
-                search_text = _normalize_snippet(entry.title)
-                if len(search_text) < _FUZZY_MIN_SUBSTRING_LEN:
+                heading = _HeadingTitle.of(entry.title)
+                # Relocating a page needs a longer key than a presence check.
+                if not heading.is_matchable(_FUZZY_MIN_SUBSTRING_LEN):
                     continue
                 # Center on the nearest in-document page: an entry claimed past the
                 # last page (printed page + offset overshooting a PDF that omits
@@ -2180,7 +2200,7 @@ must be PDF page numbers (not printed page numbers).
                 center = min(max(entry.page_number, 1), self.doc.page_count)
                 search_start = max(1, center - window)
                 search_end = min(self.doc.page_count, center + window) + 1
-                actual_page = self._find_heading_page(entry.title, search_start, search_end, hint_page=center)
+                actual_page = self._find_heading_page(heading, search_start, search_end, hint_page=center)
                 if actual_page is not None and actual_page != entry.page_number:
                     corrected[i] = entry.model_copy(update={"page_number": actual_page})
                     verified_count += 1

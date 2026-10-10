@@ -187,6 +187,62 @@ class TestTOC:
         assert merged.entries[1].level == 2
 
 
+class TestTOCIdentityDuplicates:
+    """deduplicate() and merge() treat extraction-artifact spellings of one title on one page as one bookmark."""
+
+    PAGE = 42
+    OTHER_PAGE = 43
+    LEVEL = 2
+
+    # (clean spelling, extracted spelling) of one title.
+    SAME_TITLE_SPELLINGS = [
+        ("6.4 Kähler Potentials", "6.4 K\N{DIAERESIS}ahler Potentials"),
+        ("3.1 Definitions and Notation", "3.1 De\N{LATIN SMALL LIGATURE FI}nitions and Notation"),
+        ("5.1 Çetin Algebras", "5.1 C\N{CEDILLA}etin Algebras"),
+    ]
+
+    # Titles that differ in numbering, case, punctuation or symbols are different bookmarks.
+    DISTINCT_TITLES = [
+        ("2.11 Exercises", "21.1 Exercises"),
+        ("Case x > 0", "Case x < 0"),
+        ("C++ Templates", "C# Templates"),
+        ("A \N{UNION} B", "A \N{INTERSECTION} B"),
+        ("Exercises", "EXERCISES"),
+    ]
+
+    @pytest.mark.parametrize(("clean", "extracted"), SAME_TITLE_SPELLINGS)
+    @pytest.mark.parametrize("clean_first", [True, False])
+    def test_deduplicate_keeps_clean_spelling(self, make_toc, clean: str, extracted: str, clean_first: bool) -> None:
+        titles = (clean, extracted) if clean_first else (extracted, clean)
+        toc = make_toc(*[(title, self.PAGE, self.LEVEL) for title in titles])
+
+        assert [entry.title for entry in toc.deduplicate().entries] == [clean]
+
+    @pytest.mark.parametrize(("clean", "extracted"), SAME_TITLE_SPELLINGS)
+    def test_merge_keeps_clean_spelling_from_later_batch(self, make_toc, clean: str, extracted: str) -> None:
+        merged = make_toc((extracted, self.PAGE, self.LEVEL)).merge(make_toc((clean, self.PAGE, self.LEVEL)))
+
+        assert [entry.title for entry in merged.entries] == [clean]
+
+    def test_first_entry_kept_when_every_spelling_has_artifacts(self, make_toc) -> None:
+        first, second = "K\N{DIAERESIS}ahler", "Ka\N{DIAERESIS}hler"
+        toc = make_toc((first, self.PAGE, self.LEVEL), (second, self.PAGE, self.LEVEL))
+
+        assert [entry.title for entry in toc.deduplicate().entries] == [first]
+
+    @pytest.mark.parametrize(("first", "second"), DISTINCT_TITLES)
+    def test_distinct_titles_are_kept(self, make_toc, first: str, second: str) -> None:
+        toc = make_toc((first, self.PAGE, self.LEVEL), (second, self.PAGE, self.LEVEL))
+
+        assert [entry.title for entry in toc.deduplicate().entries] == [first, second]
+
+    @pytest.mark.parametrize(("clean", "extracted"), SAME_TITLE_SPELLINGS)
+    def test_same_title_on_different_pages_is_kept(self, make_toc, clean: str, extracted: str) -> None:
+        toc = make_toc((clean, self.PAGE, self.LEVEL), (extracted, self.OTHER_PAGE, self.LEVEL))
+
+        assert len(toc.deduplicate().entries) == len(toc.entries)
+
+
 class TestTOCSanitizeHierarchy:
     """Tests for TOC.sanitize_hierarchy() — ensures PyMuPDF set_toc() compatibility."""
 
