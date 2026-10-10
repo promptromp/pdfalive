@@ -197,6 +197,9 @@ _DEFAULT_HEADING_SEARCH_WINDOW = 1
 # Output/prompt formatting precision.
 _CONFIDENCE_DECIMAL_PLACES = 2
 
+# Maximum number of dropped out-of-range entries named in the console warning.
+_MAX_DROPPED_ENTRIES_SHOWN = 5
+
 
 def _normalize_snippet(text: str) -> str:
     """Normalize text for fuzzy matching: strip numbering, punctuation, whitespace.
@@ -999,20 +1002,28 @@ class TOCGenerator:
         return self.doc.get_toc()
 
     def _drop_out_of_range_entries(self, toc: TOC) -> TOC:
-        """Drop entries whose page number does not exist in the document, reporting each one.
+        """Drop entries whose page number does not exist in the document, with a console warning.
 
         LLM page numbers are not guaranteed to be in range. In particular, the
         postprocessor converts printed-TOC pages with a single front-matter
         offset, which overshoots the last page for back matter when the PDF
         omits pages the printed book numbers (e.g. stripped blank pages), and
-        heading verification cannot always relocate those entries.
+        heading verification cannot always relocate those entries. Such an
+        entry has no known destination; pointing it at the nearest valid page
+        would produce a bookmark to unrelated content, so it is dropped.
         """
         in_range, out_of_range = toc.partition_by_page_range(self.doc.page_count)
         if out_of_range:
-            dropped = ", ".join(f"'{escape(entry.title)}' (page {entry.page_number})" for entry in out_of_range)
+            shown = ", ".join(
+                f"'{escape(entry.title)}' (page {entry.page_number})"
+                for entry in out_of_range[:_MAX_DROPPED_ENTRIES_SHOWN]
+            )
+            hidden_count = len(out_of_range) - _MAX_DROPPED_ENTRIES_SHOWN
+            more = f" and {hidden_count} more" if hidden_count > 0 else ""
+            noun = "entry" if len(out_of_range) == 1 else "entries"
             console.print(
-                f"  [yellow]Dropped {len(out_of_range)} entries with page numbers outside the document "
-                f"(1-{self.doc.page_count}): {dropped}[/yellow]"
+                f"  [yellow]Dropped {len(out_of_range)} {noun} with page numbers outside the document "
+                f"(1-{self.doc.page_count}): {shown}{more}[/yellow]"
             )
         return in_range
 
@@ -2163,11 +2174,13 @@ must be PDF page numbers (not printed page numbers).
                 search_text = _normalize_snippet(entry.title)
                 if len(search_text) < _FUZZY_MIN_SUBSTRING_LEN:
                     continue
-                search_start = max(1, entry.page_number - window)
-                search_end = min(self.doc.page_count, entry.page_number + window) + 1
-                actual_page = self._find_heading_page(
-                    entry.title, search_start, search_end, hint_page=entry.page_number
-                )
+                # Center on the nearest in-document page: an entry claimed past the
+                # last page (printed page + offset overshooting a PDF that omits
+                # printed pages) is most likely among the final pages.
+                center = min(max(entry.page_number, 1), self.doc.page_count)
+                search_start = max(1, center - window)
+                search_end = min(self.doc.page_count, center + window) + 1
+                actual_page = self._find_heading_page(entry.title, search_start, search_end, hint_page=center)
                 if actual_page is not None and actual_page != entry.page_number:
                     corrected[i] = entry.model_copy(update={"page_number": actual_page})
                     verified_count += 1
