@@ -6,11 +6,16 @@ from unittest.mock import MagicMock
 import pytest
 
 from pdfalive.models.rename import RenameOp, RenameResult
+from pdfalive.processors import rename_processor as rename_processor_module
 from pdfalive.processors.rename_processor import (
     PROMPT_OVERHEAD_TOKENS,
     RenameProcessor,
 )
 from pdfalive.tokens import TokenUsage
+
+
+# Batch label passed to _invoke_with_retry for its progress messages.
+_BATCH_DESCRIPTION = "rename request"
 
 
 @pytest.fixture
@@ -545,6 +550,43 @@ class TestRenameProcessorEdgeCases:
         result, usage = processor.generate_renames(paths, "clean names")
 
         assert result.operations[0].output_filename == "clean_filename.pdf"
+
+    def test_retry_warning_renders_exception_message_verbatim(
+        self, mock_llm, sample_rename_result, recording_console, monkeypatch, instant_retries, markup_like_text
+    ):
+        monkeypatch.setattr(rename_processor_module, "console", recording_console)
+        error = RuntimeError(markup_like_text)
+        model = MagicMock()
+        model.invoke.side_effect = [error, sample_rename_result]
+
+        RenameProcessor(llm=mock_llm)._invoke_with_retry(
+            model, messages=[], batch_description=_BATCH_DESCRIPTION, input_tokens=0
+        )
+
+        assert f"({type(error).__name__}: {markup_like_text})" in recording_console.export_text()
+
+    def test_retry_survives_a_non_string_exception_message(
+        self,
+        mock_llm,
+        sample_rename_result,
+        recording_console,
+        monkeypatch,
+        instant_retries,
+        non_string_message_error,
+        non_string_error_message,
+    ):
+        """An error whose ``message`` is not a str is reported, and the retry goes on to succeed."""
+        monkeypatch.setattr(rename_processor_module, "console", recording_console)
+        model = MagicMock()
+        model.invoke.side_effect = [non_string_message_error, sample_rename_result]
+
+        result = RenameProcessor(llm=mock_llm)._invoke_with_retry(
+            model, messages=[], batch_description=_BATCH_DESCRIPTION, input_tokens=0
+        )
+
+        assert result == sample_rename_result
+        expected = f"({type(non_string_message_error).__name__}: {non_string_error_message})"
+        assert expected in recording_console.export_text()
 
 
 class TestRenameProcessorIntegration:

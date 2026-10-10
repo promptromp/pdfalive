@@ -7,21 +7,23 @@ from typing import cast
 
 from langchain.chat_models.base import BaseChatModel
 from langchain.messages import HumanMessage, SystemMessage
-from rich.console import Console
 from tenacity import (
+    RetryCallState,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
 
+from pdfalive.console import create_console
 from pdfalive.models.rename import ApplyRenamesResult, RenameError, RenameOp, RenameResult
 from pdfalive.prompts import RENAME_CONTINUATION_SYSTEM_PROMPT, RENAME_SYSTEM_PROMPT
+from pdfalive.retry import retry_warning
 from pdfalive.tokens import TokenUsage, estimate_tokens
 
 
 # Console for rich output
-console = Console()
+console = create_console()
 
 # Default maximum tokens for filenames per batch to stay under context window limits
 # Use conservative limits since filenames can be long and we need output space
@@ -146,23 +148,8 @@ class RenameProcessor:
             The RenameResult response from the LLM.
         """
 
-        def _log_retry(retry_state) -> None:
-            """Log retry attempt information."""
-            wait_time = getattr(retry_state.next_action, "sleep", 0) if retry_state.next_action else 0
-
-            # Extract exception details if available
-            exception_info = ""
-            if retry_state.outcome is not None:
-                exc = retry_state.outcome.exception()
-                if exc is not None:
-                    exc_name = type(exc).__name__
-                    exc_msg = str(exc) or getattr(exc, "message", "")
-                    exception_info = f" ({exc_name}: {exc_msg})" if exc_msg else f" ({exc_name})"
-
-            console.print(
-                f"  [yellow]Error encountered{exception_info}. Retrying in {wait_time:.1f}s "
-                f"(attempt {retry_state.attempt_number}/{MAX_RETRY_ATTEMPTS})...[/yellow]"
-            )
+        def _log_retry(retry_state: RetryCallState) -> None:
+            console.print(retry_warning(retry_state, MAX_RETRY_ATTEMPTS))
 
         @retry(
             retry=retry_if_exception_type(Exception),
@@ -178,13 +165,13 @@ class RenameProcessor:
         def _invoke():
             return model.invoke(messages)
 
-        console.print(f"  [dim]Invoking LLM for {batch_description} (~{input_tokens:,} input tokens)...[/dim]")
+        console.print(f"  Invoking LLM for {batch_description} (~{input_tokens:,} input tokens)...", style="dim")
         start_time = time.time()
 
         response = _invoke()
 
         elapsed = time.time() - start_time
-        console.print(f"  [green]Completed {batch_description} in {elapsed:.1f}s[/green]")
+        console.print(f"  Completed {batch_description} in {elapsed:.1f}s", style="green")
 
         return cast(RenameResult, response)
 
@@ -247,7 +234,7 @@ class RenameProcessor:
         total_batches = len(batches)
 
         if total_batches > 1:
-            console.print(f"[bold]Processing {len(filenames)} files in {total_batches} batch(es)...[/bold]")
+            console.print(f"Processing {len(filenames)} files in {total_batches} batch(es)...", style="bold")
 
         for batch_idx, batch in enumerate(batches):
             is_first_batch = batch_idx == 0
@@ -255,7 +242,7 @@ class RenameProcessor:
 
             # Add delay between requests (except for the first one)
             if not is_first_batch and request_delay > 0:
-                console.print(f"  [dim]Waiting {request_delay:.1f}s before next request...[/dim]")
+                console.print(f"  Waiting {request_delay:.1f}s before next request...", style="dim")
                 time.sleep(request_delay)
 
             # Select appropriate prompt
@@ -306,14 +293,14 @@ class RenameProcessor:
             # Log operations found
             ops_found = len(batch_result.operations)
             if ops_found > 0 and total_batches > 1:
-                console.print(f"  [cyan]Generated {ops_found} rename operation(s) in this batch[/cyan]")
+                console.print(f"  Generated {ops_found} rename operation(s) in this batch", style="cyan")
 
             # Merge results
             merged_result = merged_result.merge(batch_result)
 
         if total_batches > 1:
             ops_count = len(merged_result.operations)
-            console.print(f"[bold green]All batches processed. Total rename operations: {ops_count}[/bold green]")
+            console.print(f"All batches processed. Total rename operations: {ops_count}", style="bold green")
 
         return merged_result, usage
 

@@ -3,7 +3,9 @@
 from dataclasses import dataclass, field
 
 import tiktoken
-from rich.console import Console
+from rich.text import Text
+
+from pdfalive.console import ConsoleType, TextPart, create_console, safe_text
 
 
 # Default tiktoken encoding — o200k_base (GPT-4o/5) produces near-identical counts
@@ -64,32 +66,37 @@ class TokenUsage:
         """Total tokens used across all calls."""
         return self.input_tokens + self.output_tokens
 
+    def _summary_fields(self) -> list[tuple[str, str]]:
+        """(label, formatted count) pairs shared by the plain and styled summaries."""
+        return [
+            ("LLM calls", f"{self.llm_calls}"),
+            ("Input tokens", f"{self.input_tokens:,}"),
+            ("Output tokens", f"{self.output_tokens:,}"),
+            ("Total tokens", f"{self.total_tokens:,}"),
+        ]
+
     def summary(self) -> str:
         """Return a human-readable summary of token usage."""
-        lines = [
-            "Token Usage Summary:",
-            f"  LLM calls: {self.llm_calls}",
-            f"  Input tokens: {self.input_tokens:,}",
-            f"  Output tokens: {self.output_tokens:,}",
-            f"  Total tokens: {self.total_tokens:,}",
-        ]
+        lines = ["Token Usage Summary:", *(f"  {label}: {value}" for label, value in self._summary_fields())]
         return "\n".join(lines)
 
-    def print_summary(self, console: Console | None = None) -> None:
-        """Print a formatted token usage summary to the console.
+    def summary_text(self) -> Text:
+        """Return the token usage summary styled for printing on a Rich console."""
+        parts: list[TextPart] = [("Token Usage:", "bold")]
+        for label, value in self._summary_fields():
+            parts += [f"\n  {label}: ", (value, "cyan")]
+        return safe_text(*parts, multiline=True)
+
+    def print_summary(self, console: ConsoleType | None = None) -> None:
+        """Print the token usage summary, set off by a blank line.
 
         Args:
-            console: Rich Console instance to use. If None, creates a new one.
+            console: Console to print on; one from ``create_console()`` when omitted.
         """
         if console is None:
-            console = Console()
-
+            console = create_console()
         console.print()
-        console.print("[bold]Token Usage:[/bold]")
-        console.print(f"  LLM calls: [cyan]{self.llm_calls}[/cyan]")
-        console.print(f"  Input tokens: [cyan]{self.input_tokens:,}[/cyan]")
-        console.print(f"  Output tokens: [cyan]{self.output_tokens:,}[/cyan]")
-        console.print(f"  Total tokens: [cyan]{self.total_tokens:,}[/cyan]")
+        console.print(self.summary_text())
 
 
 def estimate_tokens(text: str) -> int:
