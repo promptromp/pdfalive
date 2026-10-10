@@ -92,7 +92,7 @@ class TestTOC:
             ]
         )
 
-        merged = toc1.merge(toc2)
+        merged = TOC.merged([toc1, toc2])
 
         assert len(merged.entries) == 4
         assert merged.entries[0].title == "Chapter 1"
@@ -115,7 +115,7 @@ class TestTOC:
             ]
         )
 
-        merged = toc1.merge(toc2)
+        merged = TOC.merged([toc1, toc2])
 
         assert len(merged.entries) == 3
         # The overlapping entry should have confidence from toc1 (0.85)
@@ -136,7 +136,7 @@ class TestTOC:
             ]
         )
 
-        merged = toc1.merge(toc2)
+        merged = TOC.merged([toc1, toc2])
 
         assert merged.entries[0].page_number == 1
         assert merged.entries[1].page_number == 10
@@ -147,7 +147,7 @@ class TestTOC:
         toc1 = TOC(entries=[])
         toc2 = TOC(entries=[])
 
-        merged = toc1.merge(toc2)
+        merged = TOC.merged([toc1, toc2])
 
         assert len(merged.entries) == 0
 
@@ -160,7 +160,7 @@ class TestTOC:
             ]
         )
 
-        merged = toc1.merge(toc2)
+        merged = TOC.merged([toc1, toc2])
 
         assert len(merged.entries) == 1
         assert merged.entries[0].title == "Chapter 1"
@@ -178,13 +178,94 @@ class TestTOC:
             ]
         )
 
-        merged = toc1.merge(toc2)
+        merged = TOC.merged([toc1, toc2])
 
         # Both should be kept since they have different titles
         assert len(merged.entries) == 2
         # Sorted by page_number, then level
         assert merged.entries[0].level == 1
         assert merged.entries[1].level == 2
+
+
+class TestTOCIdentityDuplicates:
+    """deduplicate() and merged() treat extraction-artifact spellings of one title on one page as one bookmark."""
+
+    PAGE = 42
+    OTHER_PAGE = 43
+    LEVEL = 2
+    FIRST_LEVEL, LATER_LEVEL = 1, 2
+    FIRST_CONFIDENCE, LATER_CONFIDENCE = 0.9, 0.6
+
+    # (clean spelling, extracted spelling) of one title.
+    SAME_TITLE_SPELLINGS = [
+        ("6.4 Kähler Potentials", "6.4 K\N{DIAERESIS}ahler Potentials"),
+        ("3.1 Definitions and Notation", "3.1 De\N{LATIN SMALL LIGATURE FI}nitions and Notation"),
+        ("5.1 Çetin Algebras", "5.1 C\N{CEDILLA}etin Algebras"),
+        # An apostrophe extracted as an acute accent.
+        ("8.2 O'Neill Spaces", "8.2 O\N{ACUTE ACCENT}Neill Spaces"),
+    ]
+
+    # Different bookmarks: numbering, case, punctuation, symbols, and diacritics
+    # between two artifact-free titles.
+    DISTINCT_TITLES = [
+        ("2.11 Exercises", "21.1 Exercises"),
+        ("Case x > 0", "Case x < 0"),
+        ("Case x \N{NOT EQUAL TO} 0", "Case x = 0"),
+        ("C++ Templates", "C# Templates"),
+        ("A \N{UNION} B", "A \N{INTERSECTION} B"),
+        ("Exercises", "EXERCISES"),
+        ("Solving x\N{COMBINING DOT ABOVE} = ax", "Solving x\N{COMBINING DIAERESIS} = ax"),
+        ("X\N{COMBINING MACRON} Statistics", "X Statistics"),
+        ("Kähler Potentials", "Kahler Potentials"),
+    ]
+
+    @pytest.mark.parametrize(("clean", "extracted"), SAME_TITLE_SPELLINGS)
+    @pytest.mark.parametrize("clean_first", [True, False])
+    def test_deduplicate_keeps_clean_spelling(self, make_toc, clean: str, extracted: str, clean_first: bool) -> None:
+        titles = (clean, extracted) if clean_first else (extracted, clean)
+        toc = make_toc(*[(title, self.PAGE, self.LEVEL) for title in titles])
+
+        assert [entry.title for entry in toc.deduplicate().entries] == [clean]
+
+    @pytest.mark.parametrize(("clean", "extracted"), SAME_TITLE_SPELLINGS)
+    def test_duplicate_keeps_first_entry_level_and_confidence(self, make_toc_entry, clean: str, extracted: str) -> None:
+        first = make_toc_entry(
+            title=extracted, page_number=self.PAGE, level=self.FIRST_LEVEL, confidence=self.FIRST_CONFIDENCE
+        )
+        later = make_toc_entry(
+            title=clean, page_number=self.PAGE, level=self.LATER_LEVEL, confidence=self.LATER_CONFIDENCE
+        )
+
+        (kept,) = TOC(entries=[first, later]).deduplicate().entries
+
+        assert (kept.title, kept.level, kept.confidence) == (clean, self.FIRST_LEVEL, self.FIRST_CONFIDENCE)
+
+    @pytest.mark.parametrize(("clean", "extracted"), SAME_TITLE_SPELLINGS)
+    def test_merged_prefers_earlier_batch_with_clean_title(self, make_toc_entry, clean: str, extracted: str) -> None:
+        earlier = TOC(entries=[make_toc_entry(title=extracted, page_number=self.PAGE, level=self.FIRST_LEVEL)])
+        later = TOC(entries=[make_toc_entry(title=clean, page_number=self.PAGE, level=self.LATER_LEVEL)])
+
+        (kept,) = TOC.merged([earlier, later]).entries
+
+        assert (kept.title, kept.level) == (clean, self.FIRST_LEVEL)
+
+    def test_first_entry_kept_when_every_spelling_has_artifacts(self, make_toc) -> None:
+        first, second = "K\N{DIAERESIS}ahler", "Ka\N{DIAERESIS}hler"
+        toc = make_toc((first, self.PAGE, self.LEVEL), (second, self.PAGE, self.LEVEL))
+
+        assert [entry.title for entry in toc.deduplicate().entries] == [first]
+
+    @pytest.mark.parametrize(("first", "second"), DISTINCT_TITLES)
+    def test_distinct_titles_are_kept(self, make_toc, first: str, second: str) -> None:
+        toc = make_toc((first, self.PAGE, self.LEVEL), (second, self.PAGE, self.LEVEL))
+
+        assert [entry.title for entry in toc.deduplicate().entries] == [first, second]
+
+    @pytest.mark.parametrize(("clean", "extracted"), SAME_TITLE_SPELLINGS)
+    def test_same_title_on_different_pages_is_kept(self, make_toc, clean: str, extracted: str) -> None:
+        toc = make_toc((clean, self.PAGE, self.LEVEL), (extracted, self.OTHER_PAGE, self.LEVEL))
+
+        assert len(toc.deduplicate().entries) == len(toc.entries)
 
 
 class TestTOCSanitizeHierarchy:

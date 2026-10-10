@@ -25,15 +25,16 @@ from pdfalive.processors.toc_generator import (
     _compute_body_font_profile,
     _extract_features_from_page_range,
     _extract_toc_like_lines,
-    _heading_text_matches_title,
+    _HeadingTitle,
     _is_bold_font,
     _is_heading_candidate,
-    _normalize_snippet,
+    _snippet_key,
     _strip_subset_prefix,
     filter_features_for_llm,
     serialize_features_compact,
 )
 from pdfalive.retry import LLMCallError
+from pdfalive.text import matching_form, title_key
 from pdfalive.tokens import TokenUsage
 
 
@@ -78,6 +79,39 @@ def make_refined_toc(entries_data: list[tuple[str, int, int]]) -> PostprocessedT
             for title, page, level in entries_data
         ]
     )
+
+
+# Section headings as the LLM writes them (plain or composed Unicode) and as
+# TeX-produced PDFs extract them: ligature glyphs, and accents set as separate
+# spacing characters ahead of their letter.
+_KAHLER_SECTION_TITLE = "6.4 Kähler Potentials"
+_KAHLER_SECTION_PDF_TEXT = "6.4 K\N{DIAERESIS}ahler Potentials"
+_DEFINITIONS_SECTION_TITLE = "3.1 Definitions and Notation"
+_DEFINITIONS_SECTION_PDF_TEXT = "3.1 De\N{LATIN SMALL LIGATURE FI}nitions and Notation"
+_POINCARE_SECTION_TITLE = "4.2 Poincaré Maps"
+_POINCARE_SECTION_PDF_TEXT = "4.2 Poincar\N{ACUTE ACCENT}e Maps"
+
+# (title, PDF text) pairs that spell one heading two ways.
+_UNICODE_SPELLING_PAIRS = [
+    (_KAHLER_SECTION_TITLE, _KAHLER_SECTION_PDF_TEXT),
+    (_DEFINITIONS_SECTION_TITLE, _DEFINITIONS_SECTION_PDF_TEXT),
+    (_POINCARE_SECTION_TITLE, _POINCARE_SECTION_PDF_TEXT),
+    # The LLM may copy the extracted spelling from the features it was shown.
+    (_KAHLER_SECTION_PDF_TEXT, _KAHLER_SECTION_TITLE),
+    # Composed vs decomposed accent.
+    (_KAHLER_SECTION_TITLE, "6.4 Ka\N{COMBINING DIAERESIS}hler Potentials"),
+    # The LLM may drop the accent altogether.
+    ("4.2 Poincare Maps", _POINCARE_SECTION_PDF_TEXT),
+    ("6.4 Kahler Potentials", _KAHLER_SECTION_PDF_TEXT),
+    # A cedilla extracted after its letter, and stacked accents.
+    ("5.1 Çetin Algebras", "5.1 C\N{CEDILLA}etin Algebras"),
+    ("7.3 Viết Lattices", "7.3 Vi\N{ACUTE ACCENT}\N{MODIFIER LETTER CIRCUMFLEX ACCENT}et Lattices"),
+    # An apostrophe typed as an acute accent.
+    ("8.2 O'Neill Spaces", "8.2 O\N{ACUTE ACCENT}Neill Spaces"),
+    # An accent in a span of its own, joined to its neighbors with a space.
+    (_KAHLER_SECTION_TITLE, "6.4 K \N{DIAERESIS}ahler Potentials"),
+    ("d'Alembert Operators", "d\N{ACUTE ACCENT}Alembert Operators"),
+]
 
 
 @pytest.fixture
@@ -2312,92 +2346,29 @@ class TestDetectFrontMatterOffset:
         assert "foreword" in _FRONT_MATTER_TITLES
 
 
-class TestPageContainsHeading:
-    """Tests for _page_contains_heading."""
+class TestUnanchoredHeadingMatching:
+    """Unanchored matching (presence checks over page zones) tolerates case, spacing, numbering, punctuation."""
 
-    @pytest.fixture
-    def mock_doc_with_pages(self):
-        """Create a mock document with configurable page text."""
-        doc = MagicMock()
-        doc.page_count = 100
-        doc.get_toc.return_value = []
-        doc.name = None
+    @pytest.mark.parametrize(
+        ("title", "page_text"),
+        [
+            ("Introduction to Probability", "Some text\nIntroduction to Probability\nMore text"),
+            ("Chapter I: The Sample Space", "CHAPTER I: THE SAMPLE SPACE"),
+            ("Chapter I: The Sample Space", "Chapter  I:  The   Sample Space"),
+            ("1. The Empirical Background", "The Empirical Background of probability"),
+            ("Introduction: The Nature of Probability Theory", "Introduction The Nature of Probability Theory"),
+            ("Chapter I The Sample Space", "Chapter I: The Sample Space"),
+            ("Results: Discussion & Analysis", "Results — Discussion & Analysis"),
+        ],
+    )
+    def test_matches_title_in_page_text(self, title: str, page_text: str) -> None:
+        assert _HeadingTitle.of(title).matches(page_text) is True
 
-        # Default page text - can be customized per test
-        page_texts = {}
+    def test_rejects_absent_title(self) -> None:
+        assert _HeadingTitle.of("Introduction to Probability").matches("Completely unrelated text") is False
 
-        def get_page(idx):
-            page = MagicMock()
-            text = page_texts.get(idx, f"Page {idx + 1} body text content")
-            page.get_text.return_value = text
-            return page
-
-        doc.__getitem__ = lambda self, idx: get_page(idx)
-        doc._page_texts = page_texts  # Expose for test configuration
-        return doc
-
-    @pytest.fixture
-    def generator(self, mock_doc_with_pages, mock_llm):
-        return TOCGenerator(doc=mock_doc_with_pages, llm=mock_llm)
-
-    def test_finds_exact_heading_on_page(self, generator):
-        """Heading text found on the exact page returns True."""
-        generator.doc._page_texts[15] = "Some text\nIntroduction to Probability\nMore text"
-        assert generator._page_contains_heading(16, "Introduction to Probability") is True
-
-    def test_case_insensitive_match(self, generator):
-        """Matching is case-insensitive."""
-        generator.doc._page_texts[15] = "CHAPTER I: THE SAMPLE SPACE"
-        assert generator._page_contains_heading(16, "Chapter I: The Sample Space") is True
-
-    def test_whitespace_normalized(self, generator):
-        """Extra whitespace in page text or title is collapsed."""
-        generator.doc._page_texts[15] = "Chapter  I:  The   Sample Space"
-        assert generator._page_contains_heading(16, "Chapter I: The Sample Space") is True
-
-    def test_returns_false_for_missing_heading(self, generator):
-        """Returns False when heading text is not on the page or neighbors."""
-        generator.doc._page_texts[15] = "Completely unrelated text about nothing"
-        generator.doc._page_texts[14] = "Also unrelated"
-        generator.doc._page_texts[16] = "Still unrelated"
-        assert generator._page_contains_heading(16, "Introduction to Probability") is False
-
-    def test_returns_false_for_short_search_text(self, generator):
-        """Titles shorter than 3 chars after normalization are rejected."""
-        generator.doc._page_texts[0] = "AB is here"
-        assert generator._page_contains_heading(1, "AB") is False
-
-    def test_strips_number_prefix(self, generator):
-        """Section number prefixes like '1. ' are stripped before searching."""
-        generator.doc._page_texts[15] = "The Empirical Background of probability"
-        assert generator._page_contains_heading(16, "1. The Empirical Background") is True
-
-    def test_searches_within_window(self, generator):
-        """Heading on an adjacent page (within window) is found."""
-        generator.doc._page_texts[16] = "Introduction to Methods"
-        assert generator._page_contains_heading(16, "Introduction to Methods", window=1) is True
-
-    def test_clamps_to_document_bounds(self, generator):
-        """Search window is clamped to valid page range."""
-        generator.doc._page_texts[0] = "Preface to the Book"
-        # page_number=1, window=1 → search pages 0..1 (clamped, not -1..1)
-        assert generator._page_contains_heading(1, "Preface to the Book") is True
-
-    def test_strips_punctuation_from_title(self, generator):
-        """Colons and other punctuation in the title are stripped before matching."""
-        # PDF text has words as separate spans without punctuation between them
-        generator.doc._page_texts[15] = "Introduction The Nature of Probability Theory"
-        assert generator._page_contains_heading(16, "Introduction: The Nature of Probability Theory") is True
-
-    def test_strips_punctuation_from_page_text(self, generator):
-        """Punctuation in the page text is also stripped."""
-        generator.doc._page_texts[15] = "Chapter I: The Sample Space"
-        assert generator._page_contains_heading(16, "Chapter I The Sample Space") is True
-
-    def test_matches_with_mixed_punctuation(self, generator):
-        """Both title and page text have different punctuation; still matches."""
-        generator.doc._page_texts[15] = "Results — Discussion & Analysis"
-        assert generator._page_contains_heading(16, "Results: Discussion & Analysis") is True
+    def test_short_title_is_not_matchable(self) -> None:
+        assert _HeadingTitle.of("AB").is_matchable() is False
 
 
 class TestCorrectPostprocessedPageNumbers:
@@ -3564,8 +3535,8 @@ class TestIsHeadingCandidateFontSizeRatio:
         )
 
 
-class TestNormalizeSnippet:
-    """Tests for the _normalize_snippet helper."""
+class TestSnippetKey:
+    """Tests for _snippet_key on matching-form text."""
 
     @pytest.mark.parametrize(
         "text,expected",
@@ -3577,10 +3548,14 @@ class TestNormalizeSnippet:
             ("Ab", "ab"),
             ("", ""),
             ("1) First Item", "first item"),
+            # Extraction artifacts and accents are neutralized before the structural normalization.
+            (_KAHLER_SECTION_PDF_TEXT, "kahler potentials"),
+            (_KAHLER_SECTION_TITLE, "kahler potentials"),
+            (_DEFINITIONS_SECTION_PDF_TEXT, "definitions and notation"),
         ],
     )
     def test_normalization(self, text, expected):
-        assert _normalize_snippet(text) == expected
+        assert _snippet_key(matching_form(text)) == expected
 
 
 class TestCorrectRunningHeaderPages:
@@ -3796,7 +3771,7 @@ class TestPageHasHeadingInBottom:
         mock_doc.__getitem__ = lambda self, idx: page
 
         generator = TOCGenerator(mock_doc, mock_llm)
-        assert generator._page_has_heading_in_bottom(1, "Precision and Accuracy") is True
+        assert generator._page_has_heading_in_bottom(1, _HeadingTitle.of("Precision and Accuracy")) is True
 
     def test_ignores_heading_in_top(self, mock_doc, mock_llm):
         """Returns False when heading text is only in the top portion."""
@@ -3813,13 +3788,13 @@ class TestPageHasHeadingInBottom:
         mock_doc.__getitem__ = lambda self, idx: page
 
         generator = TOCGenerator(mock_doc, mock_llm)
-        assert generator._page_has_heading_in_bottom(1, "Precision and Accuracy") is False
+        assert generator._page_has_heading_in_bottom(1, _HeadingTitle.of("Precision and Accuracy")) is False
 
     def test_returns_false_for_out_of_range_page(self, mock_doc, mock_llm):
         """Returns False for page numbers out of document range."""
         generator = TOCGenerator(mock_doc, mock_llm)
-        assert generator._page_has_heading_in_bottom(0, "Title") is False
-        assert generator._page_has_heading_in_bottom(99, "Title") is False
+        assert generator._page_has_heading_in_bottom(0, _HeadingTitle.of("Title")) is False
+        assert generator._page_has_heading_in_bottom(99, _HeadingTitle.of("Title")) is False
 
     def test_returns_false_for_short_title(self, mock_doc, mock_llm):
         """Returns False when title is too short to match reliably."""
@@ -3831,7 +3806,7 @@ class TestPageHasHeadingInBottom:
         mock_doc.__getitem__ = lambda self, idx: page
 
         generator = TOCGenerator(mock_doc, mock_llm)
-        assert generator._page_has_heading_in_bottom(1, "AB") is False
+        assert generator._page_has_heading_in_bottom(1, _HeadingTitle.of("AB")) is False
 
 
 class TestBottomOfPageHeadingExtraction:
@@ -3916,7 +3891,7 @@ class TestFindHeadingPage:
         mock_doc.__getitem__ = lambda _, idx: page
 
         gen = TOCGenerator(mock_doc, mock_llm)
-        result = gen._find_heading_page("Numerical Differentiation", 1, 2)
+        result = gen._find_heading_page(_HeadingTitle.of("Numerical Differentiation"), 1, 2)
         assert result == 1
 
     def test_skips_running_header(self, mock_doc, mock_llm):
@@ -3930,7 +3905,7 @@ class TestFindHeadingPage:
         mock_doc.__getitem__ = lambda _, idx: page
 
         gen = TOCGenerator(mock_doc, mock_llm)
-        result = gen._find_heading_page("Numerical Differentiation", 1, 2)
+        result = gen._find_heading_page(_HeadingTitle.of("Numerical Differentiation"), 1, 2)
         assert result is None
 
     def test_returns_first_matching_page(self, mock_doc, mock_llm):
@@ -3950,18 +3925,18 @@ class TestFindHeadingPage:
         mock_doc.__getitem__ = lambda _, idx: page1 if idx == 0 else page2
 
         gen = TOCGenerator(mock_doc, mock_llm)
-        result = gen._find_heading_page("Numerical Differentiation", 1, 3)
+        result = gen._find_heading_page(_HeadingTitle.of("Numerical Differentiation"), 1, 3)
         assert result == 2
 
     def test_returns_none_for_empty_range(self, mock_doc, mock_llm):
         """Returns None when search range is empty."""
         gen = TOCGenerator(mock_doc, mock_llm)
-        assert gen._find_heading_page("Title", 5, 5) is None
+        assert gen._find_heading_page(_HeadingTitle.of("Title"), 5, 5) is None
 
     def test_returns_none_for_short_title(self, mock_doc, mock_llm):
         """Returns None when title is too short to match reliably."""
         gen = TOCGenerator(mock_doc, mock_llm)
-        assert gen._find_heading_page("Ab", 1, 3) is None
+        assert gen._find_heading_page(_HeadingTitle.of("Ab"), 1, 3) is None
 
     def test_handles_ocr_multi_word_blocks(self, mock_doc, mock_llm):
         """Handles OCR text where heading is split across many spans."""
@@ -3988,7 +3963,7 @@ class TestFindHeadingPage:
         mock_doc.__getitem__ = lambda _, idx: page
 
         gen = TOCGenerator(mock_doc, mock_llm)
-        result = gen._find_heading_page("Numerical Differentiation", 1, 2)
+        result = gen._find_heading_page(_HeadingTitle.of("Numerical Differentiation"), 1, 2)
         assert result == 1
 
     def test_skips_footer_blocks(self, mock_doc, mock_llm):
@@ -4002,7 +3977,7 @@ class TestFindHeadingPage:
         mock_doc.__getitem__ = lambda _, idx: page
 
         gen = TOCGenerator(mock_doc, mock_llm)
-        result = gen._find_heading_page("Some Title in Footer", 1, 2)
+        result = gen._find_heading_page(_HeadingTitle.of("Some Title in Footer"), 1, 2)
         assert result is None
 
     def test_clamps_to_document_bounds(self, mock_doc, mock_llm):
@@ -4012,7 +3987,7 @@ class TestFindHeadingPage:
 
         gen = TOCGenerator(mock_doc, mock_llm)
         # Search beyond doc bounds (page_count=5) — should not crash
-        result = gen._find_heading_page("Target Heading", 1, 100)
+        result = gen._find_heading_page(_HeadingTitle.of("Target Heading"), 1, 100)
         assert result == 1
 
     @pytest.mark.parametrize(
@@ -4036,7 +4011,7 @@ class TestFindHeadingPage:
         mock_doc.__getitem__ = lambda _, idx: pages[idx]
 
         gen = TOCGenerator(mock_doc, mock_llm)
-        assert gen._find_heading_page(title, start_page, end_page, hint_page=hint_page) == expected
+        assert gen._find_heading_page(_HeadingTitle.of(title), start_page, end_page, hint_page=hint_page) == expected
 
 
 class TestCorrectPostprocessedNewEntries:
@@ -4496,7 +4471,7 @@ class TestAnchoredHeadingMatching:
         ],
     )
     def test_anchored_mode(self, title: str, candidate: str, expected: bool) -> None:
-        assert _heading_text_matches_title(title, candidate, anchored=True) is expected
+        assert _HeadingTitle.of(title).matches(candidate, anchored=True) is expected
 
     @pytest.mark.parametrize(
         ("title", "candidate"),
@@ -4506,7 +4481,7 @@ class TestAnchoredHeadingMatching:
         ],
     )
     def test_unanchored_mode_still_matches_mid_text(self, title: str, candidate: str) -> None:
-        assert _heading_text_matches_title(title, candidate) is True
+        assert _HeadingTitle.of(title).matches(candidate) is True
 
 
 class TestFuzzyRestorePrefixAlignment:
@@ -4581,3 +4556,214 @@ class TestFuzzyRestorePrefixAlignment:
         result = generator._correct_postprocessed_page_numbers(original, refined)
 
         assert result.entries[0].page_number == 21
+
+
+class TestExtractionArtifactHeadingMatching:
+    """Deterministic title matching treats extraction-artifact spellings of one heading alike.
+
+    TeX-produced PDF text carries ligature glyphs and spacing accents that the
+    LLM's titles lack (and vice versa when the LLM copies the extracted text),
+    so every comparison between a title and PDF text, or between two titles,
+    must neutralize both sides.
+    """
+
+    PAGE_COUNT = 40
+    PAGE_HEIGHT = 800.0
+    HEADING_Y = 0.15
+    RUNNING_HEADER_Y = 0.03
+    BOTTOM_OF_PAGE_Y = 0.82
+    BODY_TEXT = "Regular body text continues here"
+    RUNNING_HEADER_TEXT = "Running Header Text"
+    HEADING_PAGE = 30
+    POSTPROCESSOR_PAGE_ERROR = 2
+    BLOCKS_PER_PAGE = 3
+    PRINTED_PAGES = (12, 20, 27)
+    PRINTED_TOC_OFFSET = 9
+    DOT_LEADER = "........"
+    SECTION_LEVEL = 2
+    CONFIDENCE = 0.9
+    # A late level-1 entry sets a front-matter offset of its page - 1, which
+    # enables the postprocess heading-search window.
+    FIRST_CHAPTER = TOCEntry(title="Mathematical Preliminaries", page_number=10, level=1, confidence=CONFIDENCE)
+
+    @pytest.fixture
+    def make_doc(self):
+        """Factory for a mock document built from {page_number: [(y_fraction, text), ...]}.
+
+        Pages not listed hold a single body-text block.
+        """
+
+        def _make(page_blocks: dict[int, list[tuple[float, str]]]) -> MagicMock:
+            def page_at(_doc, idx: int) -> MagicMock:
+                blocks = page_blocks.get(idx + 1, [(self.HEADING_Y, self.BODY_TEXT)])
+                page = MagicMock()
+                page.get_text.return_value = {
+                    "height": self.PAGE_HEIGHT,
+                    "blocks": [
+                        {"type": 0, "lines": [{"spans": [{"text": text, "bbox": (0, y * self.PAGE_HEIGHT, 0, 0)}]}]}
+                        for y, text in blocks
+                    ],
+                }
+                return page
+
+            doc = MagicMock()
+            doc.page_count = self.PAGE_COUNT
+            doc.name = None
+            doc.__getitem__ = page_at
+            return doc
+
+        return _make
+
+    @pytest.fixture
+    def make_feature(self):
+        """Factory for a bold heading-sized TOCFeature."""
+
+        def _make(page: int, text: str, y_position: float) -> TOCFeature:
+            return TOCFeature(
+                page_number=page,
+                font_name="Times-Bold",
+                font_size=14.0,
+                text_length=len(text),
+                text_snippet=text,
+                y_position=y_position,
+                is_bold=True,
+            )
+
+        return _make
+
+    def _entry(self, title: str, page_number: int) -> TOCEntry:
+        return TOCEntry(title=title, page_number=page_number, level=self.SECTION_LEVEL, confidence=self.CONFIDENCE)
+
+    def _refined(self, *entries: TOCEntry) -> PostprocessedTOC:
+        """The postprocessor's TOC holding ``entries``, citing no printed pages."""
+        return PostprocessedTOC(entries=[PostprocessedTOCEntry(**entry.model_dump()) for entry in entries])
+
+    @pytest.mark.parametrize("anchored", [True, False])
+    @pytest.mark.parametrize(("title", "pdf_text"), _UNICODE_SPELLING_PAIRS)
+    def test_heading_text_matches_across_spellings(self, title: str, pdf_text: str, anchored: bool) -> None:
+        assert _HeadingTitle.of(title).matches(pdf_text, anchored=anchored) is True
+
+    @pytest.mark.parametrize("anchored", [True, False])
+    def test_neutralizing_keeps_section_prefix_discipline(self, anchored: bool) -> None:
+        next_section_pdf_text = "6.5 K\N{DIAERESIS}ahler Potentials"
+        assert _HeadingTitle.of(_KAHLER_SECTION_TITLE).matches(next_section_pdf_text, anchored=anchored) is False
+
+    @pytest.mark.parametrize(("title", "pdf_text"), _UNICODE_SPELLING_PAIRS)
+    def test_find_heading_page_locates_spelling_variant(self, make_doc, title: str, pdf_text: str) -> None:
+        generator = TOCGenerator(make_doc({self.HEADING_PAGE: [(self.HEADING_Y, pdf_text)]}), MagicMock())
+        claimed_page = self.HEADING_PAGE + self.POSTPROCESSOR_PAGE_ERROR
+
+        found = generator._find_heading_page(_HeadingTitle.of(title), 1, self.PAGE_COUNT + 1, hint_page=claimed_page)
+
+        assert found == self.HEADING_PAGE
+
+    def test_find_heading_page_converts_each_block_once_and_never_the_title(self, make_doc) -> None:
+        """A page-range search reuses the prepared title and converts each text block once."""
+        doc = make_doc(
+            {page: [(self.HEADING_Y, self.BODY_TEXT)] * self.BLOCKS_PER_PAGE for page in range(1, self.PAGE_COUNT + 1)}
+        )
+        generator = TOCGenerator(doc, MagicMock())
+        heading = _HeadingTitle.of(_KAHLER_SECTION_TITLE)
+
+        with patch.object(toc_generator_module, "matching_form", wraps=matching_form) as spy:
+            generator._find_heading_page(heading, 1, self.PAGE_COUNT + 1)
+
+        converted = [call.args[0] for call in spy.call_args_list]
+        assert _KAHLER_SECTION_TITLE not in converted
+        assert len(converted) == self.PAGE_COUNT * self.BLOCKS_PER_PAGE
+
+    def test_postprocess_correction_converts_each_entry_title_once(self, make_doc) -> None:
+        """Restore and verification share one prepared title per refined entry."""
+        generator = TOCGenerator(make_doc({}), MagicMock())
+        new_entry = self._entry(_KAHLER_SECTION_TITLE, self.HEADING_PAGE)
+
+        with (
+            patch.object(toc_generator_module, "matching_form", wraps=matching_form) as matching_spy,
+            patch.object(toc_generator_module, "title_key", wraps=title_key) as title_key_spy,
+        ):
+            generator._correct_postprocessed_page_numbers(
+                TOC(entries=[self.FIRST_CHAPTER]), self._refined(self.FIRST_CHAPTER, new_entry)
+            )
+
+        converted = [call.args[0] for spy in (matching_spy, title_key_spy) for call in spy.call_args_list]
+        assert converted.count(_KAHLER_SECTION_TITLE) == 1
+
+    @pytest.mark.parametrize(("title", "pdf_text"), _UNICODE_SPELLING_PAIRS)
+    def test_page_has_heading_in_bottom_matches_spelling_variant(self, make_doc, title: str, pdf_text: str) -> None:
+        generator = TOCGenerator(make_doc({self.HEADING_PAGE: [(self.BOTTOM_OF_PAGE_Y, pdf_text)]}), MagicMock())
+
+        assert generator._page_has_heading_in_bottom(self.HEADING_PAGE, _HeadingTitle.of(title)) is True
+
+    @pytest.mark.parametrize(("title", "pdf_text"), _UNICODE_SPELLING_PAIRS)
+    def test_running_header_correction_matches_spelling_variant(
+        self, make_doc, make_feature, title: str, pdf_text: str
+    ) -> None:
+        """A title seen only in page N's running header moves to its heading at the bottom of page N-1."""
+        generator = TOCGenerator(make_doc({}), MagicMock())
+        running_header_page = self.HEADING_PAGE + 1
+        features = [
+            [[make_feature(self.HEADING_PAGE, pdf_text, self.BOTTOM_OF_PAGE_Y)]],
+            [[make_feature(running_header_page, pdf_text, self.RUNNING_HEADER_Y)]],
+        ]
+        toc = TOC(entries=[self._entry(title, running_header_page)])
+
+        result = generator._correct_running_header_pages(toc, features)
+
+        assert result.entries[0].page_number == self.HEADING_PAGE
+
+    def test_printed_toc_offset_detected_across_spellings(self, make_doc) -> None:
+        """Printed-TOC lines in the PDF's spelling still anchor the offset of the LLM's titles."""
+        generator = TOCGenerator(make_doc({}), MagicMock())
+        headings = [
+            (_DEFINITIONS_SECTION_TITLE, _DEFINITIONS_SECTION_PDF_TEXT),
+            (_POINCARE_SECTION_TITLE, _POINCARE_SECTION_PDF_TEXT),
+            (_KAHLER_SECTION_TITLE, _KAHLER_SECTION_PDF_TEXT),
+        ]
+        reference_text = "\n".join(
+            f"{pdf_text} {self.DOT_LEADER} {page}"
+            for (_, pdf_text), page in zip(headings, self.PRINTED_PAGES, strict=True)
+        )
+        toc = TOC(
+            entries=[
+                self._entry(title, page + self.PRINTED_TOC_OFFSET)
+                for (title, _), page in zip(headings, self.PRINTED_PAGES, strict=True)
+            ]
+        )
+
+        assert generator._detect_reference_toc_offset(toc, reference_text) == self.PRINTED_TOC_OFFSET
+
+    @pytest.mark.parametrize(("title", "pdf_text"), _UNICODE_SPELLING_PAIRS)
+    def test_postprocess_relocates_new_entry_to_spelling_variant(self, make_doc, title: str, pdf_text: str) -> None:
+        """A new postprocessor entry claimed a few pages late moves to the page printing its heading."""
+        doc = make_doc(
+            {self.HEADING_PAGE: [(self.RUNNING_HEADER_Y, self.RUNNING_HEADER_TEXT), (self.HEADING_Y, pdf_text)]}
+        )
+        generator = TOCGenerator(doc, MagicMock())
+        claimed_page = self.HEADING_PAGE + self.POSTPROCESSOR_PAGE_ERROR
+        original = TOC(entries=[self.FIRST_CHAPTER])
+        refined = self._refined(self.FIRST_CHAPTER, self._entry(title, claimed_page))
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        relocated = next(entry for entry in result.entries if entry.title == title)
+        assert relocated.page_number == self.HEADING_PAGE
+
+    @pytest.mark.parametrize(("title", "pdf_text"), _UNICODE_SPELLING_PAIRS)
+    def test_postprocess_restores_respelled_existing_entry(self, make_doc, title: str, pdf_text: str) -> None:
+        """A first-pass entry the postprocessor respelled keeps its first-pass page."""
+        generator = TOCGenerator(make_doc({}), MagicMock())
+        claimed_page = self.HEADING_PAGE + self.POSTPROCESSOR_PAGE_ERROR
+        # The first pass copied the extracted spelling; the postprocessor wrote its own.
+        original = TOC(entries=[self._entry(pdf_text, self.HEADING_PAGE)])
+        refined = self._refined(self._entry(title, claimed_page))
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert result.entries[0].page_number == self.HEADING_PAGE
+
+    @pytest.mark.parametrize("pdf_text", [pdf_text for _, pdf_text in _UNICODE_SPELLING_PAIRS])
+    def test_llm_payload_keeps_extracted_spelling(self, make_feature, pdf_text: str) -> None:
+        """Folding is for matching only: the features sent to the LLM keep the PDF's own spelling."""
+        features = [[[make_feature(self.HEADING_PAGE, pdf_text, self.HEADING_Y)]]]
+
+        assert pdf_text in serialize_features_compact(filter_features_for_llm(features))
