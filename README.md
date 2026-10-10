@@ -129,6 +129,7 @@ Page numbers taken from a printed TOC are converted to PDF pages using the page 
 | `--ocr-language` | Set OCR language (default: `eng`). Use [Tesseract language codes](https://tesseract-ocr.github.io/tessdoc/Data-Files-in-different-versions.html) |
 | `--request-delay` | Delay between LLM calls for rate limiting (default: 10s) |
 | `--reasoning-effort` | Reasoning effort level for models that support it (unset by default) |
+| `--show-token-usage / --no-show-token-usage` | Display token usage statistics (default: enabled) |
 
 ### extract-text
 
@@ -185,9 +186,9 @@ The input file supports comments (lines starting with `#`) and blank lines are i
 **Workflow:**
 
 1. The tool analyzes each filename and generates rename suggestions
-2. A preview table shows original names, proposed names, confidence scores, and reasoning
+2. A preview table shows original names, proposed names, confidence scores, and reasoning. Suggestions that cannot be applied safely (paths, hidden or unsafe names, collisions) are skipped and listed with the reason; see [docs/usage.md](docs/usage.md#rename) for the rules
 3. Confirm or cancel the operation (unless `-y` is used)
-4. Files are renamed in place
+4. Files are renamed in place, never over an existing file
 
 **Automatic confirmation:**
 
@@ -203,7 +204,7 @@ pdfalive rename -q "Add sequential numbering prefix" -y *.pdf
 | `--model-identifier` | Choose which LLM to use (default: `gpt-5.6`) |
 | `--reasoning-effort` | Reasoning effort level for models that support it (unset by default) |
 | `-y, --yes` | Automatically apply renames without confirmation |
-| `--show-token-usage` | Display token usage statistics (default: enabled) |
+| `--show-token-usage / --no-show-token-usage` | Display token usage statistics (default: enabled) |
 
 ## Configuration
 
@@ -221,7 +222,7 @@ pdfalive supports TOML configuration files for setting default options. This is 
 [global]
 model-identifier = "gpt-5.6"
 reasoning-effort = "medium"   # optional; omit to use the provider's default
-show-token-usage = true
+show-token-usage = true      # false hides the token usage summary
 
 # Settings for generate-toc command
 [generate-toc]

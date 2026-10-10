@@ -62,6 +62,12 @@ OCR is enabled by default. Scanned documents without extractable text will be au
 	# Disable automatic OCR entirely
 	pdfalive generate-toc --no-ocr input.pdf output.pdf
 
+**Token usage:**
+
+A summary of the LLM calls' token usage follows the result. Hide it with `--no-show-token-usage` (or `show-token-usage = false` in the config file):
+
+	pdfalive generate-toc --no-show-token-usage input.pdf output.pdf
+
 **OCR options:**
 
 	# Use a different language for OCR (default: English)
@@ -167,9 +173,22 @@ The input file should contain one path per line. Lines starting with `#` are tre
 **Workflow:**
 
 1. The tool analyzes each filename and generates rename suggestions
-2. A preview table shows original names, proposed new names, confidence scores, and reasoning
+2. A preview table shows original names, proposed new names, confidence scores, and reasoning. A suggestion that keeps a file's current name is dropped silently. Suggestions that cannot be applied safely are skipped and listed with the reason:
+   - a new name that is not a plain file name on this system: a path (`../name.pdf`, `sub/name.pdf`, `/abs/name.pdf`), `.` or `..`, or an empty name. On Windows that includes a drive (`C:name.pdf`, `C: Foo.pdf`, `X: The Unknown.pdf`) and a backslash; on macOS and Linux a colon or backslash is an ordinary character, so `X: The Unknown.pdf` is a plain name there
+   - on Windows, a name Windows reserves or forbids: a device name with or without an extension (`CON`, `NUL`, `COM1`, `nul.txt`), a trailing dot or space, or a character such as `?`, `|` or `"` (checked with `ntpath.isreserved()`)
+   - a new name that is hard to see, type or use: one with characters that act on the terminal or the displayed line (control characters such as a newline or tab, bidi controls such as the right-to-left override, line and paragraph separators), invisible marks (zero-width space, byte order mark, word joiner, left-to-right, right-to-left and Arabic letter marks; the zero-width joiner and non-joiner some scripts need are allowed) or an undecodable byte, one starting or ending with whitespace, or one starting with a dot when the file's current name does not (it would hide the file)
+   - a suggestion for a file that is not an input
+   - two suggestions giving files the same new name, compared without regard to letter case or Unicode normalization (both are skipped)
+   - a new name that is another input's current name, in any letter case, normalization or path spelling: swaps and chains of renames are not attempted, since their result would depend on the order they run in
 3. You confirm or cancel the operation (unless `-y` is used)
-4. Files are renamed in place (same directory)
+4. Files are renamed in place (same directory). An existing file at the new name is never replaced: a case-only rename (`Report.pdf` to `report.pdf`) on a case-insensitive file system is the only rename onto a name that already exists, allowed only when the new name's exact spelling is not itself listed in the directory and it reaches the file's own entry, so a symlink or another file's hard link is never renamed onto. If any rename fails, the others are still attempted and the command exits with status 1
+5. A token usage summary follows, whatever the outcome, even when the prompt is aborted or a later batch of LLM calls fails: it covers every call that completed (hide it with `--no-show-token-usage`)
+
+With `-y`, a run in which any suggestion was skipped exits with status 1, whether or not the other renames were applied, since nobody saw the skipped list. A run that got no suggestions, or only suggestions keeping the current names, exits with status 0.
+
+Input files must have unique names, even across directories, compared without regard to letter case or Unicode normalization: suggestions are matched to files by name. This is checked before any LLM call. A file given more than once, in any spelling (relative or absolute, through `..` or a symlinked directory, or in another letter case on a case-insensitive file system), is counted and renamed once. A symlink and the file it points to, and two hard links of one file, are separate inputs.
+
+**Known limitation:** the check that the new name is free and the rename itself are two steps, so another program creating a file with that exact name in between would have it replaced. Python's standard library has no portable rename that refuses to replace an existing file.
 
 
 ### eval
@@ -245,7 +264,7 @@ pdfalive supports TOML configuration files for setting default CLI options. This
 	[global]
 	model-identifier = "gpt-5.6"
 	reasoning-effort = "medium"   # optional; omit to use the provider's default
-	show-token-usage = true
+	show-token-usage = true      # false hides the token usage summary
 
 	# Settings for generate-toc command
 	[generate-toc]
