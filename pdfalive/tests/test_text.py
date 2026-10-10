@@ -10,6 +10,7 @@ from pdfalive.text import (
     artifact_neutral_form,
     has_extraction_artifacts,
     matching_form,
+    repair_extracted_text,
     strip_punctuation,
     title_key,
 )
@@ -170,3 +171,70 @@ class TestTitleKey:
     @pytest.mark.parametrize(("left", "right"), [("2.11 Exercises", "21.1 Exercises"), ("1.10 Notes", "11.0 Notes")])
     def test_numbering_stays_distinct(self, left: str, right: str) -> None:
         assert title_key(left) != title_key(right)
+
+
+# (extracted title, title as the document prints it)
+DISPLAY_REPAIRS = [
+    ("De\N{LATIN SMALL LIGATURE FI}nitions and Notation", "Definitions and Notation"),
+    ("A\N{LATIN SMALL LIGATURE FFI}ne Maps", "Affine Maps"),
+    ("Fa\N{LATIN SMALL LIGATURE ST} Decay", "Fast Decay"),
+    ("6.4 K\N{DIAERESIS}ahler Potentials", "6.4 Kähler Potentials"),
+    ("Poincar\N{ACUTE ACCENT}e Maps", "Poincaré Maps"),
+    ("POINCAR\N{ACUTE ACCENT}E MAPS", "POINCARÉ MAPS"),
+    ("\N{ACUTE ACCENT}Etale Covers", "Étale Covers"),
+    ("\N{CARON}Cech Cohomology", "Čech Cohomology"),
+    ("Erd\N{DOUBLE ACUTE ACCENT}os Numbers", "Erdős Numbers"),
+    ("\N{RING ABOVE}Angstr\N{DIAERESIS}om", "Ångström"),
+    ("H\N{MODIFIER LETTER CIRCUMFLEX ACCENT}opital", "Hôpital"),
+    ("Probl`emes Ouverts", "Problèmes Ouverts"),
+    ("`a tous", "à tous"),
+    # A cedilla attaches to whichever neighbor commonly carries one.
+    ("Fran\N{CEDILLA}cois", "François"),
+    ("C\N{CEDILLA}etin Algebras", "Çetin Algebras"),
+    ("Aperc\N{CEDILLA}u", "Aperçu"),
+    # Stacked accents, outermost first.
+    ("Vi\N{ACUTE ACCENT}\N{MODIFIER LETTER CIRCUMFLEX ACCENT}et Lattices", "Viết Lattices"),
+    # TeX's dotless i under an accent.
+    ("na\N{DIAERESIS}\N{LATIN SMALL LETTER DOTLESS I}ve", "naïve"),
+    ("Mart\N{ACUTE ACCENT}\N{LATIN SMALL LETTER DOTLESS I}nez", "Martínez"),
+    # An acute or grave in an apostrophe position is an apostrophe.
+    ("Hilbert\N{ACUTE ACCENT}s Theorem", "Hilbert's Theorem"),
+    ("Euler\N{ACUTE ACCENT}sche Formeln", "Euler'sche Formeln"),
+    ("d\N{ACUTE ACCENT}Alembert Operators", "d'Alembert Operators"),
+    ("Why It Doesn`t Converge", "Why It Doesn't Converge"),
+    # Decomposed accents are composed.
+    ("Ka\N{COMBINING DIAERESIS}hler", "Kähler"),
+]
+
+# Titles the repair leaves as they are: ambiguous artifacts, notation and clean text.
+DISPLAY_UNCHANGED = [
+    "O\N{ACUTE ACCENT}Neill Spaces",
+    "`apply` Basics",
+    "Mie\N{CEDILLA}kisz",
+    "\N{MACRON}B Operators",
+    "L^p Spaces",
+    "x ~ y",
+    "S\N{SUPERSCRIPT TWO} and H\N{SUBSCRIPT ONE}",
+    "I\N{LATIN SMALL LETTER S WITH CEDILLA}\N{LATIN SMALL LETTER DOTLESS I}k",
+    "CHAPTER 3: Overview",
+]
+
+
+class TestRepairExtractedText:
+    @pytest.mark.parametrize(("extracted", "printed"), DISPLAY_REPAIRS)
+    def test_repairs_artifacts(self, extracted: str, printed: str) -> None:
+        assert repair_extracted_text(extracted) == printed
+
+    @pytest.mark.parametrize("title", DISPLAY_UNCHANGED)
+    def test_leaves_ambiguous_and_clean_text(self, title: str) -> None:
+        assert repair_extracted_text(title) == title
+
+    @pytest.mark.parametrize(
+        "title", [extracted for extracted, _ in DISPLAY_REPAIRS] + DISPLAY_UNCHANGED + ["a\N{GREEK OXIA}b"]
+    )
+    def test_is_idempotent(self, title: str) -> None:
+        assert repair_extracted_text(repair_extracted_text(title)) == repair_extracted_text(title)
+
+    @pytest.mark.parametrize(("extracted", "printed"), DISPLAY_REPAIRS)
+    def test_repaired_title_still_matches(self, extracted: str, printed: str) -> None:
+        assert title_key(repair_extracted_text(extracted)) == title_key(extracted)

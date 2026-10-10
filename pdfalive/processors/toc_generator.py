@@ -213,7 +213,7 @@ _MAX_DROPPED_ENTRIES_SHOWN = 5
 # "K¨ahler") compares equal to the LLM's spellings ("Definitions", "Kähler",
 # "Kahler"), and every length threshold applied to a key measures that form.
 # Keys are only ever compared: features, reference text and prompts sent to
-# the LLM, and titles written as bookmarks, keep their original spelling.
+# the LLM keep their original spelling.
 _DOTTED_NUMBER = r"\d+(?:\.\d+)*"
 _DOTTED_NUMBER_PATTERN = re.compile(_DOTTED_NUMBER)
 _LEADING_NUMBERING_PATTERN = re.compile(rf"^{_DOTTED_NUMBER}[\.\)]*\s*")  # "1. ", "3.2 ", "1) "
@@ -1058,9 +1058,13 @@ class TOCGenerator:
             toc, postprocess_usage = self._postprocess_toc(toc, features)
             usage = usage + postprocess_usage
 
-        # Deduplicate and enforce page number monotonicity after all corrections.
-        # Postprocessing may produce duplicate entries (e.g., "Exercises" added once
-        # per chapter from a printed TOC but all mapping to the same page).
+        # Final cleanup. Repair extraction artifacts the LLM copied into titles
+        # ("K¨ahler" -> "Kähler") first, so a heading listed in both spellings
+        # deduplicates to the repaired one. Postprocessing may also produce
+        # duplicate entries (e.g., "Exercises" added once per chapter from a
+        # printed TOC but all mapping to the same page). Then enforce page
+        # number monotonicity and a valid hierarchy.
+        toc = toc.with_repaired_titles()
         toc = toc.deduplicate()
         toc = self._drop_out_of_range_entries(toc)
         toc = toc.sort_by_page()

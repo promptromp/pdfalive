@@ -283,6 +283,39 @@ class TestTOCGenerator:
         assert real_doc.get_toc() == [entry.to_list() for entry in in_range]
 
     @pytest.mark.parametrize(
+        ("extracted_title", "repaired_title"),
+        [
+            (_KAHLER_SECTION_PDF_TEXT, _KAHLER_SECTION_TITLE),
+            (_DEFINITIONS_SECTION_PDF_TEXT, _DEFINITIONS_SECTION_TITLE),
+            (_POINCARE_SECTION_PDF_TEXT, _POINCARE_SECTION_TITLE),
+        ],
+    )
+    def test_run_writes_repaired_bookmark_titles(
+        self, real_doc, mock_llm, make_toc_entry, extracted_title, repaired_title
+    ):
+        """A title the LLM copied with extraction artifacts is written to the PDF repaired."""
+        mock_llm.with_structured_output.return_value.invoke.return_value = TOC(
+            entries=[make_toc_entry(title=extracted_title, page_number=1)]
+        )
+
+        TOCGenerator(doc=real_doc, llm=mock_llm).run(output_file=None, force=True, request_delay=0)
+
+        assert [title for _, title, _ in real_doc.get_toc()] == [repaired_title]
+
+    def test_run_collapses_extracted_and_clean_spellings(self, real_doc, mock_llm, make_toc_entry):
+        """One heading listed in both its extracted and its clean spelling becomes one bookmark."""
+        mock_llm.with_structured_output.return_value.invoke.return_value = TOC(
+            entries=[
+                make_toc_entry(title=_KAHLER_SECTION_PDF_TEXT, page_number=1),
+                make_toc_entry(title=_KAHLER_SECTION_TITLE, page_number=1),
+            ]
+        )
+
+        TOCGenerator(doc=real_doc, llm=mock_llm).run(output_file=None, force=True, request_delay=0)
+
+        assert [title for _, title, _ in real_doc.get_toc()] == [_KAHLER_SECTION_TITLE]
+
+    @pytest.mark.parametrize(
         "dropped_count,expected_noun",
         [(1, "entry"), (_MAX_DROPPED_ENTRIES_SHOWN, "entries"), (_MAX_DROPPED_ENTRIES_SHOWN + 2, "entries")],
     )

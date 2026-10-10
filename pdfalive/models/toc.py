@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, Field
 
-from pdfalive.text import artifact_neutral_form, has_extraction_artifacts
+from pdfalive.text import artifact_neutral_form, has_extraction_artifacts, repair_extracted_text
 
 
 class TOCEntry(BaseModel):
@@ -137,6 +137,18 @@ class TOC(BaseModel):
             return self
         sorted_entries = sorted(self.entries, key=lambda e: (e.page_number, e.level))
         return TOC(entries=sorted_entries)
+
+    def with_repaired_titles(self) -> "TOC":
+        """Return a copy with PDF text-extraction artifacts repaired in every title.
+
+        Titles the LLM copies from extracted text can carry ligature glyphs or
+        TeX spacing accents ("K¨ahler"); bookmarks should read "Kähler". The
+        repair (see pdfalive.text.repair_extracted_text) leaves any artifact
+        whose letter is ambiguous, and keeps case and punctuation.
+        """
+        return TOC(
+            entries=[entry.model_copy(update={"title": repair_extracted_text(entry.title)}) for entry in self.entries]
+        )
 
     def deduplicate(self) -> "TOC":
         """Remove duplicate entries: those with the same identity key (see TOCEntry.identity_key).

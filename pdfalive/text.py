@@ -1,13 +1,15 @@
-"""Comparison forms that neutralize PDF text-extraction artifacts.
+"""Handling of PDF text-extraction artifacts in titles: matching forms and display repair.
 
 TeX-produced PDFs extract some characters in forms no title is written in:
 ligature glyphs ("Deﬁnitions") and accents set as separate spacing characters
-next to their letter ("K¨ahler", "Poincar´e", "ˇCech", "C¸etin"). The forms
-here make such text compare equal to the plain, composed or accent-less
-spellings an LLM writes ("Definitions", "Kähler", "Kahler", "Čech", "Çetin").
-They do so by removing accents from both sides rather than by guessing which
-letter a spacing accent belongs to, so the result does not depend on where
-extraction placed the accent:
+next to their letter ("K¨ahler", "Poincar´e", "ˇCech", "C¸etin"). This module
+handles them in two separate ways.
+
+Matching. The comparison forms make such text compare equal to the plain,
+composed or accent-less spellings an LLM writes ("Definitions", "Kähler",
+"Kahler", "Čech", "Çetin"). They remove accents from both sides rather than
+guess which letter a spacing accent belongs to, so the result does not depend
+on where extraction placed the accent:
 
 - ``artifact_neutral_form`` expands Latin ligatures, drops Latin diacritics
   and spacing accents and dots TeX's dotless i/j, keeping case and
@@ -16,12 +18,17 @@ extraction placed the accent:
 
 Only Latin combining diacritics (U+0300–U+036F) are dropped and only canonical
 normalization is applied, so super- and subscripts ("S²", "H₁"), kana voicing
-marks, Hangul and symbols such as "™" keep their identity.
+marks, Hangul and symbols such as "™" keep their identity. These forms are
+only ever compared, never sent to the LLM or written to a bookmark.
 
-These forms are only ever compared: nothing here is sent to the LLM or written
-to a bookmark. The TOC pipeline (``processors``), the TOC model (``models``) and
-the evaluation metrics (``evaluation``) all build their title keys from these
-primitives, each with its own punctuation policy.
+Display. ``repair_extracted_text`` repairs bookmark titles the LLM copied
+from extracted text: it expands ligatures and puts a spacing accent back on
+its letter where that letter is unambiguous, leaving any other artifact as
+extracted. It is never used for matching.
+
+The TOC pipeline (``processors``), the TOC model (``models``) and the
+evaluation metrics (``evaluation``) all build their title keys from the
+matching primitives here, each with its own punctuation policy.
 """
 
 import re
@@ -139,3 +146,148 @@ def strip_punctuation(text: str, pattern: re.Pattern[str] = PUNCTUATION_PATTERN,
 def title_key(title: str) -> str:
     """Key for title-to-title matching: matching form without punctuation, keeping numbering distinct."""
     return strip_punctuation(matching_form(title), PUNCTUATION_OUTSIDE_NUMBERS_PATTERN)
+
+
+# --- Display repair of bookmark titles --------------------------------------
+#
+# The forms above remove accents; bookmark titles should instead read as the
+# document prints them. repair_extracted_text() puts a spacing accent back on
+# its letter only where that letter is unambiguous and otherwise leaves the
+# artifact as extracted, so it never writes a wrong letter.
+
+# TeX's accent glyphs as PDF extraction yields them (via the Adobe Glyph
+# List), with their modifier-letter variants, mapped to the combining mark
+# each one stands for. ASCII "^" and "~" are absent: TeX's circumflex and
+# tilde extract as U+02C6 and U+02DC, and the ASCII characters are notation.
+_ACCENT_COMBINING_MARKS = {
+    "\N{GRAVE ACCENT}": "\N{COMBINING GRAVE ACCENT}",
+    "\N{MODIFIER LETTER GRAVE ACCENT}": "\N{COMBINING GRAVE ACCENT}",
+    "\N{ACUTE ACCENT}": "\N{COMBINING ACUTE ACCENT}",
+    "\N{MODIFIER LETTER ACUTE ACCENT}": "\N{COMBINING ACUTE ACCENT}",
+    "\N{MODIFIER LETTER CIRCUMFLEX ACCENT}": "\N{COMBINING CIRCUMFLEX ACCENT}",
+    "\N{SMALL TILDE}": "\N{COMBINING TILDE}",
+    "\N{MACRON}": "\N{COMBINING MACRON}",
+    "\N{MODIFIER LETTER MACRON}": "\N{COMBINING MACRON}",
+    "\N{BREVE}": "\N{COMBINING BREVE}",
+    "\N{DOT ABOVE}": "\N{COMBINING DOT ABOVE}",
+    "\N{DIAERESIS}": "\N{COMBINING DIAERESIS}",
+    "\N{RING ABOVE}": "\N{COMBINING RING ABOVE}",
+    "\N{DOUBLE ACUTE ACCENT}": "\N{COMBINING DOUBLE ACUTE ACCENT}",
+    "\N{CARON}": "\N{COMBINING CARON}",
+    "\N{CEDILLA}": "\N{COMBINING CEDILLA}",
+    "\N{OGONEK}": "\N{COMBINING OGONEK}",
+}
+_ACCENT_RUN_PATTERN = re.compile(_character_class(_ACCENT_COMBINING_MARKS) + "+")
+_LIGATURE_PATTERN = re.compile(_character_class(_LIGATURE_EXPANSIONS))
+
+# Acute and grave accents double as typed apostrophes ("Hilbert´s", "d´Alembert").
+_ACUTE_ACCENTS = frozenset({"\N{ACUTE ACCENT}", "\N{MODIFIER LETTER ACUTE ACCENT}"})
+_GRAVE_ACCENTS = frozenset({"\N{GRAVE ACCENT}", "\N{MODIFIER LETTER GRAVE ACCENT}"})
+_APOSTROPHE_LIKE_ACCENTS = _ACUTE_ACCENTS | _GRAVE_ACCENTS
+_APOSTROPHE = "'"
+
+# TeX emits every accent ahead of its letter except the cedilla and the
+# ogonek, which extraction can place on either side ("Fran¸cois", "C¸etin").
+# Those attach to whichever neighbor is one of the letters that commonly carry
+# them (ç ş ţ; ą ę į ǫ ų), and only when exactly one neighbor is.
+_EITHER_SIDE_ACCENT_BASES = {
+    "\N{CEDILLA}": frozenset("cst"),
+    "\N{OGONEK}": frozenset("aeiou"),
+}
+
+# Acute and grave compose only onto vowels: before a consonant the accent is
+# an apostrophe or ambiguous ("O´Neill").
+_VOWELS = frozenset("aeiouy")
+
+
+def _expand_ligature(match: re.Match[str]) -> str:
+    return _LIGATURE_EXPANSIONS[match.group()]
+
+
+def _base_letter(letter: str) -> str:
+    """A letter without its accents, dotted and casefolded."""
+    return _DOTLESS_LETTERS.get(letter, unicodedata.normalize(_CANONICAL_DECOMPOSITION, letter)[0]).casefold()
+
+
+def _is_vowel(letter: str) -> bool:
+    return _base_letter(letter) in _VOWELS
+
+
+def _compose(base: str, accents: str) -> str | None:
+    """``base`` with ``accents`` (outermost first, as TeX emits them) as one precomposed letter, if Unicode has it."""
+    marks = "".join(_ACCENT_COMBINING_MARKS[accent] for accent in reversed(accents))
+    composed = unicodedata.normalize(_CANONICAL_COMPOSITION, _DOTLESS_LETTERS.get(base, base) + marks)
+    is_single_letter = len(composed) == 1
+    return composed if is_single_letter else None
+
+
+def _is_apostrophe_position(before: str, after: str) -> bool:
+    """Whether an acute or grave between these letters is a typed apostrophe.
+
+    Between two consonants ("Hilbert´s", "Euler´sche") or between a lowercase
+    and an uppercase letter ("d´Alembert") no accented letter is plausible.
+    """
+    if not before or not after:
+        return False
+    between_consonants = not _is_vowel(before) and not _is_vowel(after)
+    return between_consonants or (before.islower() and after.isupper())
+
+
+def _repaired_accent_run(before: str, accents: str, after: str, following: str) -> str | None:
+    """Replacement for ``before + accents + after``, or None to leave the artifact as extracted.
+
+    ``before`` and ``after`` are the neighboring letters ("" if none) and
+    ``following`` is the character after ``after``.
+    """
+    if len(accents) == 1 and accents in _APOSTROPHE_LIKE_ACCENTS and _is_apostrophe_position(before, after):
+        return before + _APOSTROPHE + after
+    if len(accents) == 1 and accents in _EITHER_SIDE_ACCENT_BASES:
+        bases = _EITHER_SIDE_ACCENT_BASES[accents]
+        before_fits = bool(before) and _base_letter(before) in bases
+        after_fits = bool(after) and _base_letter(after) in bases
+        if before_fits == after_fits:
+            return None
+        composed = _compose(before if before_fits else after, accents)
+        if composed is None:
+            return None
+        return composed + after if before_fits else before + composed
+    if not after or any(accent in _EITHER_SIDE_ACCENT_BASES for accent in accents):
+        return None
+    if any(accent in _APOSTROPHE_LIKE_ACCENTS for accent in accents) and not _is_vowel(after):
+        return None
+    # A grave starting a word stands only for a one-letter word ("`a" -> "à");
+    # before a longer word it is a code backtick ("`apply`").
+    if any(accent in _GRAVE_ACCENTS for accent in accents) and not before and following.isalpha():
+        return None
+    composed = _compose(after, accents)
+    return None if composed is None else before + composed
+
+
+def repair_extracted_text(text: str) -> str:
+    """Best-effort repair of PDF text-extraction artifacts for display (bookmark titles).
+
+    Expands Latin ligatures, puts each TeX spacing accent back on its letter
+    ("K¨ahler" -> "Kähler", "C¸etin" -> "Çetin", "na¨ıve" -> "naïve",
+    "Vi´ˆet" -> "Việt") and reads an acute or grave in an apostrophe position
+    as an apostrophe ("Hilbert´s" -> "Hilbert's"). An accent whose letter is
+    ambiguous is left as extracted. Case and punctuation are kept, and the
+    result is NFC.
+
+    This is for display only; matching uses matching_form(), which removes
+    accents instead of placing them.
+    """
+    text = unicodedata.normalize(_CANONICAL_COMPOSITION, _LIGATURE_PATTERN.sub(_expand_ligature, text))
+    pieces: list[str] = []
+    position = 0
+    for run in _ACCENT_RUN_PATTERN.finditer(text):
+        start, end = run.span()
+        before = text[start - 1] if start > position and text[start - 1].isalpha() else ""
+        after = text[end] if end < len(text) and text[end].isalpha() else ""
+        replacement = _repaired_accent_run(before, run.group(), after, text[end + 1 : end + 2])
+        if replacement is None:
+            continue
+        pieces.append(text[position : start - len(before)])
+        pieces.append(replacement)
+        position = end + len(after)
+    pieces.append(text[position:])
+    return unicodedata.normalize(_CANONICAL_COMPOSITION, "".join(pieces))

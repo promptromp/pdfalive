@@ -243,6 +243,49 @@ class TestTOCIdentityDuplicates:
         assert len(toc.deduplicate().entries) == len(toc.entries)
 
 
+class TestTOCWithRepairedTitles:
+    """with_repaired_titles() repairs extraction artifacts in titles and changes nothing else."""
+
+    PAGE = 7
+    LEVEL = 2
+    CONFIDENCE = 0.8
+
+    @pytest.mark.parametrize(
+        ("title", "repaired"),
+        [
+            ("6.4 K\N{DIAERESIS}ahler Potentials", "6.4 Kähler Potentials"),
+            ("3.1 De\N{LATIN SMALL LIGATURE FI}nitions and Notation", "3.1 Definitions and Notation"),
+            ("Hilbert\N{ACUTE ACCENT}s Theorem", "Hilbert's Theorem"),
+            ("Ka\N{COMBINING DIAERESIS}hler Manifolds", "Kähler Manifolds"),
+            # Case and punctuation are kept: only artifacts are repaired.
+            ("CHAPTER 3: De\N{LATIN SMALL LIGATURE FI}nitions", "CHAPTER 3: Definitions"),
+            ("Chapter 1: Distance and Angles", "Chapter 1: Distance and Angles"),
+            # An accent whose letter is ambiguous is left as extracted.
+            ("8.2 O\N{ACUTE ACCENT}Neill Spaces", "8.2 O\N{ACUTE ACCENT}Neill Spaces"),
+        ],
+    )
+    def test_repairs_title_artifacts(self, make_toc, title: str, repaired: str) -> None:
+        toc = make_toc((title, self.PAGE, self.LEVEL))
+
+        assert [entry.title for entry in toc.with_repaired_titles().entries] == [repaired]
+
+    def test_keeps_other_fields_order_and_original(self, make_toc_entry) -> None:
+        artifact_title, clean_title = "6.4 K\N{DIAERESIS}ahler Potentials", "Index"
+        entries = [
+            make_toc_entry(title=artifact_title, page_number=self.PAGE, level=self.LEVEL, confidence=self.CONFIDENCE),
+            make_toc_entry(title=clean_title, page_number=self.PAGE + 1, level=self.LEVEL - 1),
+        ]
+        toc = TOC(entries=entries)
+
+        repaired = toc.with_repaired_titles()
+
+        assert [(e.page_number, e.level, e.confidence) for e in repaired.entries] == [
+            (e.page_number, e.level, e.confidence) for e in entries
+        ]
+        assert repaired.entries[1].title == clean_title
+        assert toc.entries[0].title == artifact_title
+
+
 class TestTOCSanitizeHierarchy:
     """Tests for TOC.sanitize_hierarchy() — ensures PyMuPDF set_toc() compatibility."""
 
