@@ -11,6 +11,7 @@ from difflib import SequenceMatcher
 from pydantic import BaseModel, Field
 
 from pdfalive.models.toc import TOC, TOCEntry
+from pdfalive.text import APOSTROPHE_PATTERN, matching_form, strip_punctuation
 
 
 # Minimum normalized-title similarity for a golden/generated pair to count as a match.
@@ -19,8 +20,11 @@ DEFAULT_SIMILARITY_THRESHOLD = 0.8
 # Page tolerance used by the within-tolerance accuracy in summaries and CLI gates.
 SUMMARY_PAGE_TOLERANCE = 1
 
-_PUNCTUATION_PATTERN = re.compile(r"[^\w\s]")
-_WHITESPACE_PATTERN = re.compile(r"\s+")
+# Punctuation separates words when scoring ("1, §1. Lines" -> "1 1 lines"), so
+# strip_section_prefix() sees each numbering token on its own. Apostrophes
+# instead join the parts of a word, as do the spacing accents matching_form()
+# removes, so "O'Neill" and an extracted "O´Neill" tokenize alike.
+_PUNCTUATION_REPLACEMENT = " "
 
 # Roman numerals i through xxxix, restricted to i/v/x so ordinary words made of
 # roman letters ("mix", "did", "civil") are never mistaken for a numeral.
@@ -66,9 +70,15 @@ class GoldenEntry(BaseModel):
 
 
 def normalize_title(title: str) -> str:
-    """Normalize a title for comparison: lowercase, no punctuation, collapsed whitespace."""
-    title = _PUNCTUATION_PATTERN.sub(" ", title.lower())
-    return _WHITESPACE_PATTERN.sub(" ", title).strip()
+    """Normalize a title for comparison: matching form, apostrophes removed, other punctuation as spaces.
+
+    The matching form (see pdfalive.text.matching_form) neutralizes PDF
+    extraction artifacts and accents, so a generated title that copies the
+    PDF's extracted spelling ("K¨ahler", "Deﬁnitions") pairs with the golden's
+    clean one.
+    """
+    joined = strip_punctuation(matching_form(title), APOSTROPHE_PATTERN)
+    return strip_punctuation(joined, replacement=_PUNCTUATION_REPLACEMENT)
 
 
 def strip_section_prefix(normalized_title: str) -> str:
