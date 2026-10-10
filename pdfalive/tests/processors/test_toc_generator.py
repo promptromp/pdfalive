@@ -5,8 +5,9 @@ from unittest.mock import MagicMock, patch
 import pymupdf
 import pytest
 
-from pdfalive.models.toc import TOC, TOCEntry, TOCFeature
+from pdfalive.models.toc import TOC, PostprocessedTOC, PostprocessedTOCEntry, TOCEntry, TOCFeature
 from pdfalive.processors import toc_generator as toc_generator_module
+from pdfalive.processors.printed_pages import PrintedPageMap
 from pdfalive.processors.toc_generator import (
     _BOTTOM_OF_PAGE_Y_THRESHOLD,
     _FRONT_MATTER_TITLE_PATTERN,
@@ -15,6 +16,7 @@ from pdfalive.processors.toc_generator import (
     _HEADING_FONT_SIZE_RATIO_PHASE2,
     _LETTERSPACED_PATTERN,
     _MAX_DROPPED_ENTRIES_SHOWN,
+    _MAX_FOLIO_MATCH_DISTANCE,
     _MAX_HEADING_CANDIDATES_PER_PAGE,
     _RUNNING_HEADER_Y_THRESHOLD,
     _SECTION_NUMBER_PATTERN,
@@ -41,6 +43,19 @@ _BATCH_DESCRIPTION = "batch 1/1"
 
 # Two titles, each harmless alone, that form a "[x' ... 'y]" markup tag once joined into one message.
 _TAG_FORMING_TITLES = ("[x", "y]")
+
+# Confidence given to entries built by the test helpers below.
+_HELPER_CONFIDENCE = 0.9
+
+
+def make_refined_toc(entries_data: list[tuple[str, int, int]]) -> PostprocessedTOC:
+    """A postprocessor result from (title, page, level) tuples."""
+    return PostprocessedTOC(
+        entries=[
+            PostprocessedTOCEntry(title=title, page_number=page, level=level, confidence=_HELPER_CONFIDENCE)
+            for title, page, level in entries_data
+        ]
+    )
 
 
 @pytest.fixture
@@ -307,11 +322,10 @@ class TestTOCGenerator:
         """Exception text is shown verbatim, e.g. pydantic's "[type=missing, ...]" in a parsing error."""
         monkeypatch.setattr(toc_generator_module, "console", recording_console)
         error = RuntimeError(markup_like_text)
-        model = MagicMock()
-        model.invoke.side_effect = [error, sample_toc_response]
+        mock_llm.with_structured_output.return_value.invoke.side_effect = [error, sample_toc_response]
 
         TOCGenerator(doc=mock_doc, llm=mock_llm)._invoke_with_retry(
-            model, messages=[], batch_description=_BATCH_DESCRIPTION, input_tokens=0
+            TOC, messages=[], batch_description=_BATCH_DESCRIPTION, input_tokens=0
         )
 
         assert f"({type(error).__name__}: {markup_like_text})" in recording_console.export_text()
@@ -329,11 +343,13 @@ class TestTOCGenerator:
     ):
         """An error whose ``message`` is not a str is reported, and the retry goes on to succeed."""
         monkeypatch.setattr(toc_generator_module, "console", recording_console)
-        model = MagicMock()
-        model.invoke.side_effect = [non_string_message_error, sample_toc_response]
+        mock_llm.with_structured_output.return_value.invoke.side_effect = [
+            non_string_message_error,
+            sample_toc_response,
+        ]
 
         parsed, _ = TOCGenerator(doc=mock_doc, llm=mock_llm)._invoke_with_retry(
-            model, messages=[], batch_description=_BATCH_DESCRIPTION, input_tokens=0
+            TOC, messages=[], batch_description=_BATCH_DESCRIPTION, input_tokens=0
         )
 
         assert parsed == sample_toc_response
@@ -1078,9 +1094,11 @@ class TestTOCPostprocessing:
                     "Table of Contents\n1. Introduction............1\n"
                     "2. Methods................15\n3. Results.................30"
                 )
-                page.get_text.side_effect = lambda arg, _i=i, _text=toc_text: _text if arg == "text" else {"blocks": []}
+                page.get_text.side_effect = lambda arg, _i=i, _text=toc_text, **_options: (
+                    _text if arg == "text" else {"blocks": []}
+                )
             else:
-                page.get_text.side_effect = lambda arg, _i=i: (
+                page.get_text.side_effect = lambda arg, _i=i, **_options: (
                     f"Page {_i + 1} content" if arg == "text" else {"blocks": []}
                 )
             pages.append(page)
@@ -2293,7 +2311,7 @@ class TestCorrectPostprocessedPageNumbers:
             page = MagicMock()
             text = page_texts.get(idx, "")
 
-            def get_text_fn(fmt="text"):
+            def get_text_fn(fmt="text", **_extraction_options):
                 if fmt == "dict":
                     # Return a minimal page dict with the text as a single body block
                     if not text:
@@ -2333,7 +2351,7 @@ class TestCorrectPostprocessedPageNumbers:
                 ("Chapter II", 41, 1),
             ]
         )
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Introduction", 16, 1),
                 ("Chapter I", 22, 1),
@@ -2354,7 +2372,7 @@ class TestCorrectPostprocessedPageNumbers:
             ]
         )
         # Postprocessor changed page numbers for existing entries
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Introduction", 1, 1),
                 ("Chapter I", 7, 1),
@@ -2380,7 +2398,7 @@ class TestCorrectPostprocessedPageNumbers:
             ]
         )
         # Postprocessor keeps existing entries and adds new ones with printed page numbers
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Chapter I", 16, 1),
                 ("Subsection 1.1", 10, 2),  # printed page → sanity check finds at 25
@@ -2404,7 +2422,7 @@ class TestCorrectPostprocessedPageNumbers:
                 ("1. The Problem", 25, 1),
             ]
         )
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("1. The Problem", 25, 1),
                 ("6.6 Assessing Multiattribute Utility Functions", 297, 2),
@@ -2423,7 +2441,7 @@ class TestCorrectPostprocessedPageNumbers:
                 ("1. The Problem", 25, 1),
             ]
         )
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("1. The Problem", 25, 1),
                 ("Appendix 9A Derivation of a Utility Function for Consumption and Lifetime", 557, 1),
@@ -2451,27 +2469,246 @@ class TestCorrectPostprocessedPageNumbers:
         make the front-matter offset overshoot for back matter.
         """
         page_count = generator.doc.page_count
-        heading_title = "Variation of the Symplectic Volume"
+        heading_title = "Appendix C: Supplementary Tables"
         heading_page = page_count - 3  # within the offset window of the last page
         generator.doc._page_texts[heading_page - 1] = heading_title
 
         original = self._make_toc(self.OFFSET_ANCHOR_CHAPTERS)
-        refined = self._make_toc([*self.OFFSET_ANCHOR_CHAPTERS, (heading_title, page_count + overshoot, 2)])
+        refined = make_refined_toc([*self.OFFSET_ANCHOR_CHAPTERS, (heading_title, page_count + overshoot, 2)])
 
         result = generator._correct_postprocessed_page_numbers(original, refined)
         assert result.entries[-1].page_number == heading_page
 
-    def test_empty_refined_toc_returned_as_is(self, generator):
-        """Empty refined TOC is returned unchanged."""
-        empty = TOC(entries=[])
+    # A printed page whose PDF page differs from printed page + offset (the PDF omits
+    # printed pages before it), as the document's own folios report.
+    DRIFTED_PRINTED_PAGE, DRIFTED_PDF_PAGE = 300, 290
+    UNLOCATABLE_PRINTED_PAGE = 500
+
+    @pytest.fixture
+    def drifted_printed_pages(self, generator, monkeypatch):
+        printed_pages = PrintedPageMap({self.DRIFTED_PRINTED_PAGE: self.DRIFTED_PDF_PAGE}, generator.doc.page_count)
+        monkeypatch.setattr(PrintedPageMap, "from_document", classmethod(lambda cls, doc: printed_pages))
+        return printed_pages
+
+    def _make_refined_entry(self, title: str, page: int, level: int, printed_page: int | None) -> PostprocessedTOCEntry:
+        return PostprocessedTOCEntry(
+            title=title, page_number=page, level=level, confidence=_HELPER_CONFIDENCE, printed_page=printed_page
+        )
+
+    @pytest.mark.parametrize(
+        "printed_page,expected_page",
+        [
+            pytest.param(DRIFTED_PRINTED_PAGE, DRIFTED_PDF_PAGE, id="placed-via-printed-page"),
+            pytest.param(UNLOCATABLE_PRINTED_PAGE, None, id="unlocatable-printed-page-keeps-page"),
+            pytest.param(None, None, id="no-printed-page-keeps-page"),
+        ],
+    )
+    def test_places_unmatched_entries_via_printed_page(
+        self, generator, drifted_printed_pages, printed_page, expected_page
+    ):
+        """Unmatched entries citing a printed-TOC page are placed through the document's folios."""
+        claimed_page = self.DRIFTED_PRINTED_PAGE + self.OFFSET_ANCHOR_OFFSET  # the prompt's single global offset
+        original = self._make_toc(self.OFFSET_ANCHOR_CHAPTERS)
+        refined = PostprocessedTOC(
+            entries=[
+                *make_refined_toc(self.OFFSET_ANCHOR_CHAPTERS).entries,
+                self._make_refined_entry("Late Section", claimed_page, 2, printed_page),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert result.entries[-1].page_number == (expected_page or claimed_page)
+
+    @pytest.mark.parametrize(
+        "folio_distance,expect_first_pass_page",
+        [
+            pytest.param(_MAX_FOLIO_MATCH_DISTANCE, True, id="nearby-first-pass-page-wins"),
+            pytest.param(_MAX_FOLIO_MATCH_DISTANCE + 1, False, id="far-original-is-another-occurrence"),
+        ],
+    )
+    def test_exact_first_pass_match_versus_located_printed_page(
+        self, generator, monkeypatch, folio_distance, expect_first_pass_page
+    ):
+        """Near its located printed page, the first-pass page wins (the heading was seen there); far away,
+        the same title is a different occurrence and the located printed page wins."""
+        title, level = "Exercises", 2
+        original_page = 100
+        printed_page, folio_page = 80, original_page + folio_distance
+        printed_pages = PrintedPageMap({printed_page: folio_page}, generator.doc.page_count)
+        monkeypatch.setattr(PrintedPageMap, "from_document", classmethod(lambda cls, doc: printed_pages))
+        original = self._make_toc([*self.OFFSET_ANCHOR_CHAPTERS, (title, original_page, level)])
+        refined = PostprocessedTOC(
+            entries=[
+                *make_refined_toc(self.OFFSET_ANCHOR_CHAPTERS).entries,
+                self._make_refined_entry(title, folio_page, level, printed_page),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert result.entries[-1].page_number == (original_page if expect_first_pass_page else folio_page)
+
+    def test_verbatim_repeat_of_a_placed_entry_is_dropped(self, generator):
+        """An exact-title copy left over once its original is claimed, with nothing locating it, is a repeat."""
+        title, original_page, level = self.OFFSET_ANCHOR_CHAPTERS[-1]
+        original = self._make_toc(self.OFFSET_ANCHOR_CHAPTERS)
+        refined = PostprocessedTOC(
+            entries=[
+                *make_refined_toc(self.OFFSET_ANCHOR_CHAPTERS).entries,
+                self._make_refined_entry(title, original_page + 3, level, printed_page=None),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert [entry.page_number for entry in result.entries if entry.title == title] == [original_page]
+
+    def test_heading_found_nearby_outranks_a_misread_printed_page(self, generator, drifted_printed_pages):
+        """Verification still runs on folio-placed entries: the LLM can misread the printed TOC's page."""
+        title = "Late Section"
+        heading_page = self.DRIFTED_PDF_PAGE + 3  # where the heading actually is
+        generator.doc._page_texts[heading_page - 1] = title
+        original = self._make_toc(self.OFFSET_ANCHOR_CHAPTERS)
+        refined = PostprocessedTOC(
+            entries=[
+                *make_refined_toc(self.OFFSET_ANCHOR_CHAPTERS).entries,
+                self._make_refined_entry(title, heading_page + 1, 2, printed_page=self.DRIFTED_PRINTED_PAGE),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert result.entries[-1].page_number == heading_page
+
+    @pytest.mark.parametrize(
+        "printed_page_on_matched,printed_page_on_unmatched,expected_scans",
+        [
+            pytest.param(None, None, 0, id="no-printed-pages"),
+            pytest.param(DRIFTED_PRINTED_PAGE, None, 1, id="matched-entry-cites-printed-page"),
+            pytest.param(None, DRIFTED_PRINTED_PAGE, 1, id="unmatched-entries-cite-printed-pages"),
+        ],
+    )
+    def test_scans_printed_pages_only_when_needed(
+        self, generator, monkeypatch, printed_page_on_matched, printed_page_on_unmatched, expected_scans
+    ):
+        """The whole-document folio scan runs at most once, and only when an entry cites a printed page."""
+        scans = []
+
+        def counting_scan(cls, doc):
+            scans.append(doc)
+            return PrintedPageMap({}, doc.page_count)
+
+        monkeypatch.setattr(PrintedPageMap, "from_document", classmethod(counting_scan))
+        title, page, level = self.OFFSET_ANCHOR_CHAPTERS[0]
+        original = self._make_toc(self.OFFSET_ANCHOR_CHAPTERS)
+        refined = PostprocessedTOC(
+            entries=[
+                self._make_refined_entry(title, page, level, printed_page_on_matched),
+                self._make_refined_entry("Late Section", page + 1, level + 1, printed_page_on_unmatched),
+                self._make_refined_entry("Later Section", page + 2, level + 1, printed_page_on_unmatched),
+            ]
+        )
+
+        generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert len(scans) == expected_scans
+
+    REPEATED_TITLE = "Exercises"
+    # (printed page, PDF page) of each chapter's exercises; the PDF omits printed pages
+    # between chapters, so printed page + global offset drifts away from the PDF page.
+    EXERCISE_PAGES = [(16, 30), (56, 68), (96, 106)]
+
+    @pytest.fixture
+    def exercise_printed_pages(self, generator, monkeypatch):
+        printed_pages = PrintedPageMap(dict(self.EXERCISE_PAGES), generator.doc.page_count)
+        monkeypatch.setattr(PrintedPageMap, "from_document", classmethod(lambda cls, doc: printed_pages))
+
+    def test_repeated_title_added_from_printed_toc_is_not_collapsed(self, generator, exercise_printed_pages):
+        """One original occurrence restores one refined entry; the others follow their printed pages."""
+        level = 2
+        (first_printed, first_pdf), *others = self.EXERCISE_PAGES
+        original = self._make_toc([*self.OFFSET_ANCHOR_CHAPTERS, (self.REPEATED_TITLE, first_pdf, level)])
+        refined = PostprocessedTOC(
+            entries=[
+                *make_refined_toc(self.OFFSET_ANCHOR_CHAPTERS).entries,
+                *(
+                    self._make_refined_entry(self.REPEATED_TITLE, printed + self.OFFSET_ANCHOR_OFFSET, level, printed)
+                    for printed, _pdf in self.EXERCISE_PAGES
+                ),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert [e.page_number for e in result.entries if e.title == self.REPEATED_TITLE] == [
+            pdf for _printed, pdf in self.EXERCISE_PAGES
+        ]
+
+    def test_repeated_title_matches_the_nearest_original_globally(self, generator, exercise_printed_pages):
+        """A far copy must not claim the one original a nearer copy owns (it would then be deduplicated away)."""
+        level = 2
+        middle_printed, middle_pdf = self.EXERCISE_PAGES[1]  # the first pass only found this occurrence
+        original = self._make_toc([*self.OFFSET_ANCHOR_CHAPTERS, (self.REPEATED_TITLE, middle_pdf, level)])
+        refined = PostprocessedTOC(
+            entries=[
+                *make_refined_toc(self.OFFSET_ANCHOR_CHAPTERS).entries,
+                *(
+                    self._make_refined_entry(self.REPEATED_TITLE, printed + self.OFFSET_ANCHOR_OFFSET, level, printed)
+                    for printed, _pdf in self.EXERCISE_PAGES
+                ),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert [e.page_number for e in result.entries if e.title == self.REPEATED_TITLE] == [
+            pdf for _printed, pdf in self.EXERCISE_PAGES
+        ]
+
+    def test_printed_page_outranks_a_fuzzy_match_and_exact_matches_are_assigned_first(self, generator, monkeypatch):
+        """A fuzzy title match neither overrides a locatable printed page nor takes a later exact match's original."""
+        chapter_title, chapter_page, level = "Chapter 5 Differential Forms on Manifolds", 102, 1
+        part_title, part_printed, part_pdf = "Part II: Differential Forms", 86, 100
+        printed_pages = PrintedPageMap({part_printed: part_pdf}, generator.doc.page_count)
+        monkeypatch.setattr(PrintedPageMap, "from_document", classmethod(lambda cls, doc: printed_pages))
+        original = self._make_toc([*self.OFFSET_ANCHOR_CHAPTERS, (chapter_title, chapter_page, level)])
+        drifted_estimate = chapter_page + self.OFFSET_ANCHOR_OFFSET
+        refined = PostprocessedTOC(
+            entries=[
+                *make_refined_toc(self.OFFSET_ANCHOR_CHAPTERS).entries,
+                self._make_refined_entry(part_title, part_printed + self.OFFSET_ANCHOR_OFFSET, level, part_printed),
+                self._make_refined_entry(chapter_title, drifted_estimate, level, printed_page=None),
+            ]
+        )
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        pages = {entry.title: entry.page_number for entry in result.entries}
+        assert (pages[part_title], pages[chapter_title]) == (part_pdf, chapter_page)
+
+    def test_repeated_original_titles_each_restore_their_own_page(self, generator):
+        """With several same-title originals, each refined copy is matched to the nearest unclaimed one."""
+        level = 2
+        exercise_pdf_pages = [pdf for _printed, pdf in self.EXERCISE_PAGES]
+        repeated = [(self.REPEATED_TITLE, page, level) for page in exercise_pdf_pages]
+        original = self._make_toc([*self.OFFSET_ANCHOR_CHAPTERS, *repeated])
+        refined = make_refined_toc([*self.OFFSET_ANCHOR_CHAPTERS, *repeated])
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+
+        assert [e.page_number for e in result.entries if e.title == self.REPEATED_TITLE] == exercise_pdf_pages
+
+    def test_empty_refined_toc_yields_empty_toc(self, generator):
+        """An empty postprocessor result places nothing."""
         original = self._make_toc([("Chapter I", 22, 1)])
 
-        assert generator._correct_postprocessed_page_numbers(original, empty) == empty
+        assert generator._correct_postprocessed_page_numbers(original, PostprocessedTOC(entries=[])).entries == []
 
     def test_empty_original_with_nonempty_refined(self, generator):
         """When original is empty, refined entries are kept (no offset detected)."""
         empty = TOC(entries=[])
-        refined = self._make_toc([("Chapter I", 22, 1)])
+        refined = make_refined_toc([("Chapter I", 22, 1)])
 
         result = generator._correct_postprocessed_page_numbers(empty, refined)
         assert result.entries[0].page_number == 22  # no offset, kept as-is
@@ -2483,7 +2720,7 @@ class TestCorrectPostprocessedPageNumbers:
                 ("Chapter 1", 4, 1),  # offset = 4 - 1 = 3... but page <= 5, so skipped
             ]
         )
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Chapter 1", 4, 1),
                 ("Section 1.1", 10, 2),  # new entry
@@ -2503,7 +2740,7 @@ class TestCorrectPostprocessedPageNumbers:
                 ("Chapter I", 16, 1),
             ]
         )
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Chapter I", 16, 1),
                 ("Special Section", 30, 2),  # already a correct PDF page
@@ -2519,7 +2756,7 @@ class TestCorrectPostprocessedPageNumbers:
                 ("Chapter I", 16, 1),
             ]
         )
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Chapter I", 16, 1),
                 ("Mystery Section", 25, 2),  # not found anywhere
@@ -2536,7 +2773,7 @@ class TestCorrectPostprocessedPageNumbers:
                 ("CHAPTER I", 22, 1),
             ]
         )
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("introduction", 1, 1),
                 ("Chapter I", 7, 1),
@@ -2556,7 +2793,7 @@ class TestCorrectPostprocessedPageNumbers:
             ]
         )
         # Postprocessor expanded the title with a modest suffix (high coverage ratio)
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("The Exponential Densities: Extended", 85, 1),
                 ("Chapter I", 7, 1),
@@ -2576,7 +2813,7 @@ class TestCorrectPostprocessedPageNumbers:
             ]
         )
         # Postprocessor expanded "Introduction" to a much longer title (ratio ≈ 0.27)
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Introduction: The Nature of Probability Theory", 1, 1),
                 ("Chapter I", 7, 1),
@@ -2595,7 +2832,7 @@ class TestCorrectPostprocessedPageNumbers:
                 ("The Exponential and the Uniform Densities", 100, 1),
             ]
         )
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("The Exponential and the Uniform Densities: Extended", 85, 1),
             ]
@@ -2612,7 +2849,7 @@ class TestCorrectPostprocessedPageNumbers:
             ]
         )
         # Postprocessor added a section-level "1. Introduction" under Chapter I
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Introduction", 15, 1),
                 ("Chapter I", 17, 1),
@@ -2632,7 +2869,7 @@ class TestCorrectPostprocessedPageNumbers:
                 ("Chapter I", 17, 1),
             ]
         )
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Introduction", 15, 1),
                 ("Chapter I", 17, 1),
@@ -2650,7 +2887,7 @@ class TestCorrectPostprocessedPageNumbers:
                 ("Methods", 4, 1),  # only 7 chars — too short for substring match
             ]
         )
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Methods and Materials Analysis", 50, 1),
             ]
@@ -2668,7 +2905,7 @@ class TestCorrectPostprocessedPageNumbers:
                 ("Chapter I: The Sample Space", 22, 1),
             ]
         )
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Introduction", 1, 1),
                 ("Chapter I - The Sample Space", 7, 1),
@@ -2696,7 +2933,7 @@ class TestFuzzyMatchBestMatch:
             page = MagicMock()
             text = page_texts.get(idx, "")
 
-            def get_text_fn(fmt="text"):
+            def get_text_fn(fmt="text", **_extraction_options):
                 if fmt == "dict":
                     if not text:
                         return {"height": 800.0, "blocks": []}
@@ -2740,7 +2977,7 @@ class TestFuzzyMatchBestMatch:
             ]
         )
         # Postprocessor returns the entry with the wrong page
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("Introduction", 10, 1),
                 ("2 Introduction to Ito-Calculus", 10, 1),  # wrong page
@@ -2759,7 +2996,7 @@ class TestFuzzyMatchBestMatch:
             ]
         )
         # Refined entry has a much longer title — should NOT match via substring
-        refined = self._make_toc(
+        refined = make_refined_toc(
             [
                 ("2 Introduction to Ito-Calculus", 5, 1),
             ]
@@ -2782,7 +3019,7 @@ class TestFuzzyMatchBestMatch:
     def test_coverage_ratio_acceptance_rejection(self, generator, orig_title, refined_title, should_match):
         """Parametrized test for coverage ratio acceptance/rejection."""
         original = self._make_toc([(orig_title, 50, 1)])
-        refined = self._make_toc([(refined_title, 99, 1)])
+        refined = make_refined_toc([(refined_title, 99, 1)])
         result = generator._correct_postprocessed_page_numbers(original, refined)
         if should_match:
             assert result.entries[0].page_number == 50
@@ -3783,7 +4020,7 @@ class TestCorrectPostprocessedNewEntries:
             for span in line.get("spans", [])
         )
 
-        def get_text_fn(fmt="text"):
+        def get_text_fn(fmt="text", **_extraction_options):
             if fmt == "dict":
                 return page_dict
             return all_text
@@ -3823,10 +4060,10 @@ class TestCorrectPostprocessedNewEntries:
                 TOCEntry(title="Mathematical Preliminaries", page_number=10, level=1, confidence=0.9),
             ]
         )
-        refined = TOC(
+        refined = PostprocessedTOC(
             entries=[
-                TOCEntry(title="Mathematical Preliminaries", page_number=10, level=1, confidence=0.9),
-                TOCEntry(title="Numerical Differentiation", page_number=25, level=1, confidence=0.8),
+                PostprocessedTOCEntry(title="Mathematical Preliminaries", page_number=10, level=1, confidence=0.9),
+                PostprocessedTOCEntry(title="Numerical Differentiation", page_number=25, level=1, confidence=0.8),
             ]
         )
         result = gen._correct_postprocessed_page_numbers(original, refined)
@@ -3843,10 +4080,10 @@ class TestCorrectPostprocessedNewEntries:
                 TOCEntry(title="Mathematical Preliminaries", page_number=10, level=1, confidence=0.9),
             ]
         )
-        refined = TOC(
+        refined = PostprocessedTOC(
             entries=[
-                TOCEntry(title="Mathematical Preliminaries", page_number=10, level=1, confidence=0.9),
-                TOCEntry(title="Numerical Differentiation", page_number=20, level=1, confidence=0.8),
+                PostprocessedTOCEntry(title="Mathematical Preliminaries", page_number=10, level=1, confidence=0.9),
+                PostprocessedTOCEntry(title="Numerical Differentiation", page_number=20, level=1, confidence=0.8),
             ]
         )
         result = gen._correct_postprocessed_page_numbers(original, refined)
@@ -3864,10 +4101,10 @@ class TestCorrectPostprocessedNewEntries:
                 TOCEntry(title="Mathematical Preliminaries", page_number=2, level=1, confidence=0.9),
             ]
         )
-        refined = TOC(
+        refined = PostprocessedTOC(
             entries=[
-                TOCEntry(title="Mathematical Preliminaries", page_number=2, level=1, confidence=0.9),
-                TOCEntry(title="Numerical Differentiation", page_number=20, level=1, confidence=0.8),
+                PostprocessedTOCEntry(title="Mathematical Preliminaries", page_number=2, level=1, confidence=0.9),
+                PostprocessedTOCEntry(title="Numerical Differentiation", page_number=20, level=1, confidence=0.8),
             ]
         )
         result = gen._correct_postprocessed_page_numbers(original, refined)
@@ -3885,11 +4122,11 @@ class TestCorrectPostprocessedNewEntries:
                 TOCEntry(title="Mathematical Preliminaries", page_number=6, level=1, confidence=0.9),
             ]
         )
-        refined = TOC(
+        refined = PostprocessedTOC(
             entries=[
-                TOCEntry(title="Mathematical Preliminaries", page_number=6, level=1, confidence=0.9),
+                PostprocessedTOCEntry(title="Mathematical Preliminaries", page_number=6, level=1, confidence=0.9),
                 # Page 40 — search window [35, 45] won't include page 5
-                TOCEntry(title="Rare Topic", page_number=40, level=1, confidence=0.7),
+                PostprocessedTOCEntry(title="Rare Topic", page_number=40, level=1, confidence=0.7),
             ]
         )
         result = gen._correct_postprocessed_page_numbers(original, refined)
@@ -4129,13 +4366,13 @@ class TestRealTokenAccounting:
         raw = MagicMock()
         raw.usage_metadata = dict(self.USAGE)
 
-        parsed, usage = _unpack_structured_response({"raw": raw, "parsed": parsed_toc, "parsing_error": None})
+        parsed, usage = _unpack_structured_response({"raw": raw, "parsed": parsed_toc, "parsing_error": None}, TOC)
 
         assert parsed == parsed_toc
         assert usage == self.USAGE
 
     def test_unpack_plain_response_has_no_usage(self, parsed_toc) -> None:
-        parsed, usage = _unpack_structured_response(parsed_toc)
+        parsed, usage = _unpack_structured_response(parsed_toc, TOC)
 
         assert parsed == parsed_toc
         assert usage is None
@@ -4144,10 +4381,10 @@ class TestRealTokenAccounting:
         parsing_error = ValueError("malformed structured output")
 
         with pytest.raises(ValueError, match="malformed structured output"):
-            _unpack_structured_response({"raw": MagicMock(), "parsed": None, "parsing_error": parsing_error})
+            _unpack_structured_response({"raw": MagicMock(), "parsed": None, "parsing_error": parsing_error}, TOC)
 
     def test_unpack_include_raw_dict_without_raw_message(self, parsed_toc) -> None:
-        parsed, usage = _unpack_structured_response({"raw": None, "parsed": parsed_toc, "parsing_error": None})
+        parsed, usage = _unpack_structured_response({"raw": None, "parsed": parsed_toc, "parsing_error": None}, TOC)
 
         assert parsed == parsed_toc
         assert usage is None
@@ -4255,10 +4492,12 @@ class TestFuzzyRestorePrefixAlignment:
                 TOCEntry(title="Translator's preface to the second edition", page_number=12, level=1, confidence=0.9),
             ]
         )
-        refined = TOC(
+        refined = PostprocessedTOC(
             entries=[
-                TOCEntry(title="Preface to the second edition", page_number=8, level=1, confidence=0.9),
-                TOCEntry(title="Translator's preface to the second edition", page_number=12, level=1, confidence=0.9),
+                PostprocessedTOCEntry(title="Preface to the second edition", page_number=8, level=1, confidence=0.9),
+                PostprocessedTOCEntry(
+                    title="Translator's preface to the second edition", page_number=12, level=1, confidence=0.9
+                ),
             ]
         )
 
@@ -4272,7 +4511,9 @@ class TestFuzzyRestorePrefixAlignment:
     def test_end_truncated_titles_still_restore(self, generator) -> None:
         """Feature snippets truncate title ends; those must keep matching."""
         original = TOC(entries=[TOCEntry(title="Chapter 3: Risk Manag", page_number=55, level=1, confidence=0.9)])
-        refined = TOC(entries=[TOCEntry(title="Chapter 3: Risk Management", page_number=70, level=1, confidence=0.9)])
+        refined = PostprocessedTOC(
+            entries=[PostprocessedTOCEntry(title="Chapter 3: Risk Management", page_number=70, level=1, confidence=0.9)]
+        )
 
         result = generator._correct_postprocessed_page_numbers(original, refined)
 
@@ -4281,10 +4522,10 @@ class TestFuzzyRestorePrefixAlignment:
     def test_cross_numbered_sections_are_not_conflated(self, generator) -> None:
         """'2.9 Exercises' must not restore onto '1.8 Exercises' just because cores match."""
         original = TOC(entries=[TOCEntry(title="1.8 Exercises", page_number=30, level=2, confidence=0.9)])
-        refined = TOC(
+        refined = PostprocessedTOC(
             entries=[
-                TOCEntry(title="1.8 Exercises", page_number=30, level=2, confidence=0.9),
-                TOCEntry(title="2.9 Exercises", page_number=95, level=2, confidence=0.9),
+                PostprocessedTOCEntry(title="1.8 Exercises", page_number=30, level=2, confidence=0.9),
+                PostprocessedTOCEntry(title="2.9 Exercises", page_number=95, level=2, confidence=0.9),
             ]
         )
 
@@ -4295,12 +4536,14 @@ class TestFuzzyRestorePrefixAlignment:
 
     def test_unpack_missing_parsed_without_error_raises(self) -> None:
         with pytest.raises(ValueError, match="parsed"):
-            _unpack_structured_response({"raw": MagicMock(), "parsed": None, "parsing_error": None})
+            _unpack_structured_response({"raw": MagicMock(), "parsed": None, "parsing_error": None}, TOC)
 
     def test_designator_dropped_by_printed_toc_still_restores(self, generator) -> None:
         """Printed TOCs often omit the section designator the extraction kept."""
         original = TOC(entries=[TOCEntry(title="1, §2. Distance", page_number=21, level=2, confidence=0.9)])
-        refined = TOC(entries=[TOCEntry(title="Distance", page_number=33, level=2, confidence=0.9)])
+        refined = PostprocessedTOC(
+            entries=[PostprocessedTOCEntry(title="Distance", page_number=33, level=2, confidence=0.9)]
+        )
 
         result = generator._correct_postprocessed_page_numbers(original, refined)
 

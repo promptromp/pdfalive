@@ -145,6 +145,9 @@ The **printed TOC** in the reference text may use the **book's own page numberin
 - **For new entries**: you MUST output PDF page numbers, not printed page numbers. If the user message
   provides a front matter offset, add that offset to any printed page number to get the PDF page number.
   For example, if the offset is 15 and the printed TOC says page 1, output page 16.
+- **For every entry listed in the printed TOC** (new or existing) with an Arabic page number, also set
+  `printed_page` to that page number exactly as printed there, without any conversion. Leave `printed_page`
+  null for entries not listed in the printed TOC or listed with roman numerals or no page number.
 
 ## Input Format
 
@@ -160,14 +163,15 @@ Return a refined TOC as a list of entries, where each entry includes:
 - page_number: The verified or corrected page number (1-indexed)
 - level: The hierarchical level (1 for top-level, 2 for subsections, etc.)
 - confidence: Your confidence in this entry (0.0 to 1.0)
+- printed_page: The page number printed for this entry in the printed TOC, or null (see above)
 
 ## Important Guidelines
 
 1. **Trust the printed TOC for section names** if one exists - it's authoritative for what sections exist
 2. **Preserve section numbering**: If the extracted heading includes a section number prefix (e.g., "4.1 Some Text", "Chapter 3: Title"), ALWAYS keep the numbering in the title even if the printed TOC omits it. Section numbers are valuable navigational aids in bookmarks.
-3. **Always output PDF page numbers** — for existing entries, keep their page numbers unchanged.
+3. **`page_number` is always a PDF page number** — for existing entries, keep their page numbers unchanged.
    For new entries, convert printed page numbers to PDF page numbers using the front matter offset
-   provided in the user message.
+   provided in the user message. `printed_page` is the one exception: it is never converted.
 4. **Preserve entries you're unsure about** rather than removing them - it's better to have extra entries than miss important ones
 5. **Use the document features** to verify that headings actually exist at the claimed PDF pages
 6. **Maintain the original structure** when possible - don't reorganize unless clearly wrong

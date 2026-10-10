@@ -83,6 +83,8 @@ Postprocessing performs an additional LLM call that:
 - Adds missing entries and corrects page numbers based on the printed TOC
 - Ensures consistent hierarchy levels
 
+Printed TOC page numbers are mapped to PDF pages through the page numbers printed on the pages themselves (running headers/footers), so entries land on the right page even when the PDF omits or inserts pages relative to the printed book.
+
 **Other options:**
 
 	# Modify file in place

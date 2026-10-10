@@ -3,7 +3,7 @@
 import pytest
 
 from pdfalive.models.rename import RenameOp, RenameResult
-from pdfalive.models.toc import TOC, TOCEntry
+from pdfalive.models.toc import TOC, PostprocessedTOCEntry, TOCEntry
 
 
 class TestTOCEntry:
@@ -444,6 +444,40 @@ class TestTOCPartitionByPageRange:
 
         assert kept.entries == [entries[0], entries[2]]
         assert dropped == [entries[1]]
+
+
+class TestPostprocessedTOCEntry:
+    """Tests for PostprocessedTOCEntry, the postprocessor's entry schema."""
+
+    @pytest.fixture
+    def entry_fields(self):
+        return {"title": "1.2 Notation", "page_number": 15, "level": 2, "confidence": 0.8}
+
+    @pytest.mark.parametrize(
+        "printed_page,expected",
+        [
+            pytest.param(12, 12, id="arabic-int"),
+            pytest.param(" 12 ", 12, id="arabic-string"),
+            pytest.param("xii", None, id="roman-numeral-is-absent"),
+            pytest.param("١٢", None, id="non-ascii-digits-are-absent"),
+            pytest.param("²", None, id="superscript-is-absent"),
+            pytest.param(12.0, 12, id="integral-float"),
+            pytest.param(12.5, None, id="fraction-is-absent"),
+            pytest.param(True, None, id="bool-is-absent"),
+            pytest.param("", None, id="empty-is-absent"),
+            pytest.param(None, None, id="absent"),
+        ],
+    )
+    def test_printed_page_accepts_only_arabic_numbers(self, entry_fields, printed_page, expected):
+        assert PostprocessedTOCEntry(**entry_fields, printed_page=printed_page).printed_page == expected
+
+    def test_to_toc_entry_keeps_every_field_but_the_printed_page(self, entry_fields):
+        new_page = entry_fields["page_number"] + 3
+
+        toc_entry = PostprocessedTOCEntry(**entry_fields, printed_page=4).to_toc_entry(page_number=new_page)
+
+        assert type(toc_entry) is TOCEntry
+        assert toc_entry.model_dump() == entry_fields | {"page_number": new_page}
 
 
 class TestRenameOp:

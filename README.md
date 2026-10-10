@@ -118,6 +118,8 @@ Postprocessing uses an additional LLM call to:
 - Cross-reference against any printed TOC found in the document
 - Add missing entries and correct page numbers
 
+Page numbers taken from a printed TOC are converted to PDF pages using the page numbers printed on the pages themselves, so they stay correct even when the PDF omits or inserts pages relative to the printed book (e.g. stripped blank pages or unnumbered plates).
+
 **Other options:**
 
 | Option | Description |
