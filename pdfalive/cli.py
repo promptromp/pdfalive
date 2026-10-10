@@ -18,11 +18,11 @@ from pdfalive.console import TextPart, create_console, safe_text, truncate_visib
 from pdfalive.evaluation.metrics import SUMMARY_PAGE_TOLERANCE, EvalReport, GoldenEntry
 from pdfalive.evaluation.runner import EvalCase, EvalMode, discover_cases, run_eval_case
 from pdfalive.llm import build_chat_model
-from pdfalive.models.rename import PlannedRename, RejectedRename, RenameOp
+from pdfalive.models.rename import PlannedRename, RejectedRename, RenameBatch, RenameInputs
 from pdfalive.models.toc import TOCEntry
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
-from pdfalive.processors.rename_processor import DuplicateInputNameError, RenameProcessor, build_input_mapping
+from pdfalive.processors.rename_processor import RenameProcessor
 from pdfalive.processors.toc_generator import (
     DEFAULT_REQUEST_DELAY_SECONDS,
     TOCGenerator,
@@ -34,8 +34,8 @@ from pdfalive.tokens import TokenUsage
 # Rename preview table: reasoning shown wider than this many terminal cells is cut, ending in an ellipsis.
 _RENAME_REASONING_PREVIEW_WIDTH = 50
 
-# Exit status of a command that ran but did not fully succeed (a threshold missed, an input
-# rejected, a rename failed), as opposed to Click's usage errors (2).
+# Exit status of a command that ran but did not fully succeed (a threshold missed, a rename
+# failed), as opposed to Click's usage errors (2).
 _EXIT_FAILURE = 1
 
 # Rename preview table: confidence at or above these thresholds shows green / yellow, below them red.
@@ -84,7 +84,16 @@ def _confidence_style(confidence: float) -> str:
     return "red"
 
 
-def _print_rejected_renames(rejected: list[RejectedRename]) -> None:
+def _rejected_file(rejection: RejectedRename, display_names: dict[Path, str]) -> str:
+    """How a skipped suggestion's file is shown: its input's display name or, when its id names
+    no file of its request, the id and the name the suggestion gave.
+    """
+    if rejection.source is not None:
+        return display_names[rejection.source]
+    return f'file id {rejection.op.file_id} ("{rejection.op.input_filename}")'
+
+
+def _print_rejected_renames(rejected: list[RejectedRename], display_names: dict[Path, str]) -> None:
     """List the rename suggestions that will not be applied, each with the reason."""
     if not rejected:
         return
@@ -93,7 +102,7 @@ def _print_rejected_renames(rejected: list[RejectedRename]) -> None:
         console.print(
             safe_text(
                 "  - ",
-                rejection.op.input_filename,
+                _rejected_file(rejection, display_names),
                 " -> ",
                 rejection.op.output_filename,
                 ": ",
@@ -102,8 +111,8 @@ def _print_rejected_renames(rejected: list[RejectedRename]) -> None:
         )
 
 
-def _rename_preview_table(planned: list[PlannedRename]) -> Table:
-    """The table of planned renames shown before confirmation."""
+def _rename_preview_table(planned: list[PlannedRename], display_names: dict[Path, str]) -> Table:
+    """The table of planned renames shown before confirmation, each input shown by its display name."""
     table = Table(
         show_header=True,
         header_style="bold",
@@ -118,7 +127,7 @@ def _rename_preview_table(planned: list[PlannedRename]) -> Table:
     for rename in planned:
         reasoning = safe_text(truncate_visible(rename.op.reasoning, _RENAME_REASONING_PREVIEW_WIDTH))
         table.add_row(
-            safe_text(rename.source.name),
+            safe_text(display_names[rename.source]),
             safe_text(rename.target.name),
             safe_text((f"{rename.op.confidence:.0%}", _confidence_style(rename.op.confidence))),
             reasoning,
@@ -127,7 +136,7 @@ def _rename_preview_table(planned: list[PlannedRename]) -> Table:
 
 
 def _review_and_apply_renames(
-    processor: RenameProcessor, operations: list[RenameOp], inputs: dict[str, Path], yes: bool
+    processor: RenameProcessor, batches: list[RenameBatch], inputs: RenameInputs, yes: bool
 ) -> bool:
     """Preview the suggested renames, report the rejected ones, and apply the rest once confirmed.
 
@@ -137,12 +146,14 @@ def _review_and_apply_renames(
         unattended run. True otherwise, including when nothing was suggested, every
         suggestion kept the current name, or the prompt was declined.
     """
-    if not operations:
+    if not any(batch.operations for batch in batches):
         console.print("No rename operations suggested.", style="yellow")
         return True
 
-    resolved = processor.resolve_renames(operations, inputs)
-    _print_rejected_renames(resolved.rejected)
+    resolved = processor.resolve_renames(batches, inputs)
+    # Inputs sharing a name are shown with their directories, so they can be told apart.
+    display_names = inputs.display_names()
+    _print_rejected_renames(resolved.rejected, display_names)
     rejected_unattended = yes and bool(resolved.rejected)
     if not resolved.planned:
         console.print("No valid rename operations to apply.", style="yellow")
@@ -150,7 +161,7 @@ def _review_and_apply_renames(
 
     console.print()
     console.print("Proposed renames:", style="bold")
-    console.print(_rename_preview_table(resolved.planned))
+    console.print(_rename_preview_table(resolved.planned, display_names))
     console.print()
 
     if not yes and not click.confirm("Apply these renames?", default=False):
@@ -756,13 +767,10 @@ def rename(
     else:
         resolved_input_files = input_files
 
-    # Built once, before any LLM call: a file given more than once, in any spelling, is
-    # renamed once, and different files sharing a name are reported as an error.
-    try:
-        inputs = build_input_mapping(Path(f) for f in resolved_input_files)
-    except DuplicateInputNameError as e:
-        console.print(safe_text(("Error:", "bold red"), " ", str(e)))
-        raise SystemExit(_EXIT_FAILURE) from e
+    # Each file once, in input order: a file given more than once, in any spelling, is
+    # listed (and counted) once, and files sharing a name in different directories are
+    # separate inputs, told apart by their ids in each request.
+    inputs = RenameInputs(Path(f) for f in resolved_input_files)
 
     console.print(
         safe_text(
@@ -786,8 +794,8 @@ def rename(
     # reported even if a later batch, the prompt, or applying the renames fails.
     usage = TokenUsage()
     try:
-        result = processor.generate_renames(inputs, query, usage=usage)
-        all_succeeded = _review_and_apply_renames(processor, result.operations, inputs, yes)
+        batches = processor.generate_renames(inputs, query, usage=usage)
+        all_succeeded = _review_and_apply_renames(processor, batches, inputs, yes)
     finally:
         if show_token_usage and usage.llm_calls:
             usage.print_summary(console)

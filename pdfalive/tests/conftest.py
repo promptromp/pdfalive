@@ -211,6 +211,7 @@ def make_rename_op() -> Callable[..., RenameOp]:
     """Factory for RenameOp suggestions with sensible defaults."""
 
     def _make(
+        file_id: int,
         input_filename: str,
         output_filename: str,
         *,
@@ -218,7 +219,11 @@ def make_rename_op() -> Callable[..., RenameOp]:
         reasoning: str = DEFAULT_RENAME_REASONING,
     ) -> RenameOp:
         return RenameOp(
-            input_filename=input_filename, output_filename=output_filename, confidence=confidence, reasoning=reasoning
+            file_id=file_id,
+            input_filename=input_filename,
+            output_filename=output_filename,
+            confidence=confidence,
+            reasoning=reasoning,
         )
 
     return _make
