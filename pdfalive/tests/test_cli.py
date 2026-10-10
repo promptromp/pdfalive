@@ -25,9 +25,9 @@ from pdfalive.cli import (
 )
 from pdfalive.evaluation.metrics import EvalReport, GoldenEntry
 from pdfalive.evaluation.runner import EvalCase, GoldenFile
-from pdfalive.models.rename import RenameOp, RenameResult
+from pdfalive.models.rename import FIRST_FILE_ID, RenameOp, RenameResult
 from pdfalive.models.toc import TOCEntry
-from pdfalive.processors.rename_processor import REJECTED_PATH, DuplicateInputNameError, RenameProcessor
+from pdfalive.processors.rename_processor import REJECTED_PATH, REJECTED_UNKNOWN_INPUT, RenameProcessor
 from pdfalive.tokens import TokenUsage
 
 
@@ -788,9 +788,9 @@ class TestOutsideTextIsPrintedSafely:
         """An output path with a markup-like file name; never written, as the processors are mocked."""
         return tmp_path / self.OUTPUT_DIRNAME / markup_like_filename
 
-    def _preview_row(self, op: RenameOp) -> list[str]:
-        """The rename preview table row the CLI should print for op."""
-        return [op.input_filename, op.output_filename, f"{op.confidence:.0%}", op.reasoning]
+    def _preview_row(self, source: Path, op: RenameOp) -> list[str]:
+        """The rename preview table row the CLI should print for op, the suggestion for source."""
+        return [source.name, op.output_filename, f"{op.confidence:.0%}", op.reasoning]
 
     @pytest.mark.parametrize("inplace", [False, True])
     @patch("pdfalive.cli.TOCGenerator")
@@ -916,14 +916,14 @@ class TestOutsideTextIsPrintedSafely:
         control_sequence_text: tuple[str, str],
     ) -> None:
         raw, visible = control_sequence_text
-        op = make_rename_op(plain_pdf.name, f"{self.RENAMED_PREFIX}{plain_pdf.name}", reasoning=raw)
+        op = make_rename_op(FIRST_FILE_ID, plain_pdf.name, f"{self.RENAMED_PREFIX}{plain_pdf.name}", reasoning=raw)
         suggest_rename(op)
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, str(plain_pdf)], input=DECLINE_CONFIRMATION)
 
         assert result.exit_code == 0, result.output
         output = cli_console.export_text()
-        assert [op.input_filename, op.output_filename, f"{op.confidence:.0%}", visible] in _table_rows(output)
+        assert [plain_pdf.name, op.output_filename, f"{op.confidence:.0%}", visible] in _table_rows(output)
         assert raw not in output
 
     def test_suggested_names_with_control_sequences_are_shown_escaped(
@@ -937,7 +937,7 @@ class TestOutsideTextIsPrintedSafely:
     ) -> None:
         """Rejected (control characters) or planned (an RLO, an undecodable byte), the name is shown escaped."""
         raw, visible = control_sequence_text
-        suggest_rename(make_rename_op(plain_pdf.name, raw))
+        suggest_rename(make_rename_op(FIRST_FILE_ID, plain_pdf.name, raw))
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, str(plain_pdf)], input=DECLINE_CONFIRMATION)
 
@@ -957,7 +957,9 @@ class TestOutsideTextIsPrintedSafely:
         character: str,
     ) -> None:
         reasoning = character * _RENAME_REASONING_PREVIEW_WIDTH * 2
-        op = make_rename_op(plain_pdf.name, f"{self.RENAMED_PREFIX}{plain_pdf.name}", reasoning=reasoning)
+        op = make_rename_op(
+            FIRST_FILE_ID, plain_pdf.name, f"{self.RENAMED_PREFIX}{plain_pdf.name}", reasoning=reasoning
+        )
         suggest_rename(op)
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, str(plain_pdf)], input=DECLINE_CONFIRMATION)
@@ -1006,14 +1008,17 @@ class TestOutsideTextIsPrintedSafely:
         markup_like_pdf: Path,
     ) -> None:
         op = make_rename_op(
-            markup_like_pdf.name, f"{self.RENAMED_PREFIX}{markup_like_pdf.name}", reasoning=self.RENAME_REASONING
+            FIRST_FILE_ID,
+            markup_like_pdf.name,
+            f"{self.RENAMED_PREFIX}{markup_like_pdf.name}",
+            reasoning=self.RENAME_REASONING,
         )
         suggest_rename(op)
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, str(markup_like_pdf)], input=DECLINE_CONFIRMATION)
 
         assert result.exit_code == 0, result.output
-        assert self._preview_row(op) in _table_rows(cli_console.export_text())
+        assert self._preview_row(markup_like_pdf, op) in _table_rows(cli_console.export_text())
 
     def test_rename_preview_text_values(
         self,
@@ -1024,7 +1029,9 @@ class TestOutsideTextIsPrintedSafely:
         plain_pdf: Path,
         markup_like_text: str,
     ) -> None:
-        op = make_rename_op(plain_pdf.name, f"{self.RENAMED_PREFIX}{plain_pdf.name}", reasoning=markup_like_text)
+        op = make_rename_op(
+            FIRST_FILE_ID, plain_pdf.name, f"{self.RENAMED_PREFIX}{plain_pdf.name}", reasoning=markup_like_text
+        )
         suggest_rename(op)
 
         result = runner.invoke(
@@ -1037,7 +1044,7 @@ class TestOutsideTextIsPrintedSafely:
         output = cli_console.export_text()
         assert f"using model {markup_like_text}..." in output
         assert f"Query: {markup_like_text}" in output
-        assert self._preview_row(op) in _table_rows(output)
+        assert self._preview_row(plain_pdf, op) in _table_rows(output)
 
     def test_rename_apply_error(
         self,
@@ -1048,7 +1055,10 @@ class TestOutsideTextIsPrintedSafely:
         markup_like_pdf: Path,
     ) -> None:
         op = make_rename_op(
-            markup_like_pdf.name, f"{self.RENAMED_PREFIX}{markup_like_pdf.name}", reasoning=self.RENAME_REASONING
+            FIRST_FILE_ID,
+            markup_like_pdf.name,
+            f"{self.RENAMED_PREFIX}{markup_like_pdf.name}",
+            reasoning=self.RENAME_REASONING,
         )
         suggest_rename(op)
         target = markup_like_pdf.parent / op.output_filename
@@ -1061,22 +1071,6 @@ class TestOutsideTextIsPrintedSafely:
         assert len(error_lines) == 1
         assert str(markup_like_pdf) in error_lines[0]
         assert str(target) in error_lines[0]
-
-    @patch("pdfalive.cli.build_input_mapping")
-    def test_rename_input_error(
-        self,
-        mock_build_input_mapping: MagicMock,
-        runner: CliRunner,
-        cli_console: Console,
-        plain_pdf: Path,
-        markup_like_text: str,
-    ) -> None:
-        mock_build_input_mapping.side_effect = DuplicateInputNameError(markup_like_text)
-
-        result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, str(plain_pdf)])
-
-        assert result.exit_code == _EXIT_FAILURE
-        assert f"Error: {markup_like_text}" in cli_console.export_text()
 
     @patch("pdfalive.cli.run_eval_case")
     @patch("pdfalive.cli.discover_cases")
@@ -1135,7 +1129,7 @@ class TestRenameCommand:
         plain_pdf: Path,
     ) -> None:
         """Regression: a suggested "../name" was joined to the source's directory, moving the file out of it."""
-        suggest_rename(make_rename_op(plain_pdf.name, UNSAFE_TARGET_NAME))
+        suggest_rename(make_rename_op(FIRST_FILE_ID, plain_pdf.name, UNSAFE_TARGET_NAME))
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, "--yes", str(plain_pdf)])
 
@@ -1147,25 +1141,78 @@ class TestRenameCommand:
         assert f"  - {plain_pdf.name} -> {UNSAFE_TARGET_NAME}: {REJECTED_PATH}" in output
         assert "No valid rename operations to apply." in output
 
-    def test_duplicate_input_names_are_reported_before_any_llm_call(
+    def test_files_sharing_a_name_in_different_directories_are_renamed_together(
         self,
         runner: CliRunner,
         cli_console: Console,
         rename_llm: MagicMock,
+        make_rename_op: Callable[..., RenameOp],
         tmp_path: Path,
     ) -> None:
-        """Regression: files sharing a name in different directories raised a traceback after the LLM calls."""
-        duplicates = [tmp_path / directory / PLAIN_PDF_NAME for directory in self.SUBDIRECTORIES]
-        for path in duplicates:
-            path.parent.mkdir()
-            _create_valid_pdf(path)
+        """Regression: inputs had to have unique file names, because suggestions were matched by name."""
+        sources = [tmp_path / directory / PLAIN_PDF_NAME for directory in self.SUBDIRECTORIES]
+        for source in sources:
+            source.parent.mkdir()
+            _create_valid_pdf(source)
+        rename_llm.invoke.return_value = RenameResult(
+            operations=[
+                make_rename_op(file_id, PLAIN_PDF_NAME, f"{directory} {NEW_NAME}")
+                for file_id, directory in enumerate(self.SUBDIRECTORIES, start=FIRST_FILE_ID)
+            ]
+        )
 
-        result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, *map(str, duplicates)])
+        result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, "--yes", *map(str, sources)])
 
-        assert result.exit_code == _EXIT_FAILURE
-        assert isinstance(result.exception, SystemExit)  # a clean exit, not a traceback
-        assert f"Error: Found duplicate filename '{PLAIN_PDF_NAME}'" in cli_console.export_text()
-        rename_llm.invoke.assert_not_called()
+        assert result.exit_code == 0, result.output
+        for source, directory in zip(sources, self.SUBDIRECTORIES, strict=True):
+            assert not source.exists()
+            assert (source.parent / f"{directory} {NEW_NAME}").exists()
+
+    def test_a_suggestion_whose_id_names_no_file_is_shown_with_the_name_it_gave(
+        self,
+        runner: CliRunner,
+        cli_console: Console,
+        rename_llm: MagicMock,
+        make_rename_op: Callable[..., RenameOp],
+        plain_pdf: Path,
+        markup_like_text: str,
+    ) -> None:
+        """Without a trustworthy id the input cannot be named, so the echoed name helps tell which file was meant."""
+        op = make_rename_op(FIRST_FILE_ID + 1, markup_like_text, NEW_NAME)  # the request lists one file
+        rename_llm.invoke.return_value = RenameResult(operations=[op])
+
+        result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, str(plain_pdf)], input=DECLINE_CONFIRMATION)
+
+        assert result.exit_code == 0, result.output
+        expected = f'  - file id {op.file_id} ("{markup_like_text}") -> {NEW_NAME}: {REJECTED_UNKNOWN_INPUT}'
+        assert expected in cli_console.export_text()
+
+    def test_inputs_sharing_a_name_are_shown_with_their_directories(
+        self,
+        runner: CliRunner,
+        cli_console: Console,
+        rename_llm: MagicMock,
+        make_rename_op: Callable[..., RenameOp],
+        tmp_path: Path,
+    ) -> None:
+        """Both the preview and the skipped list name each input so the two can be told apart."""
+        sources = [tmp_path / directory / PLAIN_PDF_NAME for directory in self.SUBDIRECTORIES]
+        for source in sources:
+            source.parent.mkdir()
+            _create_valid_pdf(source)
+        planned, rejected = (
+            make_rename_op(file_id, PLAIN_PDF_NAME, new_name)
+            for file_id, new_name in enumerate((NEW_NAME, UNSAFE_TARGET_NAME), start=FIRST_FILE_ID)
+        )
+        rename_llm.invoke.return_value = RenameResult(operations=[planned, rejected])
+        shown = [f"{directory}/{PLAIN_PDF_NAME}" for directory in self.SUBDIRECTORIES]
+
+        result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, *map(str, sources)], input=DECLINE_CONFIRMATION)
+
+        assert result.exit_code == 0, result.output
+        output = cli_console.export_text()
+        assert [row[:2] for row in _table_rows(output)] == [[shown[0], NEW_NAME]]
+        assert f"  - {shown[1]} -> {UNSAFE_TARGET_NAME}: {REJECTED_PATH}" in output
 
     @pytest.mark.parametrize("show_token_usage", [True, False])
     @pytest.mark.parametrize("outcome", ["no-suggestions", "all-rejected", "declined", "applied"])
@@ -1182,9 +1229,9 @@ class TestRenameCommand:
         """Regression: no suggestions, or none valid, returned before reporting the LLM calls' token usage."""
         operations = {
             "no-suggestions": [],
-            "all-rejected": [make_rename_op(plain_pdf.name, UNSAFE_TARGET_NAME)],
-            "declined": [make_rename_op(plain_pdf.name, NEW_NAME)],
-            "applied": [make_rename_op(plain_pdf.name, NEW_NAME)],
+            "all-rejected": [make_rename_op(FIRST_FILE_ID, plain_pdf.name, UNSAFE_TARGET_NAME)],
+            "declined": [make_rename_op(FIRST_FILE_ID, plain_pdf.name, NEW_NAME)],
+            "applied": [make_rename_op(FIRST_FILE_ID, plain_pdf.name, NEW_NAME)],
         }[outcome]
         rename_llm.invoke.return_value = RenameResult(operations=operations)
         confirmation = ["--yes"] if outcome == "applied" else []
@@ -1208,7 +1255,7 @@ class TestRenameCommand:
         plain_pdf: Path,
     ) -> None:
         Path("pdfalive.toml").write_text("[global]\nshow-token-usage = false\n")
-        suggest_rename(make_rename_op(plain_pdf.name, NEW_NAME))
+        suggest_rename(make_rename_op(FIRST_FILE_ID, plain_pdf.name, NEW_NAME))
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, str(plain_pdf)], input=DECLINE_CONFIRMATION)
 
@@ -1230,7 +1277,7 @@ class TestRenameExitPaths:
         plain_pdf: Path,
     ) -> None:
         """Regression: Ctrl-C or end of input at the confirmation prompt skipped the token usage summary."""
-        suggest_rename(make_rename_op(plain_pdf.name, NEW_NAME))
+        suggest_rename(make_rename_op(FIRST_FILE_ID, plain_pdf.name, NEW_NAME))
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, str(plain_pdf)], input=self.END_OF_INPUT)
 
@@ -1246,7 +1293,7 @@ class TestRenameExitPaths:
         make_rename_op: Callable[..., RenameOp],
         plain_pdf: Path,
     ) -> None:
-        suggest_rename(make_rename_op(plain_pdf.name, NEW_NAME))
+        suggest_rename(make_rename_op(FIRST_FILE_ID, plain_pdf.name, NEW_NAME))
 
         with patch.object(RenameProcessor, "apply_renames", side_effect=RuntimeError("disk vanished")):
             result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, "--yes", str(plain_pdf)])
@@ -1262,7 +1309,7 @@ class TestRenameExitPaths:
         plain_pdf: Path,
     ) -> None:
         """Regression: renames that failed after confirmation still exited 0."""
-        suggest_rename(make_rename_op(plain_pdf.name, NEW_NAME))
+        suggest_rename(make_rename_op(FIRST_FILE_ID, plain_pdf.name, NEW_NAME))
         (plain_pdf.parent / NEW_NAME).touch()  # occupy the target so the rename fails
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, "--yes", str(plain_pdf)])
@@ -1287,7 +1334,7 @@ class TestRenameExitPaths:
             plain_pdf.parent / ".." / plain_pdf.parent.name / plain_pdf.name,
             linked_directory / plain_pdf.name,
         ]
-        suggest_rename(make_rename_op(plain_pdf.name, NEW_NAME))
+        suggest_rename(make_rename_op(FIRST_FILE_ID, plain_pdf.name, NEW_NAME))
 
         result = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, "--yes", *map(str, spellings)])
 
@@ -1305,7 +1352,7 @@ class TestRenameExitPaths:
         plain_pdf: Path,
     ) -> None:
         """Under --yes nobody reads the skipped list, so a run where every suggestion was rejected fails."""
-        suggest_rename(make_rename_op(plain_pdf.name, UNSAFE_TARGET_NAME))
+        suggest_rename(make_rename_op(FIRST_FILE_ID, plain_pdf.name, UNSAFE_TARGET_NAME))
 
         unattended = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, "--yes", str(plain_pdf)])
         interactive = runner.invoke(cli, ["rename", "-q", RENAME_QUERY, str(plain_pdf)], input=DECLINE_CONFIRMATION)
@@ -1339,11 +1386,11 @@ class TestRenameExitPaths:
         _create_valid_pdf(other_pdf)
         operations = {
             "no-suggestions": [],
-            "unchanged-names-only": [make_rename_op(plain_pdf.name, plain_pdf.name)],
-            "all-rejected": [make_rename_op(plain_pdf.name, UNSAFE_TARGET_NAME)],
+            "unchanged-names-only": [make_rename_op(FIRST_FILE_ID, plain_pdf.name, plain_pdf.name)],
+            "all-rejected": [make_rename_op(FIRST_FILE_ID, plain_pdf.name, UNSAFE_TARGET_NAME)],
             "some-rejected-the-rest-applied": [
-                make_rename_op(plain_pdf.name, UNSAFE_TARGET_NAME),
-                make_rename_op(other_pdf.name, NEW_NAME),
+                make_rename_op(FIRST_FILE_ID, plain_pdf.name, UNSAFE_TARGET_NAME),
+                make_rename_op(FIRST_FILE_ID + 1, other_pdf.name, NEW_NAME),
             ],
         }[outcome]
         rename_llm.invoke.return_value = RenameResult(operations=operations)
