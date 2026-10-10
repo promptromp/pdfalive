@@ -4,8 +4,10 @@ from unittest.mock import MagicMock, patch
 
 import pymupdf
 import pytest
+from rich.console import Console
 
 from pdfalive.models.toc import TOC, TOCEntry, TOCFeature
+from pdfalive.processors import toc_generator as toc_generator_module
 from pdfalive.processors.toc_generator import (
     _BOTTOM_OF_PAGE_Y_THRESHOLD,
     _FRONT_MATTER_TITLE_PATTERN,
@@ -13,6 +15,7 @@ from pdfalive.processors.toc_generator import (
     _HEADING_FONT_SIZE_RATIO,
     _HEADING_FONT_SIZE_RATIO_PHASE2,
     _LETTERSPACED_PATTERN,
+    _MAX_DROPPED_ENTRIES_SHOWN,
     _MAX_HEADING_CANDIDATES_PER_PAGE,
     _RUNNING_HEADER_Y_THRESHOLD,
     _SECTION_NUMBER_PATTERN,
@@ -32,6 +35,10 @@ from pdfalive.processors.toc_generator import (
     serialize_features_compact,
 )
 from pdfalive.tokens import TokenUsage
+
+
+# Wide enough that rich never wraps a console line mid-assertion.
+_WIDE_CONSOLE_WIDTH = 1000
 
 
 @pytest.fixture
@@ -209,6 +216,64 @@ class TestTOCGenerator:
         # Should succeed and set new TOC
         mock_doc.set_toc.assert_called_once()
         mock_doc.save.assert_called_once()
+
+    @pytest.fixture
+    def chapter_titles(self):
+        return ["Chapter 1: Introduction", "Chapter 2: Methods"]
+
+    @pytest.fixture
+    def real_doc(self, chapter_titles):
+        """In-memory PDF with one chapter heading per page; unlike a mock, its set_toc() validates rows."""
+        doc = pymupdf.open()
+        for title in chapter_titles:
+            doc.new_page().insert_text((72, 100), title, fontsize=16)
+        yield doc
+        doc.close()
+
+    def test_run_drops_entries_outside_document(self, real_doc, mock_llm, chapter_titles, make_toc_entry):
+        """Entries whose page lies outside the document are dropped instead of crashing set_toc().
+
+        Regression: the postprocessor converted printed back-matter pages with a
+        front-matter offset that overshot the last page, and PyMuPDF raised
+        "page number out of range" after all LLM work was done. Page 0 is not
+        a page of a 1-indexed TOC either (PyMuPDF would silently map it to page 1).
+        """
+        page_count = real_doc.page_count
+        in_range = [make_toc_entry(title=title, page_number=page) for page, title in enumerate(chapter_titles, start=1)]
+        out_of_range = [
+            make_toc_entry(title="References", page_number=page_count + 1),
+            make_toc_entry(title="Index", page_number=page_count + 13),
+            make_toc_entry(title="Nowhere", page_number=0),
+        ]
+        mock_llm.with_structured_output.return_value.invoke.return_value = TOC(entries=in_range + out_of_range)
+
+        TOCGenerator(doc=real_doc, llm=mock_llm).run(output_file=None, force=True, request_delay=0)
+
+        assert real_doc.get_toc() == [entry.to_list() for entry in in_range]
+
+    @pytest.mark.parametrize(
+        "dropped_count,expected_noun",
+        [(1, "entry"), (_MAX_DROPPED_ENTRIES_SHOWN, "entries"), (_MAX_DROPPED_ENTRIES_SHOWN + 2, "entries")],
+    )
+    def test_drop_warning_names_a_capped_number_of_entries(
+        self, mock_doc, mock_llm, make_toc_entry, monkeypatch, dropped_count, expected_noun
+    ):
+        """The warning names at most _MAX_DROPPED_ENTRIES_SHOWN entries, escaping markup in titles."""
+        recording_console = Console(record=True, width=_WIDE_CONSOLE_WIDTH)
+        monkeypatch.setattr(toc_generator_module, "console", recording_console)
+        dropped = [
+            make_toc_entry(title=f"[Appendix {i}]", page_number=mock_doc.page_count + i)
+            for i in range(1, dropped_count + 1)
+        ]
+
+        TOCGenerator(doc=mock_doc, llm=mock_llm)._drop_out_of_range_entries(TOC(entries=dropped))
+
+        output = recording_console.export_text()
+        assert f"Dropped {dropped_count} {expected_noun}" in output
+        shown, hidden = dropped[:_MAX_DROPPED_ENTRIES_SHOWN], dropped[_MAX_DROPPED_ENTRIES_SHOWN:]
+        assert all(f"'{entry.title}'" in output for entry in shown)
+        assert not any(f"'{entry.title}'" in output for entry in hidden)
+        assert (f"and {len(hidden)} more" in output) == bool(hidden)
 
 
 class TestTOCGeneratorPagination:
@@ -2303,6 +2368,34 @@ class TestCorrectPostprocessedPageNumbers:
         result = generator._correct_postprocessed_page_numbers(original, refined)
         assert result.entries[1].page_number == 537
 
+    # Two level-1 chapters whose pages imply a front-matter offset of 15 (Chapter I at PDF page 16).
+    OFFSET_ANCHOR_CHAPTERS = [("Chapter I", 16, 1), ("Chapter II", 41, 1)]
+    OFFSET_ANCHOR_OFFSET = 15
+
+    @pytest.mark.parametrize(
+        "overshoot",
+        [
+            OFFSET_ANCHOR_OFFSET - 5,  # claimed page's window still reaches into the document
+            OFFSET_ANCHOR_OFFSET + 5,  # claimed page's window lies entirely past the last page
+        ],
+    )
+    def test_relocates_new_entry_whose_offset_page_overshoots_document(self, generator, overshoot):
+        """A new entry pushed past the last page by printed page + offset is found near the end.
+
+        PDFs that omit pages the printed book numbers (e.g. stripped blank pages)
+        make the front-matter offset overshoot for back matter.
+        """
+        page_count = generator.doc.page_count
+        heading_title = "Variation of the Symplectic Volume"
+        heading_page = page_count - 3  # within the offset window of the last page
+        generator.doc._page_texts[heading_page - 1] = heading_title
+
+        original = self._make_toc(self.OFFSET_ANCHOR_CHAPTERS)
+        refined = self._make_toc([*self.OFFSET_ANCHOR_CHAPTERS, (heading_title, page_count + overshoot, 2)])
+
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        assert result.entries[-1].page_number == heading_page
+
     def test_empty_refined_toc_returned_as_is(self, generator):
         """Empty refined TOC is returned unchanged."""
         empty = TOC(entries=[])
@@ -3571,6 +3664,29 @@ class TestFindHeadingPage:
         # Search beyond doc bounds (page_count=5) — should not crash
         result = gen._find_heading_page("Target Heading", 1, 100)
         assert result == 1
+
+    @pytest.mark.parametrize(
+        "start_page,end_page,hint_page,heading_pages,expected",
+        [
+            # Hint past the end of the range (e.g. printed page + offset beyond the last page).
+            (1, 4, 20, {1, 2}, 2),
+            # Hint before the start of the range.
+            (4, 6, 1, {4, 5}, 4),
+        ],
+    )
+    def test_hint_outside_range_searches_nearest_pages_first(
+        self, mock_doc, mock_llm, start_page, end_page, hint_page, heading_pages, expected
+    ):
+        """A hint outside [start_page, end_page) still searches the whole range, nearest page first."""
+        title = "Target Heading"
+        pages = [
+            self._make_page([self._text_block(0.15, title if page_number in heading_pages else "Body text")])
+            for page_number in range(1, mock_doc.page_count + 1)
+        ]
+        mock_doc.__getitem__ = lambda _, idx: pages[idx]
+
+        gen = TOCGenerator(mock_doc, mock_llm)
+        assert gen._find_heading_page(title, start_page, end_page, hint_page=hint_page) == expected
 
 
 class TestCorrectPostprocessedNewEntries:

@@ -12,6 +12,7 @@ import pymupdf
 from langchain.chat_models.base import BaseChatModel
 from langchain.messages import HumanMessage, SystemMessage
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from tenacity import (
     retry,
@@ -195,6 +196,9 @@ _DEFAULT_HEADING_SEARCH_WINDOW = 1
 
 # Output/prompt formatting precision.
 _CONFIDENCE_DECIMAL_PLACES = 2
+
+# Maximum number of dropped out-of-range entries named in the console warning.
+_MAX_DROPPED_ENTRIES_SHOWN = 5
 
 
 def _normalize_snippet(text: str) -> str:
@@ -984,6 +988,7 @@ class TOCGenerator:
         # Postprocessing may produce duplicate entries (e.g., "Exercises" added once
         # per chapter from a printed TOC but all mapping to the same page).
         toc = toc.deduplicate()
+        toc = self._drop_out_of_range_entries(toc)
         toc = toc.sort_by_page()
         toc = toc.sanitize_hierarchy()
         self.doc.set_toc(toc.to_list())
@@ -995,6 +1000,32 @@ class TOCGenerator:
     def _check_for_existing_toc(self) -> list:
         """Check if the document already has a TOC."""
         return self.doc.get_toc()
+
+    def _drop_out_of_range_entries(self, toc: TOC) -> TOC:
+        """Drop entries whose page number does not exist in the document, with a console warning.
+
+        LLM page numbers are not guaranteed to be in range. In particular, the
+        postprocessor converts printed-TOC pages with a single front-matter
+        offset, which overshoots the last page for back matter when the PDF
+        omits pages the printed book numbers (e.g. stripped blank pages), and
+        heading verification cannot always relocate those entries. Such an
+        entry has no known destination; pointing it at the nearest valid page
+        would produce a bookmark to unrelated content, so it is dropped.
+        """
+        in_range, out_of_range = toc.partition_by_page_range(self.doc.page_count)
+        if out_of_range:
+            shown = ", ".join(
+                f"'{escape(entry.title)}' (page {entry.page_number})"
+                for entry in out_of_range[:_MAX_DROPPED_ENTRIES_SHOWN]
+            )
+            hidden_count = len(out_of_range) - _MAX_DROPPED_ENTRIES_SHOWN
+            more = f" and {hidden_count} more" if hidden_count > 0 else ""
+            noun = "entry" if len(out_of_range) == 1 else "entries"
+            console.print(
+                f"  [yellow]Dropped {len(out_of_range)} {noun} with page numbers outside the document "
+                f"(1-{self.doc.page_count}): {shown}{more}[/yellow]"
+            )
+        return in_range
 
     def _extract_features(
         self,
@@ -1855,16 +1886,13 @@ must be PDF page numbers (not printed page numbers).
         start_idx = max(0, start_page - 1)
         end_idx = min(self.doc.page_count, end_page - 1)
 
-        # Build page order: outward from hint_page if provided, else sequential
+        # Build page order: nearest to hint_page first (later page wins ties), else
+        # sequential. Ordering the range itself, rather than stepping outward from
+        # the hint, still covers the whole range when the hint lies outside it.
+        page_order = list(range(start_idx, end_idx))
         if hint_page is not None:
             center = hint_page - 1  # 0-indexed
-            page_order = []
-            for delta in range(end_idx - start_idx + 1):
-                for candidate in [center + delta, center - delta]:
-                    if start_idx <= candidate < end_idx and candidate not in page_order:
-                        page_order.append(candidate)
-        else:
-            page_order = list(range(start_idx, end_idx))
+            page_order.sort(key=lambda idx: (abs(idx - center), idx < center))
 
         for page_idx in page_order:
             page = self.doc[page_idx]
@@ -2146,11 +2174,13 @@ must be PDF page numbers (not printed page numbers).
                 search_text = _normalize_snippet(entry.title)
                 if len(search_text) < _FUZZY_MIN_SUBSTRING_LEN:
                     continue
-                search_start = max(1, entry.page_number - window)
-                search_end = min(self.doc.page_count, entry.page_number + window) + 1
-                actual_page = self._find_heading_page(
-                    entry.title, search_start, search_end, hint_page=entry.page_number
-                )
+                # Center on the nearest in-document page: an entry claimed past the
+                # last page (printed page + offset overshooting a PDF that omits
+                # printed pages) is most likely among the final pages.
+                center = min(max(entry.page_number, 1), self.doc.page_count)
+                search_start = max(1, center - window)
+                search_end = min(self.doc.page_count, center + window) + 1
+                actual_page = self._find_heading_page(entry.title, search_start, search_end, hint_page=center)
                 if actual_page is not None and actual_page != entry.page_number:
                     corrected[i] = entry.model_copy(update={"page_number": actual_page})
                     verified_count += 1
