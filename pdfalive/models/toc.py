@@ -71,6 +71,25 @@ class TOC(BaseModel):
 
         return TOC(entries=sanitized)
 
+    def partition_by_page_range(self, page_count: int) -> tuple["TOC", list[TOCEntry]]:
+        """Split entries by whether their page number exists in a document of ``page_count`` pages.
+
+        PyMuPDF's set_toc() rejects entries whose page lies outside 1..page_count,
+        and such an entry has no real destination to point to.
+
+        Args:
+            page_count: Number of pages in the document the TOC will be applied to.
+
+        Returns:
+            A tuple of (TOC with the in-range entries, list of out-of-range entries),
+            both preserving the original entry order.
+        """
+        in_range: list[TOCEntry] = []
+        out_of_range: list[TOCEntry] = []
+        for entry in self.entries:
+            (in_range if 1 <= entry.page_number <= page_count else out_of_range).append(entry)
+        return TOC(entries=in_range), out_of_range
+
     def sort_by_page(self) -> "TOC":
         """Sort TOC entries by page number to enforce monotonicity.
 

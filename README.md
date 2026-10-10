@@ -279,6 +279,7 @@ uv pip install -e .
 | [ruff](https://docs.astral.sh/ruff/) | Formatting and linting |
 | [mypy](https://mypy-lang.org/) | Static type checking |
 | [pytest](https://docs.pytest.org/) | Unit testing |
+| [pytest-impacted](https://github.com/promptromp/pytest-impacted) | Run only the tests impacted by a change (Rust-accelerated via the `fast` extra) |
 | [pre-commit](https://pre-commit.com/) | Git hooks for quality checks |
 
 ```bash
@@ -291,6 +292,10 @@ uv run mypy pdfalive
 
 # Run tests
 uv run pytest
+
+# Run only the tests impacted by uncommitted changes, or by the current branch vs main
+uv run pytest --impacted --impacted-module=pdfalive
+uv run pytest --impacted --impacted-module=pdfalive --impacted-git-mode=branch --impacted-base-branch=main
 ```
 
 **Evaluation harness:**

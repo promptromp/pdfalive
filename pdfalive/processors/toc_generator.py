@@ -12,6 +12,7 @@ import pymupdf
 from langchain.chat_models.base import BaseChatModel
 from langchain.messages import HumanMessage, SystemMessage
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from tenacity import (
     retry,
@@ -984,6 +985,7 @@ class TOCGenerator:
         # Postprocessing may produce duplicate entries (e.g., "Exercises" added once
         # per chapter from a printed TOC but all mapping to the same page).
         toc = toc.deduplicate()
+        toc = self._drop_out_of_range_entries(toc)
         toc = toc.sort_by_page()
         toc = toc.sanitize_hierarchy()
         self.doc.set_toc(toc.to_list())
@@ -995,6 +997,24 @@ class TOCGenerator:
     def _check_for_existing_toc(self) -> list:
         """Check if the document already has a TOC."""
         return self.doc.get_toc()
+
+    def _drop_out_of_range_entries(self, toc: TOC) -> TOC:
+        """Drop entries whose page number does not exist in the document, reporting each one.
+
+        LLM page numbers are not guaranteed to be in range. In particular, the
+        postprocessor converts printed-TOC pages with a single front-matter
+        offset, which overshoots the last page for back matter when the PDF
+        omits pages the printed book numbers (e.g. stripped blank pages), and
+        heading verification cannot always relocate those entries.
+        """
+        in_range, out_of_range = toc.partition_by_page_range(self.doc.page_count)
+        if out_of_range:
+            dropped = ", ".join(f"'{escape(entry.title)}' (page {entry.page_number})" for entry in out_of_range)
+            console.print(
+                f"  [yellow]Dropped {len(out_of_range)} entries with page numbers outside the document "
+                f"(1-{self.doc.page_count}): {dropped}[/yellow]"
+            )
+        return in_range
 
     def _extract_features(
         self,
@@ -1855,16 +1875,13 @@ must be PDF page numbers (not printed page numbers).
         start_idx = max(0, start_page - 1)
         end_idx = min(self.doc.page_count, end_page - 1)
 
-        # Build page order: outward from hint_page if provided, else sequential
+        # Build page order: nearest to hint_page first (later page wins ties), else
+        # sequential. Ordering the range itself, rather than stepping outward from
+        # the hint, still covers the whole range when the hint lies outside it.
+        page_order = list(range(start_idx, end_idx))
         if hint_page is not None:
             center = hint_page - 1  # 0-indexed
-            page_order = []
-            for delta in range(end_idx - start_idx + 1):
-                for candidate in [center + delta, center - delta]:
-                    if start_idx <= candidate < end_idx and candidate not in page_order:
-                        page_order.append(candidate)
-        else:
-            page_order = list(range(start_idx, end_idx))
+            page_order.sort(key=lambda idx: (abs(idx - center), idx < center))
 
         for page_idx in page_order:
             page = self.doc[page_idx]

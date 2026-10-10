@@ -408,6 +408,44 @@ class TestTOCSortByPage:
         assert actual == expected_pages
 
 
+class TestTOCPartitionByPageRange:
+    """Tests for TOC.partition_by_page_range() — PyMuPDF set_toc() rejects pages outside the document."""
+
+    PAGE_COUNT = 240
+
+    @pytest.mark.parametrize(
+        "input_pages,expected_kept_pages,expected_dropped_pages",
+        [
+            ([], [], []),
+            ([1, 120, PAGE_COUNT], [1, 120, PAGE_COUNT], []),
+            ([1, PAGE_COUNT + 1, PAGE_COUNT + 13], [1], [PAGE_COUNT + 1, PAGE_COUNT + 13]),
+            ([0, -1, 5], [5], [0, -1]),
+            ([PAGE_COUNT + 1], [], [PAGE_COUNT + 1]),
+        ],
+    )
+    def test_splits_entries_by_page_range(self, make_toc, input_pages, expected_kept_pages, expected_dropped_pages):
+        """Entries on pages 1..page_count are kept; all others are returned as dropped."""
+        toc = make_toc(*[(f"Entry {i}", page, 1) for i, page in enumerate(input_pages)])
+
+        kept, dropped = toc.partition_by_page_range(self.PAGE_COUNT)
+
+        assert [e.page_number for e in kept.entries] == expected_kept_pages
+        assert [e.page_number for e in dropped] == expected_dropped_pages
+
+    def test_preserves_entry_order_and_fields(self, make_toc_entry):
+        """Partitioning neither reorders nor modifies entries."""
+        entries = [
+            make_toc_entry(title="Chapter 30", page_number=214, level=1, confidence=0.8),
+            make_toc_entry(title="Index", page_number=self.PAGE_COUNT + 13, level=1, confidence=0.7),
+            make_toc_entry(title="30.1 Polynomial", page_number=210, level=2, confidence=0.6),
+        ]
+
+        kept, dropped = TOC(entries=entries).partition_by_page_range(self.PAGE_COUNT)
+
+        assert kept.entries == [entries[0], entries[2]]
+        assert dropped == [entries[1]]
+
+
 class TestRenameOp:
     """Tests for RenameOp model."""
 
