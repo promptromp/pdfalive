@@ -170,6 +170,14 @@ _MIN_ESTIMATED_BLOCK_TOKENS = 1
 _PYMUPDF_BOLD_FLAG = 16
 _PYMUPDF_TEXT_BLOCK_TYPE = 0
 
+# Tesseract's PDF renderer, which PyMuPDF's OCR uses (so pdfalive extract-text and the OCR
+# step of generate-toc), writes its invisible text layer in this font: one span per word,
+# the space between two words a span of its own or folded into the next word, each word at
+# a size estimated from its box. Those sizes jitter by 10-15% from word to word, and a line's
+# size by about as much from page to page, so on such a layer size does not tell headings
+# from body text.
+_OCR_TEXT_LAYER_FONT = "GlyphLessFont"
+
 # Reference text scan defaults for postprocessing.
 DEFAULT_REFERENCE_TOC_MAX_PAGES = 20
 DEFAULT_REFERENCE_TOC_UNFILTERED_PAGES = 3
@@ -516,6 +524,11 @@ def _snippet(feature: TOCFeature) -> str:
     return feature.text[:TEXT_SNIPPET_LENGTH]
 
 
+def _is_ocr_text_layer_font(font_name: str) -> bool:
+    """Whether a font is the one an OCR text layer is written in (see _OCR_TEXT_LAYER_FONT)."""
+    return _strip_subset_prefix(font_name) == _OCR_TEXT_LAYER_FONT
+
+
 def serialize_features_compact(features: list) -> str:
     """Serialize features into a compact text format with a font table.
 
@@ -625,7 +638,9 @@ def filter_features_for_llm(features: list, max_body_spans_per_page: int = _MAX_
     body spans per page. The retained body span keeps every page represented
     in the payload (page anchoring) and gives the LLM a body-font baseline —
     and is typically the running header or first paragraph line, preserving
-    the y-position guidance in the prompt.
+    the y-position guidance in the prompt. Every line of an OCR text layer
+    (is_ocr_line, see _line_spans) is kept, since sizes there do not tell
+    headings from body text (see _OCR_TEXT_LAYER_FONT).
 
     The full (unfiltered) features must still be used for deterministic
     corrections and the postprocess summary; this filter only shrinks the
@@ -651,7 +666,7 @@ def filter_features_for_llm(features: list, max_body_spans_per_page: int = _MAX_
             for span in line:
                 if not isinstance(span, TOCFeature):
                     continue
-                if _is_heading_like_feature(span, body_font_size):
+                if span.is_ocr_line or _is_heading_like_feature(span, body_font_size):
                     filtered_line.append(span)
                 elif body_spans_kept.get(span.page_number, 0) < max_body_spans_per_page:
                     body_spans_kept[span.page_number] = body_spans_kept.get(span.page_number, 0) + 1
@@ -784,6 +799,56 @@ def _is_heading_candidate(
     )
 
 
+def _line_spans(spans: list[dict]) -> list[dict]:
+    """The spans a line read from the PDF contributes to the features.
+
+    A line of an OCR text layer, one whose spans are all in _OCR_TEXT_LAYER_FONT, is one
+    span marked is_ocr_line: its words joined by single spaces, at the character-weighted
+    median of their sizes, with the first word's font and flags and the box of all its
+    words. Every stage then sees an OCR line whole rather than as words at jittered sizes;
+    a line of spaces only contributes no span. Any other line's spans are runs of one
+    style and are returned as they are.
+    """
+    if not spans or not all(_is_ocr_text_layer_font(span.get("font", "")) for span in spans):
+        return spans
+    words = [(span, text) for span in spans if (text := span.get("text", "").strip())]
+    if not words:
+        return []
+    boxes = [span["bbox"] for span, _ in words if span.get("bbox")]
+    first, _ = words[0]
+    return [
+        {
+            "font": first.get("font", ""),
+            "size": _weighted_median([(span.get("size", 0.0), len(text)) for span, text in words]),
+            "text": " ".join(text for _, text in words),
+            "bbox": (
+                (
+                    min(box[0] for box in boxes),
+                    min(box[1] for box in boxes),
+                    max(box[2] for box in boxes),
+                    max(box[3] for box in boxes),
+                )
+                if boxes
+                else None
+            ),
+            "flags": first.get("flags", 0),
+            "is_ocr_line": True,
+        }
+    ]
+
+
+def _weighted_median(values_with_weights: list[tuple[float, int]]) -> float:
+    """The lower weighted median: the smallest value at which half of the total weight is reached."""
+    ordered = sorted(values_with_weights)
+    half = sum(weight for _, weight in ordered) / 2
+    cumulative = 0
+    for value, weight in ordered:
+        cumulative += weight
+        if cumulative >= half:
+            return value
+    raise ValueError("weighted median of no values")
+
+
 def _merge_line_spans(spans: list[dict]) -> dict:
     """Merge spans from one PDF line into a single synthetic span.
 
@@ -806,6 +871,7 @@ def _merge_line_spans(spans: list[dict]) -> dict:
         "bbox": first_bbox,
         "flags": first.get("flags", 0),
         "is_bold": any(_is_bold_font(span) for span in spans),
+        "is_ocr_line": any(span.get("is_ocr_line", False) for span in spans),
     }
 
 
@@ -820,6 +886,7 @@ def _span_to_feature(span: dict, page_number: int, page_height: float) -> TOCFea
         text=span.get("text", ""),
         y_position=y_pos,
         is_bold=span.get("is_bold", _is_bold_font(span)),
+        is_ocr_line=span.get("is_ocr_line", False),
     )
 
 
@@ -852,7 +919,7 @@ def _append_page_features(
             if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
                 lines = block["lines"]
                 if lines:
-                    spans = lines[0]["spans"]
+                    spans = _line_spans(lines[0]["spans"])
                     if spans:
                         remaining_spans_buffer.append((page_number, page_height, len(features), spans))
             continue
@@ -866,7 +933,7 @@ def _append_page_features(
 
                 features[-1].append([])
 
-                for span in line["spans"]:
+                for span in _line_spans(line["spans"]):
                     features[-1][-1].append(_span_to_feature(span, page_number, page_height))
 
 
@@ -1963,11 +2030,12 @@ number exactly as printed.
             return toc
 
         # Build page-zone text index: group feature text by page and y-zone.
-        # In OCR text each word is a separate span, so matching individual spans
-        # against multi-word titles fails. Instead, concatenate all feature text
-        # per page in two zones: "header" (y < RUNNING_HEADER_Y_THRESHOLD) and
-        # "body" (y >= RUNNING_HEADER_Y_THRESHOLD), then match against the
-        # concatenated text.
+        # A title can span several features (a line's style runs, or several
+        # lines), so matching individual features against multi-word titles
+        # fails. Instead, concatenate all feature text per page in two zones:
+        # "header" (y < RUNNING_HEADER_Y_THRESHOLD) and "body"
+        # (y >= RUNNING_HEADER_Y_THRESHOLD), then match against the concatenated
+        # text (each feature's whole text).
         page_header_text: dict[int, str] = {}  # page -> concatenated header zone text
         page_body_text: dict[int, str] = {}  # page -> concatenated body zone text
         # page -> concatenated text of the body zone's bottom part (y >= _PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD),

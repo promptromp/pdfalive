@@ -3,7 +3,7 @@
   "reasoning_effort": null,
   "entries": [
     {
-      "request_hash": "074e9703a1560ac4fadc194a5907764a08f7e4d8e9ad8e2b1b5db412fa96d5f4",
+      "request_hash": "6a654b4d52df3d7781a465c63bf767fee86d049773de25b8b6738434d8c80960",
       "schema_name": "TOC",
       "response": {
         "entries": [
@@ -77,7 +77,7 @@
             "title": "Chapter 6: Rigid Bodies",
             "page_number": 140,
             "level": 2,
-            "confidence": 0.99
+            "confidence": 0.98
           },
           {
             "title": "Part III: Hamiltonian Mechanics",
@@ -89,7 +89,7 @@
             "title": "Chapter 7: Differential Forms",
             "page_number": 180,
             "level": 2,
-            "confidence": 0.99
+            "confidence": 0.98
           },
           {
             "title": "Chapter 8: Symplectic Manifolds",
@@ -113,10 +113,10 @@
             "title": "Appendix 1: Riemannian Curvature",
             "page_number": 318,
             "level": 1,
-            "confidence": 0.98
+            "confidence": 0.99
           },
           {
-            "title": "Appendix 2: Geodesics on Lie Groups and Hydrodynamics",
+            "title": "Appendix 2: Geodesics of Left-Invariant Metrics on Lie Groups and the Hydrodynamics of Ideal Fluids",
             "page_number": 335,
             "level": 1,
             "confidence": 0.97
@@ -125,91 +125,91 @@
             "title": "Appendix 3: Symplectic Structures on Algebraic Manifolds",
             "page_number": 360,
             "level": 1,
-            "confidence": 0.98
+            "confidence": 0.99
           },
           {
             "title": "Appendix 4: Contact Structures",
             "page_number": 366,
             "level": 1,
-            "confidence": 0.98
+            "confidence": 0.99
           },
           {
             "title": "Appendix 5: Dynamical Systems with Symmetries",
             "page_number": 388,
             "level": 1,
-            "confidence": 0.98
+            "confidence": 0.99
           },
           {
             "title": "Appendix 6: Normal Forms of Quadratic Hamiltonians",
             "page_number": 398,
             "level": 1,
-            "confidence": 0.97
+            "confidence": 0.99
           },
           {
             "title": "Appendix 7: Normal Forms of Hamiltonian Systems Near Stationary Points and Closed Trajectories",
             "page_number": 402,
             "level": 1,
-            "confidence": 0.96
+            "confidence": 0.99
           },
           {
             "title": "Appendix 8: Theory of Perturbations of Conditionally Periodic Motion, and Kolmogorov’s Theorem",
             "page_number": 416,
             "level": 1,
-            "confidence": 0.96
-          },
-          {
-            "title": "Appendix 9: Poincaré’s Geometric Theorem, Generalizations and Applications",
-            "page_number": 433,
-            "level": 1,
-            "confidence": 0.97
-          },
-          {
-            "title": "Appendix 10: Multiplicities of Characteristic Frequencies, and Ellipsoids Depending on Parameters",
-            "page_number": 442,
-            "level": 1,
             "confidence": 0.98
           },
           {
-            "title": "Appendix 11: Short-Wave Asymptotics",
+            "title": "Appendix 9: Poincaré’s Geometric Theorem, Its Generalizations and Applications",
+            "page_number": 433,
+            "level": 1,
+            "confidence": 0.99
+          },
+          {
+            "title": "Appendix 10: Multiplicities of Characteristic Frequencies and Ellipsoids Depending on Parameters",
+            "page_number": 442,
+            "level": 1,
+            "confidence": 0.99
+          },
+          {
+            "title": "Appendix 11: Short Wave Asymptotics",
             "page_number": 455,
             "level": 1,
-            "confidence": 0.97
+            "confidence": 0.99
           },
           {
             "title": "Appendix 12: Lagrangian Singularities",
             "page_number": 463,
             "level": 1,
-            "confidence": 0.93
+            "confidence": 0.99
           },
           {
             "title": "Appendix 13: The Korteweg–de Vries Equation",
             "page_number": 470,
             "level": 1,
-            "confidence": 0.98
+            "confidence": 0.99
           },
           {
             "title": "Appendix 14: Poisson Structures",
             "page_number": 473,
             "level": 1,
-            "confidence": 0.97
+            "confidence": 0.99
           },
           {
             "title": "Appendix 15: On Elliptic Coordinates",
             "page_number": 486,
             "level": 1,
-            "confidence": 0.88
+            "confidence": 0.99
           },
           {
             "title": "Appendix 16: Singularities of Ray Systems",
             "page_number": 497,
             "level": 1,
-            "confidence": 0.96
+            "confidence": 0.99
           },
           {
-            "title": "Bibliography on Symplectic Topology",
+            "title": "Bibliography of Symplectic Topology",
             "page_number": 520,
             "level": 1,
-            "confidence": 0.97
+            "confidence": 0.99
           },
           {
             "title": "Index",
@@ -220,22 +220,22 @@
         ]
       },
       "usage_metadata": {
-        "input_tokens": 47901,
-        "output_tokens": 3462,
-        "total_tokens": 51363,
+        "input_tokens": 49076,
+        "output_tokens": 1957,
+        "total_tokens": 51033,
         "input_token_details": {
           "audio": 0,
           "cache_read": 0,
-          "cache_creation": 47898
+          "cache_creation": 49073
         },
         "output_token_details": {
           "audio": 0,
-          "reasoning": 2440
+          "reasoning": 944
         }
       }
     },
     {
-      "request_hash": "6b63a7ba45a81c35e366a44f6280deec14f4f5c78c814242f05c3615f3b7dc93",
+      "request_hash": "66e6463c809f6fb7569a9ab0c93567b1bfd8cf98fafad34a44aa4b696803df62",
       "schema_name": "PostprocessedTOC",
       "response": {
         "entries": [
@@ -282,21 +282,21 @@
             "printed_page": 3
           },
           {
-            "title": "1. The principles of relativity and determinacy",
+            "title": "1. The Principles of Relativity and Determinacy",
             "page_number": 20,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 3
           },
           {
-            "title": "2. The Galilean group and Newton’s equations",
+            "title": "2. The Galilean Group and Newton’s Equations",
             "page_number": 21,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 4
           },
           {
-            "title": "3. Examples of mechanical systems",
+            "title": "3. Examples of Mechanical Systems",
             "page_number": 28,
             "level": 3,
             "confidence": 0.99,
@@ -310,56 +310,56 @@
             "printed_page": 15
           },
           {
-            "title": "4. Systems with one degree of freedom",
+            "title": "4. Systems with One Degree of Freedom",
             "page_number": 32,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 15
           },
           {
-            "title": "5. Systems with two degrees of freedom",
+            "title": "5. Systems with Two Degrees of Freedom",
             "page_number": 39,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 22
           },
           {
-            "title": "6. Conservative force fields",
+            "title": "6. Conservative Force Fields",
             "page_number": 45,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 28
           },
           {
-            "title": "7. Angular momentum",
+            "title": "7. Angular Momentum",
             "page_number": 47,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 30
           },
           {
-            "title": "8. Investigation of motion in a central field",
+            "title": "8. Investigation of Motion in a Central Field",
             "page_number": 50,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 33
           },
           {
-            "title": "9. The motion of a point in three-space",
+            "title": "9. The Motion of a Point in Three-Space",
             "page_number": 59,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 42
           },
           {
-            "title": "10. Motions of a system of n points",
+            "title": "10. Motions of a System of n Points",
             "page_number": 61,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 44
           },
           {
-            "title": "11. The method of similarity",
+            "title": "11. The Method of Similarity",
             "page_number": 67,
             "level": 3,
             "confidence": 0.99,
@@ -380,35 +380,35 @@
             "printed_page": 55
           },
           {
-            "title": "12. Calculus of variations",
+            "title": "12. Calculus of Variations",
             "page_number": 72,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 55
           },
           {
-            "title": "13. Lagrange’s equations",
+            "title": "13. Lagrange’s Equations",
             "page_number": 76,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 59
           },
           {
-            "title": "14. Legendre transformations",
+            "title": "14. Legendre Transformations",
             "page_number": 78,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 61
           },
           {
-            "title": "15. Hamilton’s equations",
+            "title": "15. Hamilton’s Equations",
             "page_number": 82,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 65
           },
           {
-            "title": "16. Liouville’s theorem",
+            "title": "16. Liouville’s Theorem",
             "page_number": 85,
             "level": 3,
             "confidence": 0.99,
@@ -422,35 +422,35 @@
             "printed_page": 75
           },
           {
-            "title": "17. Holonomic constraints",
+            "title": "17. Holonomic Constraints",
             "page_number": 92,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 75
           },
           {
-            "title": "18. Differentiable manifolds",
+            "title": "18. Differentiable Manifolds",
             "page_number": 94,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 77
           },
           {
-            "title": "19. Lagrangian dynamical systems",
+            "title": "19. Lagrangian Dynamical Systems",
             "page_number": 100,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 83
           },
           {
-            "title": "20. E. Noether’s theorem",
+            "title": "20. E. Noether’s Theorem",
             "page_number": 105,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 88
           },
           {
-            "title": "21. D’Alembert’s principle",
+            "title": "21. D’Alembert’s Principle",
             "page_number": 108,
             "level": 3,
             "confidence": 0.99,
@@ -471,21 +471,21 @@
             "printed_page": 98
           },
           {
-            "title": "23. Small oscillations",
+            "title": "23. Small Oscillations",
             "page_number": 120,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 103
           },
           {
-            "title": "24. Behavior of characteristic frequencies",
+            "title": "24. Behavior of Characteristic Frequencies",
             "page_number": 127,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 110
           },
           {
-            "title": "25. Parametric resonance",
+            "title": "25. Parametric Resonance",
             "page_number": 130,
             "level": 3,
             "confidence": 0.99,
@@ -499,42 +499,42 @@
             "printed_page": 123
           },
           {
-            "title": "26. Motion in a moving coordinate system",
+            "title": "26. Motion in a Moving Coordinate System",
             "page_number": 140,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 123
           },
           {
-            "title": "27. Inertial forces and the Coriolis force",
+            "title": "27. Inertial Forces and the Coriolis Force",
             "page_number": 146,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 129
           },
           {
-            "title": "28. Rigid bodies",
+            "title": "28. Rigid Bodies",
             "page_number": 150,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 133
           },
           {
-            "title": "29. Euler’s equations. Poinsot’s description of the motion",
+            "title": "29. Euler’s Equations: Poinsot’s Description of the Motion",
             "page_number": 159,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 142
           },
           {
-            "title": "30. Lagrange’s top",
+            "title": "30. Lagrange’s Top",
             "page_number": 165,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 148
           },
           {
-            "title": "31. Sleeping tops and fast tops",
+            "title": "31. Sleeping Tops and Fast Tops",
             "page_number": 171,
             "level": 3,
             "confidence": 0.99,
@@ -555,35 +555,35 @@
             "printed_page": 163
           },
           {
-            "title": "32. Exterior forms",
+            "title": "32. Exterior Forms",
             "page_number": 180,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 163
           },
           {
-            "title": "33. Exterior multiplication",
+            "title": "33. Exterior Multiplication",
             "page_number": 187,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 170
           },
           {
-            "title": "34. Differential forms",
+            "title": "34. Differential Forms",
             "page_number": 191,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 174
           },
           {
-            "title": "35. Integration of differential forms",
+            "title": "35. Integration of Differential Forms",
             "page_number": 198,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 181
           },
           {
-            "title": "36. Exterior differentiation",
+            "title": "36. Exterior Differentiation",
             "page_number": 205,
             "level": 3,
             "confidence": 0.99,
@@ -597,49 +597,49 @@
             "printed_page": 201
           },
           {
-            "title": "37. Symplectic structures on manifolds",
+            "title": "37. Symplectic Structures on Manifolds",
             "page_number": 218,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 201
           },
           {
-            "title": "38. Hamiltonian phase flows and their integral invariants",
+            "title": "38. Hamiltonian Phase Flows and Their Integral Invariants",
             "page_number": 221,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 204
           },
           {
-            "title": "39. The Lie algebra of vector fields",
+            "title": "39. The Lie Algebra of Vector Fields",
             "page_number": 225,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 208
           },
           {
-            "title": "40. The Lie algebra of Hamiltonian functions",
+            "title": "40. The Lie Algebra of Hamiltonian Functions",
             "page_number": 231,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 214
           },
           {
-            "title": "41. Symplectic geometry",
+            "title": "41. Symplectic Geometry",
             "page_number": 236,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 219
           },
           {
-            "title": "42. Parametric resonance in systems with many degrees of freedom",
+            "title": "42. Parametric Resonance in Systems with Many Degrees of Freedom",
             "page_number": 242,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 225
           },
           {
-            "title": "43. A symplectic atlas",
+            "title": "43. A Symplectic Atlas",
             "page_number": 246,
             "level": 3,
             "confidence": 0.99,
@@ -653,35 +653,35 @@
             "printed_page": 233
           },
           {
-            "title": "44. The integral invariant of Poincaré–Cartan",
+            "title": "44. The Integral Invariant of Poincaré–Cartan",
             "page_number": 250,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 233
           },
           {
-            "title": "45. Applications of the integral invariant of Poincaré–Cartan",
+            "title": "45. Applications of the Integral Invariant of Poincaré–Cartan",
             "page_number": 257,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 240
           },
           {
-            "title": "46. Huygens’ principle",
+            "title": "46. Huygens’ Principle",
             "page_number": 265,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 248
           },
           {
-            "title": "47. The Hamilton–Jacobi method for integrating Hamilton’s canonical equations",
+            "title": "47. The Hamilton–Jacobi Method for Integrating Hamilton’s Canonical Equations",
             "page_number": 275,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 258
           },
           {
-            "title": "48. Generating functions",
+            "title": "48. Generating Functions",
             "page_number": 283,
             "level": 3,
             "confidence": 0.99,
@@ -695,14 +695,14 @@
             "printed_page": 271
           },
           {
-            "title": "49. Integrable systems",
+            "title": "49. Integrable Systems",
             "page_number": 288,
             "level": 3,
             "confidence": 0.99,
             "printed_page": 271
           },
           {
-            "title": "50. Action-angle variables",
+            "title": "50. Action-Angle Variables",
             "page_number": 296,
             "level": 3,
             "confidence": 0.99,
@@ -716,7 +716,7 @@
             "printed_page": 285
           },
           {
-            "title": "52. Averaging of perturbations",
+            "title": "52. Averaging of Perturbations",
             "page_number": 308,
             "level": 3,
             "confidence": 0.99,
@@ -786,14 +786,14 @@
             "printed_page": 416
           },
           {
-            "title": "Appendix 10: Multiplicities of Characteristic Frequencies, and Ellipsoids Depending on Parameters",
+            "title": "Appendix 10: Multiplicities of Characteristic Frequencies and Ellipsoids Depending on Parameters",
             "page_number": 442,
             "level": 1,
             "confidence": 0.99,
             "printed_page": 425
           },
           {
-            "title": "Appendix 11: Short-Wave Asymptotics",
+            "title": "Appendix 11: Short Wave Asymptotics",
             "page_number": 455,
             "level": 1,
             "confidence": 0.99,
@@ -835,33 +835,33 @@
             "printed_page": 480
           },
           {
-            "title": "Bibliography on Symplectic Topology",
+            "title": "Bibliography of Symplectic Topology",
             "page_number": 520,
             "level": 1,
-            "confidence": 0.97,
+            "confidence": 0.99,
             "printed_page": null
           },
           {
             "title": "Index",
             "page_number": 528,
             "level": 1,
-            "confidence": 0.98,
+            "confidence": 0.99,
             "printed_page": 511
           }
         ]
       },
       "usage_metadata": {
-        "input_tokens": 9588,
-        "output_tokens": 3659,
-        "total_tokens": 13247,
+        "input_tokens": 10132,
+        "output_tokens": 3219,
+        "total_tokens": 13351,
         "input_token_details": {
           "audio": 0,
           "cache_read": 0,
-          "cache_creation": 9585
+          "cache_creation": 10129
         },
         "output_token_details": {
           "audio": 0,
-          "reasoning": 887
+          "reasoning": 425
         }
       }
     }
