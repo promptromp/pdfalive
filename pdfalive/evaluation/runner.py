@@ -15,6 +15,10 @@ The matching cassette lives at ``<evals_dir>/cassettes/<name>.json``. Modes:
 - ``replay``: serve recorded LLM responses from the cassette (free, deterministic).
 - ``record``: call the real LLM and write the cassette as a side effect.
 - ``live``: call the real LLM without touching the cassette.
+
+Each case is scored twice from the same run: the TOC the pipeline writes, and the
+TOC a run without postprocessing writes (``generate-toc``'s default), which for a
+postprocessing case is the first pass before refinement.
 """
 
 from dataclasses import dataclass
@@ -28,7 +32,6 @@ from pydantic import BaseModel, Field
 from pdfalive.evaluation.cassette import RecordingChatModel, ReplayChatModel
 from pdfalive.evaluation.metrics import EvalReport, GoldenEntry, evaluate_toc
 from pdfalive.llm import build_chat_model
-from pdfalive.models.toc import TOC, TOCEntry
 from pdfalive.processors.toc_generator import DEFAULT_REQUEST_DELAY_SECONDS, TOCGenerator
 
 
@@ -65,6 +68,17 @@ class EvalCase:
     @property
     def postprocess(self) -> bool:
         return self.golden.postprocess
+
+
+@dataclass(frozen=True)
+class CaseResult:
+    """A case's scores: the TOC the pipeline writes, and the TOC a run without postprocessing writes.
+
+    For a case without postprocessing both reports score the same TOC.
+    """
+
+    report: EvalReport
+    first_pass_report: EvalReport
 
 
 def load_golden_file(golden_path: Path) -> GoldenFile:
@@ -130,7 +144,7 @@ def run_eval_case(
     request_delay: float | None = None,
     num_processes: int | None = None,
     reasoning_effort: str | None = None,
-) -> EvalReport:
+) -> CaseResult:
     """Run the TOC generation pipeline on a case's PDF and score it against golden data.
 
     Args:
@@ -145,7 +159,8 @@ def run_eval_case(
             leave the provider's default in place.
 
     Returns:
-        The EvalReport scoring the generated TOC against the golden entries.
+        The scores of the TOC the pipeline writes and of the TOC a run without
+        postprocessing writes, both against the golden entries.
     """
     if not case.pdf_path.exists():
         raise FileNotFoundError(
@@ -160,17 +175,16 @@ def run_eval_case(
 
     doc = pymupdf.open(case.pdf_path)
     try:
-        generator = TOCGenerator(doc=doc, llm=llm, num_processes=num_processes)
-        # No output_file: evaluation only needs the in-memory TOC, so skip
-        # serializing a multi-hundred-MB PDF per case.
-        generator.run(
-            output_file=None,
-            force=True,
+        # generate() leaves the document untouched: evaluation only needs the TOCs,
+        # so skip writing and serializing a multi-hundred-MB PDF per case.
+        result = TOCGenerator(doc=doc, llm=llm, num_processes=num_processes).generate(
             request_delay=request_delay,
             postprocess=case.postprocess,
         )
-        generated = TOC(entries=[TOCEntry.from_list(item) for item in doc.get_toc()])
     finally:
         doc.close()
 
-    return evaluate_toc(case.golden.entries, generated)
+    return CaseResult(
+        report=evaluate_toc(case.golden.entries, result.toc),
+        first_pass_report=evaluate_toc(case.golden.entries, result.first_pass_toc),
+    )

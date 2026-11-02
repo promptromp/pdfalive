@@ -328,6 +328,65 @@ class TestTOCGenerator:
 
         assert real_doc.get_toc() == [entry.to_list() for entry in in_range]
 
+    @pytest.fixture
+    def chapter_toc(self, chapter_titles, make_toc_entry):
+        """One level-1 entry per chapter heading, on its page."""
+        return TOC(
+            entries=[
+                make_toc_entry(title=title, page_number=page) for page, title in enumerate(chapter_titles, start=1)
+            ]
+        )
+
+    def test_generate_leaves_the_document_untouched(self, make_structured_answer, real_doc, mock_llm, chapter_toc):
+        """Without postprocessing, the TOC to write is the first pass's TOC; nothing is written yet."""
+        mock_llm.with_structured_output.return_value.invoke.return_value = make_structured_answer(chapter_toc)
+
+        result = TOCGenerator(doc=real_doc, llm=mock_llm).generate(request_delay=0)
+
+        assert real_doc.get_toc() == []
+        assert result.toc.to_list() == chapter_toc.to_list()
+        assert result.first_pass_toc == result.toc
+
+    def test_generate_with_postprocessing_keeps_the_first_pass_toc(
+        self, make_structured_answer, real_doc, mock_llm, chapter_toc
+    ):
+        """The postprocessed TOC is the one to write; the first pass's TOC is still returned, finalized."""
+        first_pass = TOC(entries=chapter_toc.entries[:-1])
+        mock_llm.with_structured_output.return_value.invoke.return_value = make_structured_answer(first_pass)
+        generator = TOCGenerator(doc=real_doc, llm=mock_llm)
+
+        with patch.object(generator, "_postprocess_toc", return_value=(chapter_toc, TokenUsage())) as postprocess:
+            result = generator.generate(request_delay=0, postprocess=True)
+
+        assert postprocess.call_args.args[0].to_list() == first_pass.to_list()
+        assert result.toc.to_list() == chapter_toc.to_list()
+        assert result.first_pass_toc.to_list() == first_pass.to_list()
+
+    @pytest.mark.parametrize("postprocess", [False, True])
+    def test_only_the_written_tocs_dropped_entries_are_reported(
+        self,
+        make_structured_answer,
+        real_doc,
+        mock_llm,
+        chapter_toc,
+        make_toc_entry,
+        recording_console,
+        monkeypatch,
+        postprocess,
+    ):
+        """An out-of-range first-pass entry is reported only when the first pass's TOC is the one written."""
+        monkeypatch.setattr(toc_generator_module, "console", recording_console)
+        out_of_range = make_toc_entry(title="Index", page_number=real_doc.page_count + 1)
+        first_pass = TOC(entries=[*chapter_toc.entries, out_of_range])
+        mock_llm.with_structured_output.return_value.invoke.return_value = make_structured_answer(first_pass)
+        generator = TOCGenerator(doc=real_doc, llm=mock_llm)
+
+        with patch.object(generator, "_postprocess_toc", return_value=(chapter_toc, TokenUsage())):
+            result = generator.generate(request_delay=0, postprocess=postprocess)
+
+        assert result.first_pass_toc.to_list() == chapter_toc.to_list()
+        assert ("Dropped 1 entry" in recording_console.export_text()) == (not postprocess)
+
     @pytest.mark.parametrize(
         "dropped_count,expected_noun",
         [(1, "entry"), (_MAX_DROPPED_ENTRIES_SHOWN, "entries"), (_MAX_DROPPED_ENTRIES_SHOWN + 2, "entries")],
@@ -342,7 +401,7 @@ class TestTOCGenerator:
             for i in range(1, dropped_count + 1)
         ]
 
-        TOCGenerator(doc=mock_doc, llm=mock_llm)._drop_out_of_range_entries(TOC(entries=dropped))
+        TOCGenerator(doc=mock_doc, llm=mock_llm)._report_dropped_entries(dropped)
 
         output = recording_console.export_text()
         assert f"Dropped {dropped_count} {expected_noun}" in output
@@ -357,7 +416,7 @@ class TestTOCGenerator:
         monkeypatch.setattr(toc_generator_module, "console", recording_console)
         dropped = make_toc_entry(title=markup_like_text, page_number=mock_doc.page_count + 1)
 
-        TOCGenerator(doc=mock_doc, llm=mock_llm)._drop_out_of_range_entries(TOC(entries=[dropped]))
+        TOCGenerator(doc=mock_doc, llm=mock_llm)._report_dropped_entries([dropped])
 
         assert f"'{dropped.title}' (page {dropped.page_number})" in recording_console.export_text()
 
@@ -371,7 +430,7 @@ class TestTOCGenerator:
             for offset, title in enumerate(_TAG_FORMING_TITLES, start=1)
         ]
 
-        TOCGenerator(doc=mock_doc, llm=mock_llm)._drop_out_of_range_entries(TOC(entries=dropped))
+        TOCGenerator(doc=mock_doc, llm=mock_llm)._report_dropped_entries(dropped)
 
         output = recording_console.export_text()
         assert all(f"'{entry.title}' (page {entry.page_number})" in output for entry in dropped)

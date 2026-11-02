@@ -10,11 +10,12 @@ import pymupdf
 import pytest
 from click.testing import CliRunner
 from langchain.chat_models.base import BaseChatModel
+from pydantic import BaseModel
 
-from pdfalive.cli import cli
+from pdfalive.cli import _FIRST_PASS_TABLE_TITLE, cli
 from pdfalive.evaluation.cassette import RecordingChatModel
 from pdfalive.evaluation.runner import EvalCase, discover_cases, run_eval_case
-from pdfalive.models.toc import TOC
+from pdfalive.models.toc import TOC, PostprocessedTOC
 from pdfalive.processors.toc_generator import TOCGenerator
 
 
@@ -32,6 +33,9 @@ GOLDEN_SPECS = [
     ("Chapter 2: Advanced Topics", 2, 1),
     ("Index", 3, 1),
 ]
+# What the first pass of a postprocessing case finds: everything but the last golden entry,
+# which the postprocessing step then restores.
+FIRST_PASS_SPECS = GOLDEN_SPECS[:-1]
 
 
 @pytest.fixture
@@ -91,6 +95,39 @@ def recorded_evals_dir(evals_dir: Path, synthetic_pdf_path: Path, mock_llm: Magi
     return evals_dir
 
 
+@pytest.fixture
+def refining_llm(make_toc: Callable[..., TOC], make_structured_answer: Callable[..., dict[str, Any]]) -> MagicMock:
+    """An LLM whose first pass misses the last golden entry and whose postprocessing restores it."""
+    refined = PostprocessedTOC.model_validate(make_toc(*GOLDEN_SPECS), from_attributes=True)
+    answers: dict[type[BaseModel], dict[str, Any]] = {
+        TOC: make_structured_answer(make_toc(*FIRST_PASS_SPECS)),
+        PostprocessedTOC: make_structured_answer(refined),
+    }
+
+    def structured_model(schema: type[BaseModel], include_raw: bool) -> MagicMock:
+        model = MagicMock()
+        model.invoke.return_value = answers[schema]
+        return model
+
+    llm = MagicMock()
+    llm.with_structured_output.side_effect = structured_model
+    return llm
+
+
+@pytest.fixture
+def postprocess_evals_dir(evals_dir: Path, synthetic_pdf_path: Path, refining_llm: MagicMock) -> Path:
+    """Evals dir whose case runs with postprocessing, with a cassette recorded through the real pipeline."""
+    golden_path = evals_dir / "golden" / f"{CASE_NAME}.json"
+    golden_path.write_text(json.dumps(json.loads(golden_path.read_text()) | {"postprocess": True}))
+    recorder = RecordingChatModel(llm=refining_llm, cassette_path=evals_dir / "cassettes" / f"{CASE_NAME}.json")
+    doc = pymupdf.open(synthetic_pdf_path)
+    TOCGenerator(doc=doc, llm=cast(BaseChatModel, recorder), num_processes=1).generate(
+        request_delay=0, postprocess=True
+    )
+    doc.close()
+    return evals_dir
+
+
 class TestDiscoverCases:
     def test_finds_cases_from_golden_files(self, evals_dir: Path, synthetic_pdf_path: Path) -> None:
         cases = discover_cases(evals_dir)
@@ -114,7 +151,7 @@ class TestRunEvalCase:
         return discover_cases(recorded_evals_dir)[0]
 
     def test_replay_scores_perfectly_against_matching_golden(self, case: EvalCase) -> None:
-        report = run_eval_case(case, mode="replay", num_processes=1)
+        report = run_eval_case(case, mode="replay", num_processes=1).report
 
         assert report.f1 == 1.0
         assert report.page_accuracy() == 1.0
@@ -133,7 +170,7 @@ class TestRunEvalCase:
         case.golden_path.write_text(json.dumps(golden))
         case = discover_cases(recorded_evals_dir)[0]  # golden data is parsed at discovery time
 
-        report = run_eval_case(case, mode="replay", num_processes=1)
+        report = run_eval_case(case, mode="replay", num_processes=1).report
 
         assert report.recall == pytest.approx(3 / 4)
         assert [entry.title for entry in report.missing] == ["Appendix A: Extra Material"]
@@ -141,6 +178,21 @@ class TestRunEvalCase:
     def test_unknown_mode_raises(self, case: EvalCase) -> None:
         with pytest.raises(ValueError, match="mode"):
             run_eval_case(case, mode="invalid", num_processes=1)  # type: ignore[arg-type]
+
+    def test_without_postprocessing_both_reports_score_the_same_toc(self, case: EvalCase) -> None:
+        result = run_eval_case(case, mode="replay", num_processes=1)
+
+        assert result.first_pass_report.summary() == result.report.summary()
+
+    def test_postprocessing_case_also_scores_the_first_pass(self, postprocess_evals_dir: Path) -> None:
+        """One run scores both the written TOC and the TOC a run without postprocessing writes."""
+        case = discover_cases(postprocess_evals_dir)[0]
+
+        result = run_eval_case(case, mode="replay", num_processes=1)
+
+        assert result.report.recall == 1.0
+        assert result.first_pass_report.recall == pytest.approx(len(FIRST_PASS_SPECS) / len(GOLDEN_SPECS))
+        assert [entry.title for entry in result.first_pass_report.missing] == [GOLDEN_SPECS[-1][0]]
 
 
 class TestEvalCommand:
@@ -171,6 +223,24 @@ class TestEvalCommand:
 
     def test_passing_threshold_keeps_exit_code_zero(self, runner: CliRunner, recorded_evals_dir: Path) -> None:
         result = runner.invoke(cli, self.eval_args(recorded_evals_dir, "--min-f1", "0.99"))
+
+        assert result.exit_code == 0, result.output
+
+    @pytest.mark.parametrize(
+        ("evals_dir_fixture", "shows_first_pass_table"),
+        [("recorded_evals_dir", False), ("postprocess_evals_dir", True)],
+    )
+    def test_first_pass_table_only_for_postprocessing_cases(
+        self, runner: CliRunner, request: pytest.FixtureRequest, evals_dir_fixture: str, shows_first_pass_table: bool
+    ) -> None:
+        result = runner.invoke(cli, self.eval_args(request.getfixturevalue(evals_dir_fixture)))
+
+        assert result.exit_code == 0, result.output
+        assert (_FIRST_PASS_TABLE_TITLE in result.output) == shows_first_pass_table
+
+    def test_thresholds_gate_on_the_written_toc(self, runner: CliRunner, postprocess_evals_dir: Path) -> None:
+        """The first pass misses an entry, but the written (postprocessed) TOC passes the threshold."""
+        result = runner.invoke(cli, self.eval_args(postprocess_evals_dir, "--min-f1", "0.99"))
 
         assert result.exit_code == 0, result.output
 

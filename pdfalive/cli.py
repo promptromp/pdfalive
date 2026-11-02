@@ -17,7 +17,7 @@ from rich.text import Text
 from pdfalive.config import load_config_as_default_map
 from pdfalive.console import TextPart, create_console, safe_text, truncate_visible, visible
 from pdfalive.evaluation.metrics import SUMMARY_PAGE_TOLERANCE, EvalReport, GoldenEntry
-from pdfalive.evaluation.runner import EvalCase, EvalMode, discover_cases, run_eval_case
+from pdfalive.evaluation.runner import CaseResult, EvalCase, EvalMode, discover_cases, run_eval_case
 from pdfalive.llm import build_chat_model
 from pdfalive.models.rename import PlannedRename, RejectedRename, RenameBatch, RenameInputs
 from pdfalive.models.toc import TOCEntry
@@ -43,6 +43,9 @@ _EXIT_FAILURE = 1
 # Rename preview table: confidence at or above these thresholds shows green / yellow, below them red.
 _HIGH_CONFIDENCE_THRESHOLD = 0.9
 _MEDIUM_CONFIDENCE_THRESHOLD = 0.7
+
+# Title of the eval table scoring the TOC a run without postprocessing writes.
+_FIRST_PASS_TABLE_TITLE = "Without postprocessing (generate-toc's default)"
 
 
 def _check_output_choice(output_file: str | None, inplace: bool) -> None:
@@ -616,13 +619,13 @@ def eval_command(
         raise click.UsageError(f"No evaluation cases found under {visible(evals_dir)}/golden/.")
 
     eval_mode = cast(EvalMode, mode)
-    reports: list[tuple[EvalCase, EvalReport]] = []
+    results: list[tuple[EvalCase, CaseResult]] = []
     for case in cases:
         console.print(
             safe_text("Evaluating case ", (case.name, "bold cyan"), " (", (eval_mode, "magenta"), " mode)...")
         )
         with _llm_failures_reported():
-            report = run_eval_case(
+            result = run_eval_case(
                 case,
                 mode=eval_mode,
                 model_identifier=model_identifier,
@@ -631,37 +634,18 @@ def eval_command(
                 num_processes=num_processes,
                 reasoning_effort=reasoning_effort,
             )
-        reports.append((case, report))
+        results.append((case, result))
 
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Case", style="cyan")
-    table.add_column("Golden", justify="right")
-    table.add_column("Generated", justify="right")
-    table.add_column("Matched", justify="right")
-    table.add_column("Precision", justify="right")
-    table.add_column("Recall", justify="right")
-    table.add_column("F1", justify="right")
-    table.add_column("Page =", justify="right")
-    table.add_column("Page ±1", justify="right")
-    table.add_column("Level", justify="right")
-
-    for case, report in reports:
-        summary = report.summary()
-        table.add_row(
-            safe_text(case.name),
-            str(summary["golden_entries"]),
-            str(summary["generated_entries"]),
-            str(summary["matched"]),
-            f"{summary['precision']:.2f}",
-            f"{summary['recall']:.2f}",
-            f"{summary['f1']:.2f}",
-            f"{summary['page_accuracy_exact']:.2f}",
-            f"{summary['page_accuracy_within_1']:.2f}",
-            f"{summary['level_accuracy']:.2f}",
-        )
-
+    reports = [(case, result.report) for case, result in results]
     console.print()
-    console.print(table)
+    console.print(_eval_summary_table(reports))
+
+    # A postprocessing case's run also yields the TOC generate-toc writes by
+    # default (no postprocessing), which the final scores would otherwise hide.
+    first_pass_reports = [(case, result.first_pass_report) for case, result in results if case.postprocess]
+    if first_pass_reports:
+        console.print()
+        console.print(_eval_summary_table(first_pass_reports, title=_FIRST_PASS_TABLE_TITLE))
 
     for case, report in reports:
         entry_blocks: tuple[tuple[str, Sequence[GoldenEntry | TOCEntry]], ...] = (
@@ -692,6 +676,37 @@ def eval_command(
         for failure in failures:
             console.print(safe_text(("Threshold failure:", "bold red"), " ", failure))
         raise SystemExit(_EXIT_FAILURE)
+
+
+def _eval_summary_table(reports: Sequence[tuple[EvalCase, EvalReport]], title: str | None = None) -> Table:
+    """One row of metrics per case."""
+    table = Table(title=title, show_header=True, header_style="bold")
+    table.add_column("Case", style="cyan")
+    table.add_column("Golden", justify="right")
+    table.add_column("Generated", justify="right")
+    table.add_column("Matched", justify="right")
+    table.add_column("Precision", justify="right")
+    table.add_column("Recall", justify="right")
+    table.add_column("F1", justify="right")
+    table.add_column("Page =", justify="right")
+    table.add_column("Page ±1", justify="right")
+    table.add_column("Level", justify="right")
+
+    for case, report in reports:
+        summary = report.summary()
+        table.add_row(
+            safe_text(case.name),
+            str(summary["golden_entries"]),
+            str(summary["generated_entries"]),
+            str(summary["matched"]),
+            f"{summary['precision']:.2f}",
+            f"{summary['recall']:.2f}",
+            f"{summary['f1']:.2f}",
+            f"{summary['page_accuracy_exact']:.2f}",
+            f"{summary['page_accuracy_within_1']:.2f}",
+            f"{summary['level_accuracy']:.2f}",
+        )
+    return table
 
 
 @cli.command("rename")
