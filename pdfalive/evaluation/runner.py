@@ -15,6 +15,10 @@ The matching cassette lives at ``<evals_dir>/cassettes/<name>.json``. Modes:
 - ``replay``: serve recorded LLM responses from the cassette (free, deterministic).
 - ``record``: call the real LLM and write the cassette as a side effect.
 - ``live``: call the real LLM without touching the cassette.
+
+Each case is scored twice from the same run: the TOC the pipeline writes, and the
+TOC a run without postprocessing writes (``generate-toc``'s default), which for a
+postprocessing case is the first pass before refinement.
 """
 
 from dataclasses import dataclass
@@ -65,6 +69,17 @@ class EvalCase:
     @property
     def postprocess(self) -> bool:
         return self.golden.postprocess
+
+
+@dataclass(frozen=True)
+class CaseResult:
+    """A case's scores: the TOC the pipeline writes and, for a postprocessing case, the TOC a run without it writes.
+
+    ``first_pass_report`` is None for a case without postprocessing, whose written TOC is that TOC.
+    """
+
+    report: EvalReport
+    first_pass_report: EvalReport | None
 
 
 def load_golden_file(golden_path: Path) -> GoldenFile:
@@ -130,7 +145,7 @@ def run_eval_case(
     request_delay: float | None = None,
     num_processes: int | None = None,
     reasoning_effort: str | None = None,
-) -> EvalReport:
+) -> CaseResult:
     """Run the TOC generation pipeline on a case's PDF and score it against golden data.
 
     Args:
@@ -145,7 +160,8 @@ def run_eval_case(
             leave the provider's default in place.
 
     Returns:
-        The EvalReport scoring the generated TOC against the golden entries.
+        The scores, against the golden entries, of the TOC the pipeline writes and,
+        for a postprocessing case, of the TOC a run without postprocessing writes.
     """
     if not case.pdf_path.exists():
         raise FileNotFoundError(
@@ -160,17 +176,26 @@ def run_eval_case(
 
     doc = pymupdf.open(case.pdf_path)
     try:
-        generator = TOCGenerator(doc=doc, llm=llm, num_processes=num_processes)
-        # No output_file: evaluation only needs the in-memory TOC, so skip
-        # serializing a multi-hundred-MB PDF per case.
-        generator.run(
-            output_file=None,
-            force=True,
+        result = TOCGenerator(doc=doc, llm=llm, num_processes=num_processes).generate(
             request_delay=request_delay,
             postprocess=case.postprocess,
         )
-        generated = TOC(entries=[TOCEntry.from_list(item) for item in doc.get_toc()])
+        first_pass_toc = None if result.first_pass_toc is None else _written(doc, result.first_pass_toc)
+        written_toc = _written(doc, result.toc)
     finally:
         doc.close()
 
-    return evaluate_toc(case.golden.entries, generated)
+    return CaseResult(
+        report=evaluate_toc(case.golden.entries, written_toc),
+        first_pass_report=None if first_pass_toc is None else evaluate_toc(case.golden.entries, first_pass_toc),
+    )
+
+
+def _written(doc: pymupdf.Document, toc: TOC) -> TOC:
+    """The TOC as PyMuPDF writes it, so a TOC that generate-toc could not write fails the eval.
+
+    It is set on the in-memory document only: evaluation never saves (and serializes)
+    a multi-hundred-MB PDF per case.
+    """
+    doc.set_toc(toc.to_list())
+    return TOC(entries=[TOCEntry.from_list(item) for item in doc.get_toc()])

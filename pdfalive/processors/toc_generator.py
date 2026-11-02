@@ -998,6 +998,21 @@ class _OriginalEntryMatcher:
         return best_page
 
 
+@dataclass(frozen=True)
+class TOCGenerationResult:
+    """The pipeline's output: the TOC to write, and, after postprocessing, what a run without it would write.
+
+    ``first_pass_toc`` is the first LLM pass after its deterministic corrections and
+    finalization: what the default (non-postprocessing) run of the same draw writes, so
+    evaluation can score both from one run. It is None when postprocessing did not run,
+    since ``toc`` is then that TOC.
+    """
+
+    toc: TOC
+    first_pass_toc: TOC | None
+    usage: TokenUsage
+
+
 class TOCGenerator:
     """Class to generate table of contents for a PDF document."""
 
@@ -1048,6 +1063,28 @@ class TOCGenerator:
                 "The input document already has a Table of Contents. Use `--force` to force TOC generation."
             )
 
+        result = self.generate(request_delay=request_delay, postprocess=postprocess)
+        self.doc.set_toc(result.toc.to_list())
+        if output_file is not None:
+            self.doc.save(output_file)
+
+        return result.usage
+
+    def generate(
+        self,
+        request_delay: float = DEFAULT_REQUEST_DELAY_SECONDS,
+        postprocess: bool = False,
+    ) -> TOCGenerationResult:
+        """Run the TOC pipeline without writing to the document.
+
+        Args:
+            request_delay: Delay in seconds between LLM calls to avoid rate limiting.
+            postprocess: If True, refine the first pass's TOC with the postprocessing step.
+
+        Returns:
+            The TOC to write, the TOC a run without postprocessing would write (None when
+            postprocessing did not run), and the token usage.
+        """
         features = self._extract_features(self.doc)
 
         # Send a reduced payload to the LLM: body text beyond one span per page
@@ -1061,24 +1098,37 @@ class TOCGenerator:
         # bottom of page N but the feature extraction only picked up the running
         # header at the top of page N+1).
         toc = self._correct_running_header_pages(toc, features)
+        if not postprocess:
+            final_toc, dropped = self._finalize(toc)
+            self._report_dropped_entries(dropped)
+            return TOCGenerationResult(toc=final_toc, first_pass_toc=None, usage=usage)
 
-        # Optionally postprocess the TOC to clean up duplicates, fix errors, etc.
-        if postprocess:
-            toc, postprocess_usage = self._postprocess_toc(toc, features)
-            usage = usage + postprocess_usage
+        # Postprocess the TOC to clean up duplicates, fix errors, etc. The finalized first
+        # pass is kept as what a run without postprocessing would write; only the TOC that
+        # will be written has its dropped entries reported.
+        first_pass_toc, _ = self._finalize(toc)
+        postprocessed_toc, postprocess_usage = self._postprocess_toc(toc, features)
+        final_toc, dropped = self._finalize(postprocessed_toc)
+        self._report_dropped_entries(dropped)
+        return TOCGenerationResult(toc=final_toc, first_pass_toc=first_pass_toc, usage=usage + postprocess_usage)
 
-        # Deduplicate and enforce page number monotonicity after all corrections.
-        # Postprocessing may produce duplicate entries (e.g., "Exercises" added once
-        # per chapter from a printed TOC but all mapping to the same page).
-        toc = toc.deduplicate()
-        toc = self._drop_out_of_range_entries(toc)
-        toc = toc.sort_by_page()
-        toc = toc.sanitize_hierarchy()
-        self.doc.set_toc(toc.to_list())
-        if output_file is not None:
-            self.doc.save(output_file)
+    def _finalize(self, toc: TOC) -> tuple[TOC, list[TOCEntry]]:
+        """Make a TOC writable; return it with the entries dropped for pointing outside the document.
 
-        return usage
+        Deduplicates and enforces page number monotonicity after all corrections
+        (postprocessing may produce duplicate entries, e.g. "Exercises" added once per
+        chapter from a printed TOC but all mapping to the same page), then clamps the
+        hierarchy for PyMuPDF.
+
+        Entries whose page lies outside 1..page_count are dropped: LLM page numbers are
+        not guaranteed to be in range, and an entry the pipeline could not place through
+        the document itself (no first-pass match and no locatable printed page) keeps the
+        LLM's estimate, which can overshoot the last page when a front-matter offset is
+        applied to a PDF that omits printed pages. Such an entry has no known destination;
+        pointing it at the nearest valid page would produce a bookmark to unrelated content.
+        """
+        in_range, dropped = toc.deduplicate().partition_by_page_range(self.doc.page_count)
+        return in_range.sort_by_page().sanitize_hierarchy(), dropped
 
     def _structured_model(self, schema: type[BaseModel]) -> StructuredModel:
         """The LLM wrapped for ``schema``'s structured output, built once per schema.
@@ -1094,30 +1144,21 @@ class TOCGenerator:
         """Check if the document already has a TOC."""
         return self.doc.get_toc()
 
-    def _drop_out_of_range_entries(self, toc: TOC) -> TOC:
-        """Drop entries whose page number does not exist in the document, with a console warning.
-
-        LLM page numbers are not guaranteed to be in range: an entry the pipeline
-        could not place through the document itself (no first-pass match and no
-        locatable printed page) keeps the LLM's estimate, which can overshoot the
-        last page when a front-matter offset is applied to a PDF that omits printed
-        pages. Such an entry has no known destination; pointing it at the nearest
-        valid page would produce a bookmark to unrelated content, so it is dropped.
-        """
-        in_range, out_of_range = toc.partition_by_page_range(self.doc.page_count)
-        if out_of_range:
-            shown = ", ".join(
-                f"'{entry.title}' (page {entry.page_number})" for entry in out_of_range[:_MAX_DROPPED_ENTRIES_SHOWN]
-            )
-            hidden_count = len(out_of_range) - _MAX_DROPPED_ENTRIES_SHOWN
-            more = f" and {hidden_count} more" if hidden_count > 0 else ""
-            noun = "entry" if len(out_of_range) == 1 else "entries"
-            warning = (
-                f"Dropped {len(out_of_range)} {noun} with page numbers outside the document "
-                f"(1-{self.doc.page_count}): {shown}{more}"
-            )
-            console.print(safe_text("  ", (warning, "yellow")))
-        return in_range
+    def _report_dropped_entries(self, dropped: list[TOCEntry]) -> None:
+        """Warn about entries dropped for pointing outside the document, naming a capped number of them."""
+        if not dropped:
+            return
+        shown = ", ".join(
+            f"'{entry.title}' (page {entry.page_number})" for entry in dropped[:_MAX_DROPPED_ENTRIES_SHOWN]
+        )
+        hidden_count = len(dropped) - _MAX_DROPPED_ENTRIES_SHOWN
+        more = f" and {hidden_count} more" if hidden_count > 0 else ""
+        noun = "entry" if len(dropped) == 1 else "entries"
+        warning = (
+            f"Dropped {len(dropped)} {noun} with page numbers outside the document "
+            f"(1-{self.doc.page_count}): {shown}{more}"
+        )
+        console.print(safe_text("  ", (warning, "yellow")))
 
     def _extract_features(
         self,

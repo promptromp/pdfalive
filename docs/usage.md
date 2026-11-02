@@ -222,7 +222,7 @@ The `source_pdf` path is resolved relative to the parent of the evals directory 
 
 Replay mode runs the full pipeline (feature extraction, batching, deterministic corrections, postprocess fixups) but serves LLM responses from the cassette. This makes it ideal for iterating on everything *around* the LLM calls. In strict replay (the default), a change that alters the prompts raises an error telling you to re-record; pass `--loose-replay` to replay by call order anyway (useful when a prompt change is intentional and you want a quick signal before re-recording).
 
-**Reported metrics** (per case): precision / recall / F1 of matched titles (fuzzy matching tolerant to typos and punctuation), page accuracy (exact and within ±1 page), and hierarchy level accuracy. Missing and spurious entries are listed explicitly.
+**Reported metrics** (per case): precision / recall / F1 of matched titles (fuzzy matching tolerant to typos and punctuation), page accuracy (exact and within ±1 page), and hierarchy level accuracy. Missing and spurious entries are listed explicitly. Cases that run with postprocessing get a second table, *Without postprocessing (generate-toc's default)*, scoring the TOC the same run's first pass would have written without the postprocessing step — the output of a default `generate-toc` run, measured from the same recording at no extra cost. Thresholds (below) apply to the first table.
 
 **CI / regression gating:**
 

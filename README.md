@@ -316,7 +316,7 @@ pdfalive eval --mode replay
 pdfalive eval --mode replay --min-f1 0.9 --min-page-accuracy 0.9
 ```
 
-Reported metrics include title precision/recall/F1 (fuzzy-matched), page accuracy (exact and ±1), and hierarchy level accuracy. See [docs/usage.md](docs/usage.md) for the golden file format and how to add cases.
+Reported metrics include title precision/recall/F1 (fuzzy-matched), page accuracy (exact and ±1), and hierarchy level accuracy, for the TOC the pipeline writes and, for cases that run postprocessing, also for what a default `generate-toc` run (no postprocessing) writes. See [docs/usage.md](docs/usage.md) for the golden file format and how to add cases.
 
 ## License
 

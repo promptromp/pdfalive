@@ -25,7 +25,7 @@ from pdfalive.cli import (
     cli,
 )
 from pdfalive.evaluation.metrics import EvalReport, GoldenEntry
-from pdfalive.evaluation.runner import EvalCase, GoldenFile
+from pdfalive.evaluation.runner import CaseResult, EvalCase, GoldenFile
 from pdfalive.models.rename import FIRST_FILE_ID, RenameOp, RenameResult
 from pdfalive.models.toc import TOCEntry
 from pdfalive.processors.rename_processor import REJECTED_PATH, REJECTED_UNKNOWN_INPUT, RenameProcessor
@@ -1242,7 +1242,8 @@ class TestOutsideTextIsPrintedSafely:
         missing = make_golden_entry(title=markup_like_text)
         spurious = make_toc_entry(title=f"{self.SPURIOUS_TITLE_PREFIX}{markup_like_text}")
         mock_discover_cases.return_value = [case]
-        mock_run_eval_case.return_value = EvalReport(matched=[], missing=[missing], spurious=[spurious])
+        report = EvalReport(matched=[], missing=[missing], spurious=[spurious])
+        mock_run_eval_case.return_value = CaseResult(report=report, first_pass_report=report)
 
         result = runner.invoke(
             cli,
@@ -1252,7 +1253,8 @@ class TestOutsideTextIsPrintedSafely:
         assert result.exit_code == 1  # nothing matched, so F1 is below the threshold
         output = cli_console.export_text()
         assert f"Evaluating case {case.name} ({self.EVAL_MODE} mode)..." in output
-        assert [row[0] for row in _table_rows(output)] == [case.name]
+        # The case has a first-pass report (it runs with postprocessing), so it is a row of both tables.
+        assert [row[0] for row in _table_rows(output)] == [case.name, case.name]
         assert f"{case.name}: 1 missing golden entries:" in output
         assert f"  - {missing.title} (page {missing.page_number}, level {missing.level})" in output
         assert f"{case.name}: 1 spurious generated entries:" in output
