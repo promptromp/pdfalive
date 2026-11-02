@@ -345,7 +345,7 @@ class TestTOCGenerator:
 
         assert real_doc.get_toc() == []
         assert result.toc.to_list() == chapter_toc.to_list()
-        assert result.first_pass_toc == result.toc
+        assert result.first_pass_toc is None
 
     def test_generate_with_postprocessing_keeps_the_first_pass_toc(
         self, make_structured_answer, real_doc, mock_llm, chapter_toc
@@ -360,6 +360,7 @@ class TestTOCGenerator:
 
         assert postprocess.call_args.args[0].to_list() == first_pass.to_list()
         assert result.toc.to_list() == chapter_toc.to_list()
+        assert result.first_pass_toc is not None
         assert result.first_pass_toc.to_list() == first_pass.to_list()
 
     @pytest.mark.parametrize("postprocess", [False, True])
@@ -374,18 +375,26 @@ class TestTOCGenerator:
         monkeypatch,
         postprocess,
     ):
-        """An out-of-range first-pass entry is reported only when the first pass's TOC is the one written."""
+        """Out-of-range entries are dropped from both TOCs, and reported only for the one that will be written."""
         monkeypatch.setattr(toc_generator_module, "console", recording_console)
-        out_of_range = make_toc_entry(title="Index", page_number=real_doc.page_count + 1)
-        first_pass = TOC(entries=[*chapter_toc.entries, out_of_range])
+        first_pass_stray = make_toc_entry(title="Index", page_number=real_doc.page_count + 1)
+        postprocessed_stray = make_toc_entry(title="Bibliography", page_number=real_doc.page_count + 2)
+        first_pass = TOC(entries=[*chapter_toc.entries, first_pass_stray])
+        postprocessed = TOC(entries=[*chapter_toc.entries, postprocessed_stray])
         mock_llm.with_structured_output.return_value.invoke.return_value = make_structured_answer(first_pass)
         generator = TOCGenerator(doc=real_doc, llm=mock_llm)
 
-        with patch.object(generator, "_postprocess_toc", return_value=(chapter_toc, TokenUsage())):
+        with patch.object(generator, "_postprocess_toc", return_value=(postprocessed, TokenUsage())):
             result = generator.generate(request_delay=0, postprocess=postprocess)
 
-        assert result.first_pass_toc.to_list() == chapter_toc.to_list()
-        assert ("Dropped 1 entry" in recording_console.export_text()) == (not postprocess)
+        reported = postprocessed_stray if postprocess else first_pass_stray
+        output = recording_console.export_text()
+        assert result.toc.to_list() == chapter_toc.to_list()
+        assert f"'{reported.title}' (page {reported.page_number})" in output
+        if postprocess:
+            assert f"'{first_pass_stray.title}'" not in output
+            assert result.first_pass_toc is not None
+            assert result.first_pass_toc.to_list() == chapter_toc.to_list()
 
     @pytest.mark.parametrize(
         "dropped_count,expected_noun",

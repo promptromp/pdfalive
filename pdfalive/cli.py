@@ -44,7 +44,9 @@ _EXIT_FAILURE = 1
 _HIGH_CONFIDENCE_THRESHOLD = 0.9
 _MEDIUM_CONFIDENCE_THRESHOLD = 0.7
 
-# Title of the eval table scoring the TOC a run without postprocessing writes.
+# Titles of the eval tables: the TOC each case's configuration writes, and, for cases that
+# run postprocessing, the TOC a run without it writes.
+_WRITTEN_TABLE_TITLE = "As configured per case"
 _FIRST_PASS_TABLE_TITLE = "Without postprocessing (generate-toc's default)"
 
 
@@ -638,14 +640,7 @@ def eval_command(
 
     reports = [(case, result.report) for case, result in results]
     console.print()
-    console.print(_eval_summary_table(reports))
-
-    # A postprocessing case's run also yields the TOC generate-toc writes by
-    # default (no postprocessing), which the final scores would otherwise hide.
-    first_pass_reports = [(case, result.first_pass_report) for case, result in results if case.postprocess]
-    if first_pass_reports:
-        console.print()
-        console.print(_eval_summary_table(first_pass_reports, title=_FIRST_PASS_TABLE_TITLE))
+    console.print(_eval_summary_table(reports, title=_WRITTEN_TABLE_TITLE))
 
     for case, report in reports:
         entry_blocks: tuple[tuple[str, Sequence[GoldenEntry | TOCEntry]], ...] = (
@@ -659,6 +654,15 @@ def eval_command(
             console.print(safe_text((f"{case.name}: {len(entries)} {kind} entries:", "yellow")))
             for entry in entries:
                 console.print(safe_text(f"  - {entry.title} (page {entry.page_number}, level {entry.level})"))
+
+    # A postprocessing case's run also yields the TOC generate-toc writes by
+    # default (no postprocessing), which the scores above would otherwise hide.
+    first_pass_reports = [
+        (case, result.first_pass_report) for case, result in results if result.first_pass_report is not None
+    ]
+    if first_pass_reports:
+        console.print()
+        console.print(_eval_summary_table(first_pass_reports, title=_FIRST_PASS_TABLE_TITLE))
 
     failures = []
     for case, report in reports:
@@ -678,7 +682,7 @@ def eval_command(
         raise SystemExit(_EXIT_FAILURE)
 
 
-def _eval_summary_table(reports: Sequence[tuple[EvalCase, EvalReport]], title: str | None = None) -> Table:
+def _eval_summary_table(reports: Sequence[tuple[EvalCase, EvalReport]], title: str) -> Table:
     """One row of metrics per case."""
     table = Table(title=title, show_header=True, header_style="bold")
     table.add_column("Case", style="cyan")
@@ -689,7 +693,7 @@ def _eval_summary_table(reports: Sequence[tuple[EvalCase, EvalReport]], title: s
     table.add_column("Recall", justify="right")
     table.add_column("F1", justify="right")
     table.add_column("Page =", justify="right")
-    table.add_column("Page ±1", justify="right")
+    table.add_column(f"Page ±{SUMMARY_PAGE_TOLERANCE}", justify="right")
     table.add_column("Level", justify="right")
 
     for case, report in reports:

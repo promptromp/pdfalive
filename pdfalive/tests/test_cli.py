@@ -1253,7 +1253,7 @@ class TestOutsideTextIsPrintedSafely:
         assert result.exit_code == 1  # nothing matched, so F1 is below the threshold
         output = cli_console.export_text()
         assert f"Evaluating case {case.name} ({self.EVAL_MODE} mode)..." in output
-        # The case runs with postprocessing (GoldenFile's default), so it is a row of both tables.
+        # The case has a first-pass report (it runs with postprocessing), so it is a row of both tables.
         assert [row[0] for row in _table_rows(output)] == [case.name, case.name]
         assert f"{case.name}: 1 missing golden entries:" in output
         assert f"  - {missing.title} (page {missing.page_number}, level {missing.level})" in output

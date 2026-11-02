@@ -36,6 +36,8 @@ GOLDEN_SPECS = [
 # What the first pass of a postprocessing case finds: everything but the last golden entry,
 # which the postprocessing step then restores.
 FIRST_PASS_SPECS = GOLDEN_SPECS[:-1]
+# An F1 threshold between that first pass's score (it misses one entry) and a perfect score.
+MIN_F1_THRESHOLD = 0.99
 
 
 @pytest.fixture
@@ -89,9 +91,11 @@ def recorded_evals_dir(evals_dir: Path, synthetic_pdf_path: Path, mock_llm: Magi
     cassette_path = evals_dir / "cassettes" / f"{CASE_NAME}.json"
     recorder = RecordingChatModel(llm=mock_llm, cassette_path=cassette_path)
     doc = pymupdf.open(synthetic_pdf_path)
-    generator = TOCGenerator(doc=doc, llm=cast(BaseChatModel, recorder), num_processes=1)
-    generator.run(output_file=str(tmp_path / "recorded_output.pdf"), force=True, request_delay=0)
-    doc.close()
+    try:
+        generator = TOCGenerator(doc=doc, llm=cast(BaseChatModel, recorder), num_processes=1)
+        generator.run(output_file=str(tmp_path / "recorded_output.pdf"), force=True, request_delay=0)
+    finally:
+        doc.close()
     return evals_dir
 
 
@@ -121,10 +125,12 @@ def postprocess_evals_dir(evals_dir: Path, synthetic_pdf_path: Path, refining_ll
     golden_path.write_text(json.dumps(json.loads(golden_path.read_text()) | {"postprocess": True}))
     recorder = RecordingChatModel(llm=refining_llm, cassette_path=evals_dir / "cassettes" / f"{CASE_NAME}.json")
     doc = pymupdf.open(synthetic_pdf_path)
-    TOCGenerator(doc=doc, llm=cast(BaseChatModel, recorder), num_processes=1).generate(
-        request_delay=0, postprocess=True
-    )
-    doc.close()
+    try:
+        TOCGenerator(doc=doc, llm=cast(BaseChatModel, recorder), num_processes=1).generate(
+            request_delay=0, postprocess=True
+        )
+    finally:
+        doc.close()
     return evals_dir
 
 
@@ -179,10 +185,11 @@ class TestRunEvalCase:
         with pytest.raises(ValueError, match="mode"):
             run_eval_case(case, mode="invalid", num_processes=1)  # type: ignore[arg-type]
 
-    def test_without_postprocessing_both_reports_score_the_same_toc(self, case: EvalCase) -> None:
+    def test_without_postprocessing_there_is_no_separate_first_pass_report(self, case: EvalCase) -> None:
+        """The written TOC is then the first pass's, so it is scored once."""
         result = run_eval_case(case, mode="replay", num_processes=1)
 
-        assert result.first_pass_report.summary() == result.report.summary()
+        assert result.first_pass_report is None
 
     def test_postprocessing_case_also_scores_the_first_pass(self, postprocess_evals_dir: Path) -> None:
         """One run scores both the written TOC and the TOC a run without postprocessing writes."""
@@ -191,6 +198,7 @@ class TestRunEvalCase:
         result = run_eval_case(case, mode="replay", num_processes=1)
 
         assert result.report.recall == 1.0
+        assert result.first_pass_report is not None
         assert result.first_pass_report.recall == pytest.approx(len(FIRST_PASS_SPECS) / len(GOLDEN_SPECS))
         assert [entry.title for entry in result.first_pass_report.missing] == [GOLDEN_SPECS[-1][0]]
 
@@ -216,13 +224,13 @@ class TestEvalCommand:
         golden["entries"].append({"title": "Appendix A: Extra Material", "page_number": 3, "level": 1})
         golden_path.write_text(json.dumps(golden))
 
-        result = runner.invoke(cli, self.eval_args(recorded_evals_dir, "--min-f1", "0.99"))
+        result = runner.invoke(cli, self.eval_args(recorded_evals_dir, "--min-f1", str(MIN_F1_THRESHOLD)))
 
         assert result.exit_code == 1
         assert "Appendix A: Extra Material" in result.output  # missing entries are listed
 
     def test_passing_threshold_keeps_exit_code_zero(self, runner: CliRunner, recorded_evals_dir: Path) -> None:
-        result = runner.invoke(cli, self.eval_args(recorded_evals_dir, "--min-f1", "0.99"))
+        result = runner.invoke(cli, self.eval_args(recorded_evals_dir, "--min-f1", str(MIN_F1_THRESHOLD)))
 
         assert result.exit_code == 0, result.output
 
@@ -240,7 +248,7 @@ class TestEvalCommand:
 
     def test_thresholds_gate_on_the_written_toc(self, runner: CliRunner, postprocess_evals_dir: Path) -> None:
         """The first pass misses an entry, but the written (postprocessed) TOC passes the threshold."""
-        result = runner.invoke(cli, self.eval_args(postprocess_evals_dir, "--min-f1", "0.99"))
+        result = runner.invoke(cli, self.eval_args(postprocess_evals_dir, "--min-f1", str(MIN_F1_THRESHOLD)))
 
         assert result.exit_code == 0, result.output
 

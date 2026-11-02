@@ -1000,16 +1000,16 @@ class _OriginalEntryMatcher:
 
 @dataclass(frozen=True)
 class TOCGenerationResult:
-    """The pipeline's output: the TOC to write, and what a run without postprocessing would write.
+    """The pipeline's output: the TOC to write, and, after postprocessing, what a run without it would write.
 
     ``first_pass_toc`` is the first LLM pass after its deterministic corrections and
-    finalization. Without postprocessing it is also ``toc``; with it, it is what the
-    default (non-postprocessing) run of the same draw produces, so evaluation can
-    score both from one run.
+    finalization: what the default (non-postprocessing) run of the same draw writes, so
+    evaluation can score both from one run. It is None when postprocessing did not run,
+    since ``toc`` is then that TOC.
     """
 
     toc: TOC
-    first_pass_toc: TOC
+    first_pass_toc: TOC | None
     usage: TokenUsage
 
 
@@ -1082,7 +1082,8 @@ class TOCGenerator:
             postprocess: If True, refine the first pass's TOC with the postprocessing step.
 
         Returns:
-            The TOC to write, the TOC a run without postprocessing would write, and the token usage.
+            The TOC to write, the TOC a run without postprocessing would write (None when
+            postprocessing did not run), and the token usage.
         """
         features = self._extract_features(self.doc)
 
@@ -1097,18 +1098,19 @@ class TOCGenerator:
         # bottom of page N but the feature extraction only picked up the running
         # header at the top of page N+1).
         toc = self._correct_running_header_pages(toc, features)
-        first_pass_toc, dropped = self._finalize(toc)
-        final_toc = first_pass_toc
+        if not postprocess:
+            final_toc, dropped = self._finalize(toc)
+            self._report_dropped_entries(dropped)
+            return TOCGenerationResult(toc=final_toc, first_pass_toc=None, usage=usage)
 
-        # Optionally postprocess the TOC to clean up duplicates, fix errors, etc.
-        if postprocess:
-            postprocessed_toc, postprocess_usage = self._postprocess_toc(toc, features)
-            usage = usage + postprocess_usage
-            final_toc, dropped = self._finalize(postprocessed_toc)
-
-        # Only the TOC that will be written has its dropped entries reported.
+        # Postprocess the TOC to clean up duplicates, fix errors, etc. The finalized first
+        # pass is kept as what a run without postprocessing would write; only the TOC that
+        # will be written has its dropped entries reported.
+        first_pass_toc, _ = self._finalize(toc)
+        postprocessed_toc, postprocess_usage = self._postprocess_toc(toc, features)
+        final_toc, dropped = self._finalize(postprocessed_toc)
         self._report_dropped_entries(dropped)
-        return TOCGenerationResult(toc=final_toc, first_pass_toc=first_pass_toc, usage=usage)
+        return TOCGenerationResult(toc=final_toc, first_pass_toc=first_pass_toc, usage=usage + postprocess_usage)
 
     def _finalize(self, toc: TOC) -> tuple[TOC, list[TOCEntry]]:
         """Make a TOC writable; return it with the entries dropped for pointing outside the document.
