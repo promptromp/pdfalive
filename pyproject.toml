@@ -138,4 +138,8 @@ filterwarnings = [
     # Ignore SWIG-related deprecation warnings from PyMuPDF (Python 3.13 compatibility issue)
     "ignore:builtin type Swig.*:DeprecationWarning",
     "ignore:builtin type swigvarlink.*:DeprecationWarning",
+    # langsmith's deprecation decorator calls asyncio.iscoroutinefunction (deprecated in
+    # Python 3.14) on each decorated Client method when langchain_core imports it. Remove
+    # once a langsmith release includes https://github.com/langchain-ai/langsmith-sdk/pull/3347
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:langsmith._internal._beta_decorator",
 ]
