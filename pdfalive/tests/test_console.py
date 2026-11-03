@@ -27,6 +27,7 @@ VALUE_STYLE = "bold cyan"
 
 # Progress descriptions are program text, but must still print as they are.
 MARKUP_LIKE_DESCRIPTION = "[bold]Detecting text[/bold] :A:"
+PROGRESS_ITEMS = 3
 PROGRESS_TEMPLATE_MARKUP = "[progress.description]"
 
 # (raw, shown) for characters made visible in every value, single-line or not.
@@ -228,6 +229,16 @@ class TestTruncateVisible:
 
         assert shown == f"{prefix}{ELLIPSIS}"
         assert cell_len(safe_text(shown).plain) <= TRUNCATION_WIDTH
+
+
+def test_a_disabled_progress_bar_tracks_without_drawing(recording_console: Console) -> None:
+    items = list(range(PROGRESS_ITEMS))
+
+    with create_progress(recording_console, disable=True) as progress:
+        tracked = list(progress.track(items, description=MARKUP_LIKE_DESCRIPTION))
+
+    assert tracked == items
+    assert recording_console.export_text() == ""
 
 
 def test_progress_bar_shows_its_description_as_plain_text(recording_console: Console) -> None:

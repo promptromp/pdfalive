@@ -1206,6 +1206,45 @@ class TestFeatureExtractionMultiprocessing:
 class TestTOCGeneratorParallelExtraction:
     """Tests for parallel feature extraction with file-backed documents."""
 
+    PAGES = 4
+    PROCESSES = 2
+    BODY_SIZE = 11
+    HEADING_SIZE = 18
+    # Text block tops: the first DEFAULT_MAX_BLOCKS_PER_PAGE are Phase 1's, the heading's is Phase 2's.
+    BODY_TOPS = (90, 190, 290)
+    HEADING_TOP = 390
+    LAST_BODY_TOP = 490
+
+    @pytest.fixture
+    def book_path(self, tmp_path):
+        """A PDF whose pages each have a heading past the blocks Phase 1 reads."""
+        doc = pymupdf.open()
+        for page_number in range(1, self.PAGES + 1):
+            page = doc.new_page()
+            for top in self.BODY_TOPS:
+                page.insert_text((72, top), f"Body text of page {page_number}", fontsize=self.BODY_SIZE)
+            page.insert_text((72, self.HEADING_TOP), f"Section {page_number}", fontsize=self.HEADING_SIZE)
+            page.insert_text((72, self.LAST_BODY_TOP), f"More text of page {page_number}", fontsize=self.BODY_SIZE)
+        path = tmp_path / "book.pdf"
+        doc.save(path)
+        doc.close()
+        return path
+
+    def test_parallel_and_sequential_extraction_give_the_same_features(self, book_path):
+        """Both run the same Phase 1 and Phase 2; the parallel path offsets each worker's Phase 2 insert indices."""
+        doc = pymupdf.open(book_path)
+        generator = TOCGenerator(doc=doc, llm=self.DummyLLM(), num_processes=self.PROCESSES)
+
+        sequential = generator._extract_features_sequential(doc, show_progress=False)
+        parallel = generator._extract_features_parallel(
+            str(book_path), doc.page_count, self.PROCESSES, show_progress=False
+        )
+        doc.close()
+
+        assert parallel == sequential
+        texts = [span.text_snippet for block in sequential for line in block for span in line]
+        assert [f"Section {page_number}" in texts for page_number in range(1, self.PAGES + 1)] == [True] * self.PAGES
+
     class DummyLLM:
         """Minimal LLM stub for testing."""
 
