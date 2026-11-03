@@ -41,6 +41,9 @@ class Cassette(BaseModel):
     """An ordered collection of recorded LLM calls, persisted as JSON."""
 
     model_identifier: str = Field(description="The model whose responses the cassette records")
+    reasoning_effort: str | None = Field(
+        description="The reasoning effort they were recorded with; None for the default"
+    )
     entries: list[CassetteEntry] = Field(default_factory=list)
 
     @classmethod
@@ -116,11 +119,11 @@ class RecordingChatModel:
     failed recording run cannot destroy the last good recording.
     """
 
-    def __init__(self, llm, model_identifier: str, cassette_path: Path) -> None:
-        """Record llm's responses, as those of model_identifier, to the cassette at cassette_path."""
+    def __init__(self, llm, model_identifier: str, cassette_path: Path, reasoning_effort: str | None = None) -> None:
+        """Record llm's responses, as model_identifier's at reasoning_effort, to the cassette at cassette_path."""
         self._llm = llm
         self._cassette_path = Path(cassette_path)
-        self._cassette = Cassette(model_identifier=model_identifier)
+        self._cassette = Cassette(model_identifier=model_identifier, reasoning_effort=reasoning_effort)
         if self._cassette_path.exists():
             backup_path = self._cassette_path.with_suffix(".json.bak")
             backup_path.write_bytes(self._cassette_path.read_bytes())
@@ -173,10 +176,21 @@ class ReplayChatModel:
             raise CassetteMissError(
                 f"Cassette file not found: {cassette_path}. Run the evaluation in record mode first."
             )
-        self._cassette = Cassette.load(cassette_path)
+        try:
+            self._cassette = Cassette.load(cassette_path)
+        except ValidationError as error:
+            raise CassetteMissError(
+                f"{cassette_path} is not a cassette this version of pdfalive can replay "
+                "(one written before cassettes named their model, for instance); re-record it."
+            ) from error
         self._cassette_path = cassette_path
         self._strict = strict
         self._position = 0
+
+    @property
+    def model_identifier(self) -> str:
+        """The model that recorded the responses this replays."""
+        return self._cassette.model_identifier
 
     def with_structured_output(self, schema: type[BaseModel], include_raw: bool = False) -> _ReplayStructuredModel:
         return _ReplayStructuredModel(replay_state=self, schema=schema, include_raw=include_raw)

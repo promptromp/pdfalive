@@ -16,6 +16,7 @@ from rich.text import Text
 
 from pdfalive.config import load_config_as_default_map
 from pdfalive.console import TextPart, create_console, safe_text, truncate_visible, visible
+from pdfalive.evaluation.cassette import CassetteMissError
 from pdfalive.evaluation.metrics import SUMMARY_PAGE_TOLERANCE, EvalReport, GoldenEntry
 from pdfalive.evaluation.runner import CaseResult, EvalCase, EvalMode, discover_cases, run_eval_case
 from pdfalive.llm import DEFAULT_MODEL_IDENTIFIER, build_chat_model
@@ -68,16 +69,19 @@ def _check_output_choice(output_file: str | None, inplace: bool) -> None:
 
 
 @contextmanager
-def _llm_failures_reported() -> Iterator[None]:
+def _llm_failures_reported(*also_reported: type[Exception]) -> Iterator[None]:
     """Report an LLM call that failed for good (an LLMCallError) as an Error: line, exiting with _EXIT_FAILURE.
 
     That covers every failure the retry policy gives up on: a non-retryable
     error, attempts run out, an answer that never parsed, a refusal, a
-    truncated answer, a replay miss. Ctrl-C passes through.
+    truncated answer, a replay miss. Ctrl-C passes through. also_reported
+    names further errors to report the same way (eval: a cassette that
+    cannot be replayed at all).
     """
+    reported: tuple[type[Exception], ...] = (LLMCallError, *also_reported)
     try:
         yield
-    except LLMCallError as error:
+    except reported as error:
         console.print(safe_text(("Error:", "bold red"), " ", str(error)))
         raise SystemExit(_EXIT_FAILURE) from error
 
@@ -621,12 +625,23 @@ def eval_command(
         raise click.UsageError(f"No evaluation cases found under {visible(evals_dir)}/golden/.")
 
     eval_mode = cast(EvalMode, mode)
+    if eval_mode == "record" and (model_identifier, reasoning_effort) != (DEFAULT_MODEL_IDENTIFIER, None):
+        console.print(
+            safe_text(
+                ("Warning:", "bold yellow"),
+                f" recording with {model_identifier}"
+                + (f" at reasoning effort {reasoning_effort}" if reasoning_effort is not None else "")
+                + f"; the repository's cassettes are a baseline for {DEFAULT_MODEL_IDENTIFIER} at the provider's"
+                " default reasoning effort (record them with --model-identifier"
+                f" {DEFAULT_MODEL_IDENTIFIER} and no --reasoning-effort).",
+            )
+        )
     results: list[tuple[EvalCase, CaseResult]] = []
     for case in cases:
         console.print(
             safe_text("Evaluating case ", (case.name, "bold cyan"), " (", (eval_mode, "magenta"), " mode)...")
         )
-        with _llm_failures_reported():
+        with _llm_failures_reported(CassetteMissError):
             result = run_eval_case(
                 case,
                 mode=eval_mode,
@@ -663,6 +678,12 @@ def eval_command(
     if first_pass_reports:
         console.print()
         console.print(_eval_summary_table(first_pass_reports, title=_FIRST_PASS_TABLE_TITLE))
+
+    models = ", ".join(sorted({result.model_identifier for _, result in results}))
+    console.print()
+    console.print(
+        safe_text("Scores are for responses ", "recorded by " if eval_mode == "replay" else "from ", (models, "bold"))
+    )
 
     failures = []
     for case, report in reports:

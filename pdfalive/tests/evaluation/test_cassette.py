@@ -25,6 +25,7 @@ SYSTEM_PROMPT = "You are an expert TOC generator."
 USER_PROMPT_BATCH_1 = "Generate a TOC for batch 1."
 USER_PROMPT_BATCH_2 = "Generate a TOC for batch 2."
 RECORDING_MODEL = "test-model"
+RECORDING_REASONING_EFFORT = "high"
 # The committed eval cassettes, which must all be recorded with the default model.
 COMMITTED_CASSETTES = sorted((Path(__file__).resolve().parents[3] / "evals" / "cassettes").glob("*.json"))
 # A recorded response that is not a TOC, and the name of a schema the calls were not recorded for.
@@ -89,14 +90,22 @@ class TestRecording:
         assert cassette.entries[1].response == toc_batch_2.model_dump()
         assert cassette.entries[0].schema_name == "TOC"
 
-    def test_cassette_names_the_recording_model(self, mock_llm: MagicMock, cassette_path: Path) -> None:
+    @pytest.mark.parametrize("reasoning_effort", [None, RECORDING_REASONING_EFFORT])
+    def test_cassette_names_the_recording_model_and_reasoning_effort(
+        self, mock_llm: MagicMock, cassette_path: Path, reasoning_effort: str | None
+    ) -> None:
         model = RecordingChatModel(
-            llm=mock_llm, model_identifier=RECORDING_MODEL, cassette_path=cassette_path
+            llm=mock_llm,
+            model_identifier=RECORDING_MODEL,
+            reasoning_effort=reasoning_effort,
+            cassette_path=cassette_path,
         ).with_structured_output(TOC)
 
         model.invoke(make_messages(USER_PROMPT_BATCH_1))
 
-        assert Cassette.load(cassette_path).model_identifier == RECORDING_MODEL
+        cassette = Cassette.load(cassette_path)
+        assert cassette.model_identifier == RECORDING_MODEL
+        assert cassette.reasoning_effort == reasoning_effort
 
 
 class TestCommittedCassettes:
@@ -106,9 +115,16 @@ class TestCommittedCassettes:
     --model-identifier can silently use another model; this catches such a cassette.
     """
 
+    def test_there_are_committed_cassettes(self) -> None:
+        """Otherwise the check below would run for no cassette at all."""
+        assert COMMITTED_CASSETTES
+
     @pytest.mark.parametrize("cassette_path", COMMITTED_CASSETTES, ids=[path.stem for path in COMMITTED_CASSETTES])
-    def test_recorded_with_the_default_model(self, cassette_path: Path) -> None:
-        assert Cassette.load(cassette_path).model_identifier == DEFAULT_MODEL_IDENTIFIER
+    def test_recorded_with_the_default_model_and_reasoning_effort(self, cassette_path: Path) -> None:
+        cassette = Cassette.load(cassette_path)
+
+        assert cassette.model_identifier == DEFAULT_MODEL_IDENTIFIER
+        assert cassette.reasoning_effort is None  # the provider's default
 
 
 class TestReplay:
@@ -155,6 +171,13 @@ class TestReplay:
 
         with pytest.raises(CassetteMissError, match="exhausted"):
             model.invoke(make_messages(USER_PROMPT_BATCH_1))
+
+    def test_a_cassette_that_does_not_load_is_a_miss_saying_to_re_record(self, cassette_path: Path) -> None:
+        """A cassette written before cassettes named their model, for one, lacks a required field."""
+        cassette_path.write_text('{"entries": []}')
+
+        with pytest.raises(CassetteMissError, match="re-record"):
+            ReplayChatModel(cassette_path=cassette_path)
 
     def test_missing_cassette_file_raises_with_guidance(self, tmp_path: Path) -> None:
         with pytest.raises(CassetteMissError, match="record"):

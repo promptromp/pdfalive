@@ -1231,7 +1231,7 @@ class TestOutsideTextIsPrintedSafely:
         make_golden_entry: Callable[..., GoldenEntry],
         make_toc_entry: Callable[..., TOCEntry],
     ) -> None:
-        """Case names and TOC titles reach the summary table and the report lines verbatim."""
+        """Case names, TOC titles and the model reach the summary table and the report lines verbatim."""
         case = EvalCase(
             name=markup_like_text,
             pdf_path=plain_pdf,
@@ -1243,7 +1243,9 @@ class TestOutsideTextIsPrintedSafely:
         spurious = make_toc_entry(title=f"{self.SPURIOUS_TITLE_PREFIX}{markup_like_text}")
         mock_discover_cases.return_value = [case]
         report = EvalReport(matched=[], missing=[missing], spurious=[spurious])
-        mock_run_eval_case.return_value = CaseResult(report=report, first_pass_report=report)
+        mock_run_eval_case.return_value = CaseResult(
+            report=report, first_pass_report=report, model_identifier=markup_like_text
+        )
 
         result = runner.invoke(
             cli,
@@ -1260,6 +1262,7 @@ class TestOutsideTextIsPrintedSafely:
         assert f"{case.name}: 1 spurious generated entries:" in output
         assert f"  - {spurious.title} (page {spurious.page_number}, level {spurious.level})" in output
         assert f"Threshold failure: {case.name}: F1" in output
+        assert f"Scores are for responses recorded by {markup_like_text}" in output
 
 
 class TestRenameCommand:

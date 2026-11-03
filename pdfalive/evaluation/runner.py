@@ -76,10 +76,12 @@ class CaseResult:
     """A case's scores: the TOC the pipeline writes and, for a postprocessing case, the TOC a run without it writes.
 
     ``first_pass_report`` is None for a case without postprocessing, whose written TOC is that TOC.
+    ``model_identifier`` is the model whose responses were scored: in replay, the one that recorded the cassette.
     """
 
     report: EvalReport
     first_pass_report: EvalReport | None
+    model_identifier: str
 
 
 def load_golden_file(golden_path: Path) -> GoldenFile:
@@ -125,16 +127,24 @@ def _build_llm(
     model_identifier: str,
     strict_replay: bool,
     reasoning_effort: str | None = None,
-) -> BaseChatModel:
-    """Build the chat model for the requested evaluation mode."""
+) -> tuple[BaseChatModel, str]:
+    """Build the chat model for the requested evaluation mode, with the model whose responses it gives.
+
+    In replay that is the model that recorded the cassette, whatever model_identifier says.
+    """
     if mode == "replay":
-        return cast(BaseChatModel, ReplayChatModel(cassette_path=case.cassette_path, strict=strict_replay))
+        replay = ReplayChatModel(cassette_path=case.cassette_path, strict=strict_replay)
+        return cast(BaseChatModel, replay), replay.model_identifier
     if mode == "record":
-        real_llm = build_chat_model(model_identifier, reasoning_effort)
-        recorder = RecordingChatModel(llm=real_llm, model_identifier=model_identifier, cassette_path=case.cassette_path)
-        return cast(BaseChatModel, recorder)
+        recorder = RecordingChatModel(
+            llm=build_chat_model(model_identifier, reasoning_effort),
+            model_identifier=model_identifier,
+            reasoning_effort=reasoning_effort,
+            cassette_path=case.cassette_path,
+        )
+        return cast(BaseChatModel, recorder), model_identifier
     if mode == "live":
-        return build_chat_model(model_identifier, reasoning_effort)
+        return build_chat_model(model_identifier, reasoning_effort), model_identifier
     raise ValueError(f"Unknown evaluation mode: {mode!r}")
 
 
@@ -170,7 +180,7 @@ def run_eval_case(
             "Eval PDFs are local-only (not committed); see the golden file's description for how to obtain it."
         )
 
-    llm = _build_llm(case, mode, model_identifier, strict_replay, reasoning_effort)
+    llm, responding_model = _build_llm(case, mode, model_identifier, strict_replay, reasoning_effort)
 
     if request_delay is None:
         request_delay = _REPLAY_REQUEST_DELAY_SECONDS if mode == "replay" else DEFAULT_REQUEST_DELAY_SECONDS
@@ -189,6 +199,7 @@ def run_eval_case(
     return CaseResult(
         report=evaluate_toc(case.golden.entries, written_toc),
         first_pass_report=None if first_pass_toc is None else evaluate_toc(case.golden.entries, first_pass_toc),
+        model_identifier=responding_model,
     )
 
 

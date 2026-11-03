@@ -1,5 +1,6 @@
 {
   "model_identifier": "gpt-5.6",
+  "reasoning_effort": null,
   "entries": [
     {
       "request_hash": "074e9703a1560ac4fadc194a5907764a08f7e4d8e9ad8e2b1b5db412fa96d5f4",

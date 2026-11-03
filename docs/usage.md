@@ -220,7 +220,7 @@ The `source_pdf` path is resolved relative to the parent of the evals directory 
 	# From then on: free, deterministic evaluation runs (no LLM calls)
 	pdfalive eval --mode replay
 
-A cassette names the model that recorded it (`model_identifier`). The cassettes committed to this repository are recorded with the default model, and the test suite fails for one recorded with another. A `[global]` `model-identifier` in a config file applies to `eval` too, so pass `--model-identifier` when recording if your config sets a different model.
+A cassette names the model and reasoning effort that recorded it (`model_identifier`, `reasoning_effort`), and `eval` ends by naming the model behind its scores. The cassettes committed to this repository are recorded with the default model at the provider's default reasoning effort, and the test suite fails for one recorded otherwise. A `[global]` `model-identifier` or `reasoning-effort` in a config file applies to `eval` too, so `--mode record` warns when it records with other settings; pass `--model-identifier` to override your config.
 
 Replay mode runs the full pipeline (feature extraction, batching, deterministic corrections, postprocess fixups) but serves LLM responses from the cassette. This makes it ideal for iterating on everything *around* the LLM calls. In strict replay (the default), a change that alters the prompts raises an error telling you to re-record; pass `--loose-replay` to replay by call order anyway (useful when a prompt change is intentional and you want a quick signal before re-recording).
 
