@@ -2,7 +2,7 @@
   "name": "offset-drift",
   "source_pdf": "data/offset-drift.pdf",
   "postprocess": true,
-  "description": "Human-verified golden built from the document's printed Contents: every numbered entry was located two independent ways that agree (heading text on the page; printed page via on-page folios), the rest by hand. The PDF omits pages its printed numbering counts, so the printed-to-PDF offset drifts from +13 at the first chapter to -11 at the index: the regression case for offset drift. Text PDF, no OCR needed. The committed cassette is a draw in which the LLM's own page estimates drift: the postprocessor's page numbers alone score page accuracy 0.25, the pipeline with printed-page placement 1.00.",
+  "description": "Human-verified golden built from the document's printed Contents: every numbered entry was located two independent ways that agree (heading text on the page; printed page via on-page folios), the rest by hand. The PDF omits pages its printed numbering counts, so the printed-to-PDF offset drifts from +13 at the first chapter to -11 at the index: the regression case for offset drift. Text PDF, no OCR needed. The committed cassette is a draw in which the LLM's own page estimates drift: the postprocessor's page numbers alone score page accuracy 0.26, the pipeline with printed-page placement 1.00.",
   "entries": [
     {
       "level": 1,
