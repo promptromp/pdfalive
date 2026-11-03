@@ -14,13 +14,14 @@ from pdfalive.processors.toc_generator import (
     _FRONT_MATTER_TITLES,
     _HEADING_FONT_SIZE_RATIO,
     _HEADING_FONT_SIZE_RATIO_PHASE2,
+    _HEADING_MAX_LENGTH,
     _LETTERSPACED_PATTERN,
     _MAX_DROPPED_ENTRIES_SHOWN,
     _MAX_FOLIO_MATCH_DISTANCE,
     _MAX_HEADING_CANDIDATES_PER_PAGE,
     _RUNNING_HEADER_Y_THRESHOLD,
     _SECTION_NUMBER_PATTERN,
-    DEFAULT_TEXT_SNIPPET_LENGTH,
+    TEXT_SNIPPET_LENGTH,
     TOCGenerator,
     _compute_body_font_profile,
     _extract_features_from_page_range,
@@ -46,8 +47,7 @@ _ONE_HEADING_FEATURES = [
                 page_number=1,
                 font_name="Times-Bold",
                 font_size=16,
-                text_length=23,
-                text_snippet="Chapter 1: Introduction",
+                text="Chapter 1: Introduction",
                 y_position=0.1,
                 is_bold=True,
             )
@@ -66,6 +66,10 @@ def _extract(mock_doc: MagicMock, mock_llm: MagicMock) -> TOC:
 
 # Two titles, each harmless alone, that form a "[x' ... 'y]" markup tag once joined into one message.
 _TAG_FORMING_TITLES = ("[x", "y]")
+# An invented heading longer than the LLM snippet (TEXT_SNIPPET_LENGTH).
+_LONG_HEADING = "Chapter 4: Tidal Currents in Narrow Straits and Their Seasonal Variation"
+# Body text set at heading size, repeated past _HEADING_MAX_LENGTH in Phase 2's tests.
+_LARGE_BODY_TEXT = "Body text set large "
 
 # Confidence given to entries built by the test helpers below.
 _HELPER_CONFIDENCE = 0.9
@@ -549,8 +553,7 @@ class TestTOCGeneratorPagination:
                         page_number=page_num,
                         font_name="Times-Bold",
                         font_size=16,
-                        text_length=25,
-                        text_snippet=f"Chapter {page_num}",
+                        text=f"Chapter {page_num}",
                     )
                 ]
                 block_features.append(line_features)
@@ -562,9 +565,7 @@ class TestTOCGeneratorPagination:
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
 
         # Create a small feature set
-        small_features = [
-            [[TOCFeature(page_number=1, font_name="Bold", font_size=16, text_length=10, text_snippet="Ch 1")]]
-        ]
+        small_features = [[[TOCFeature(page_number=1, font_name="Bold", font_size=16, text="Ch 1")]]]
 
         batches = list(generator._batch_features(small_features, max_tokens=10000))
 
@@ -604,11 +605,11 @@ class TestTOCGeneratorPagination:
         features = [
             [
                 [
-                    TOCFeature(page_number=1, font_name="Bold", font_size=16, text_length=10, text_snippet="Title 1"),
-                    TOCFeature(page_number=1, font_name="Regular", font_size=12, text_length=50, text_snippet="Text"),
+                    TOCFeature(page_number=1, font_name="Bold", font_size=16, text="Title 1"),
+                    TOCFeature(page_number=1, font_name="Regular", font_size=12, text="Text"),
                 ]
             ],
-            [[TOCFeature(page_number=2, font_name="Bold", font_size=16, text_length=10, text_snippet="Title 2")]],
+            [[TOCFeature(page_number=2, font_name="Bold", font_size=16, text="Title 2")]],
         ]
 
         batches = list(generator._batch_features(features, max_tokens=100000))
@@ -659,7 +660,7 @@ class TestTOCGeneratorPagination:
         generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
 
         # Create simple features
-        features = [[[TOCFeature(page_number=1, font_name="Bold", font_size=16, text_length=10, text_snippet="Ch 1")]]]
+        features = [[[TOCFeature(page_number=1, font_name="Bold", font_size=16, text="Ch 1")]]]
 
         mock_structured_llm = MagicMock()
         mock_structured_llm.invoke.return_value = make_structured_answer(
@@ -681,9 +682,7 @@ class TestTOCGeneratorPagination:
         # Create overlapping features that will be in two batches
         features = []
         for i in range(10):
-            feature = TOCFeature(
-                page_number=i + 1, font_name="Bold", font_size=16, text_length=20, text_snippet=f"Ch {i + 1}"
-            )
+            feature = TOCFeature(page_number=i + 1, font_name="Bold", font_size=16, text=f"Ch {i + 1}")
             features.append([[feature]])
 
         # LLM returns the same entry for overlapping batches
@@ -785,7 +784,7 @@ class TestFeatureExtractionMultiprocessing:
             mock_pymupdf.open.return_value = mock_doc
 
             # Single process handling all 3 pages
-            args = (0, 1, "/fake/path.pdf", 3, 5, 25)
+            args = (0, 1, "/fake/path.pdf", 3, 5)
             start, end, features, _ = _extract_features_from_page_range(args)
 
             assert start == 0
@@ -797,7 +796,7 @@ class TestFeatureExtractionMultiprocessing:
             # First line, first span should be the chapter title
             assert features[0][0][0].font_name == "Times-Bold"
             assert features[0][0][0].font_size == 18
-            assert features[0][0][0].text_snippet == "Chapter Title"
+            assert features[0][0][0].text == "Chapter Title"
 
     def test_extract_features_from_page_range_calculates_correct_ranges(self):
         """Test that page ranges are calculated correctly for multiple processes."""
@@ -817,22 +816,22 @@ class TestFeatureExtractionMultiprocessing:
 
             # Test with 4 processes on 12 pages
             # Process 0: pages 0-2 (3 pages)
-            start0, end0, _, _ = _extract_features_from_page_range((0, 4, "/fake/path.pdf", 3, 5, 25))
+            start0, end0, _, _ = _extract_features_from_page_range((0, 4, "/fake/path.pdf", 3, 5))
             assert start0 == 0
             assert end0 == 3
 
             # Process 1: pages 3-5 (3 pages)
-            start1, end1, _, _ = _extract_features_from_page_range((1, 4, "/fake/path.pdf", 3, 5, 25))
+            start1, end1, _, _ = _extract_features_from_page_range((1, 4, "/fake/path.pdf", 3, 5))
             assert start1 == 3
             assert end1 == 6
 
             # Process 2: pages 6-8 (3 pages)
-            start2, end2, _, _ = _extract_features_from_page_range((2, 4, "/fake/path.pdf", 3, 5, 25))
+            start2, end2, _, _ = _extract_features_from_page_range((2, 4, "/fake/path.pdf", 3, 5))
             assert start2 == 6
             assert end2 == 9
 
             # Process 3 (last): pages 9-11 (gets remainder)
-            start3, end3, _, _ = _extract_features_from_page_range((3, 4, "/fake/path.pdf", 3, 5, 25))
+            start3, end3, _, _ = _extract_features_from_page_range((3, 4, "/fake/path.pdf", 3, 5))
             assert start3 == 9
             assert end3 == 12
 
@@ -864,7 +863,7 @@ class TestFeatureExtractionMultiprocessing:
 
             actual_ranges = []
             for proc_idx in range(num_processes):
-                args = (proc_idx, num_processes, "/fake/path.pdf", 3, 5, 25)
+                args = (proc_idx, num_processes, "/fake/path.pdf", 3, 5)
                 start, end, _, _ = _extract_features_from_page_range(args)
                 actual_ranges.append((start, end))
 
@@ -885,7 +884,7 @@ class TestFeatureExtractionMultiprocessing:
             mock_doc.__getitem__ = lambda self, idx: mock_page
             mock_pymupdf.open.return_value = mock_doc
 
-            start, end, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 5, 25, 4))
+            start, end, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 5, 4))
 
             assert start == 0
             assert end == 4
@@ -919,7 +918,7 @@ class TestFeatureExtractionMultiprocessing:
             # Simulate 3 processes
             results = []
             for proc_idx in range(3):
-                start, end, features, _ = _extract_features_from_page_range((proc_idx, 3, "/fake/path.pdf", 3, 5, 25))
+                start, end, features, _ = _extract_features_from_page_range((proc_idx, 3, "/fake/path.pdf", 3, 5))
                 results.append((start, end, features))
 
             # Sort by start page (simulating what _extract_features_parallel does)
@@ -934,7 +933,7 @@ class TestFeatureExtractionMultiprocessing:
             assert len(all_features) == 9
             for i, block in enumerate(all_features):
                 page_num = block[0][0].page_number
-                text = block[0][0].text_snippet
+                text = block[0][0].text
                 assert page_num == i + 1, f"Expected page {i + 1}, got {page_num}"
                 assert f"Page {i + 1}" in text, f"Expected 'Page {i + 1}' in text, got '{text}'"
 
@@ -969,7 +968,7 @@ class TestFeatureExtractionMultiprocessing:
             # Simulate 2 processes
             results = []
             for proc_idx in range(2):
-                start, end, features, _ = _extract_features_from_page_range((proc_idx, 2, "/fake/path.pdf", 3, 5, 25))
+                start, end, features, _ = _extract_features_from_page_range((proc_idx, 2, "/fake/path.pdf", 3, 5))
                 results.append((start, end, features))
 
             results = sorted(results, key=lambda x: x[0])
@@ -993,7 +992,7 @@ class TestFeatureExtractionMultiprocessing:
                 ("P4 Block2", 4),
             ]
             for i, (expected_text, expected_page) in enumerate(expected_order):
-                actual_text = all_features[i][0][0].text_snippet
+                actual_text = all_features[i][0][0].text
                 actual_page = all_features[i][0][0].page_number
                 assert expected_text in actual_text, f"Block {i}: expected '{expected_text}' in '{actual_text}'"
                 assert actual_page == expected_page, f"Block {i}: expected page {expected_page}, got {actual_page}"
@@ -1019,11 +1018,11 @@ class TestFeatureExtractionMultiprocessing:
             mock_pymupdf.open.return_value = mock_doc
 
             # Limit to 2 blocks per page
-            _, _, features, remaining = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 2, 5, 25))
+            _, _, features, remaining = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 2, 5))
 
             assert len(features) == 2
-            assert "Block 0" in features[0][0][0].text_snippet
-            assert "Block 1" in features[1][0][0].text_snippet
+            assert "Block 0" in features[0][0][0].text
+            assert "Block 1" in features[1][0][0].text
             # Remaining blocks should be buffered
             assert len(remaining) > 0
 
@@ -1050,23 +1049,22 @@ class TestFeatureExtractionMultiprocessing:
             mock_pymupdf.open.return_value = mock_doc
 
             # Limit to 3 lines per block
-            _, _, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 3, 25))
+            _, _, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 3))
 
             assert len(features) == 1  # 1 block
             assert len(features[0]) == 3  # 3 lines
-            assert "Line 0" in features[0][0][0].text_snippet
-            assert "Line 2" in features[0][2][0].text_snippet
+            assert "Line 0" in features[0][0][0].text
+            assert "Line 2" in features[0][2][0].text
 
-    def test_extract_features_respects_text_snippet_length(self):
-        """Test that text_snippet_length limit is respected."""
+    def test_extraction_keeps_the_whole_text(self):
+        """Features carry a span's whole text; only the LLM payload cuts it (see TestLlmSnippets)."""
         with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
             mock_doc = MagicMock()
             mock_doc.page_count = 1
 
-            long_text = "This is a very long text that should be truncated"
             page_data = {
                 "height": 800,
-                "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 12, "text": long_text}]}]}],
+                "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 16, "text": _LONG_HEADING}]}]}],
             }
 
             mock_page = MagicMock()
@@ -1074,37 +1072,9 @@ class TestFeatureExtractionMultiprocessing:
             mock_doc.__getitem__ = lambda self, idx: mock_page
             mock_pymupdf.open.return_value = mock_doc
 
-            # Limit snippet to 10 characters
-            _, _, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 5, 10))
+            _, _, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 3, 5))
 
-            assert len(features[0][0][0].text_snippet) == 10
-            assert features[0][0][0].text_snippet == "This is a "
-            # But text_length should reflect full length
-            assert features[0][0][0].text_length == len(long_text)
-
-    def test_extract_features_default_snippet_length_uses_constant(self):
-        """Default snippet length should be named and long enough for common headings."""
-        with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
-            mock_doc = MagicMock()
-            mock_doc.page_count = 1
-
-            long_heading = "Chapter 1: Introduction to Stochastic Differential Equations"
-            page_data = {
-                "height": 800,
-                "blocks": [{"type": 0, "lines": [{"spans": [{"font": "Bold", "size": 16, "text": long_heading}]}]}],
-            }
-
-            mock_page = MagicMock()
-            mock_page.get_text.return_value = page_data
-            mock_doc.__getitem__ = lambda self, idx: mock_page
-            mock_pymupdf.open.return_value = mock_doc
-
-            _, _, features, _ = _extract_features_from_page_range(
-                (0, 1, "/fake/path.pdf", 3, 5, DEFAULT_TEXT_SNIPPET_LENGTH)
-            )
-
-            assert features[0][0][0].text_snippet == long_heading[:DEFAULT_TEXT_SNIPPET_LENGTH]
-            assert len(features[0][0][0].text_snippet) == DEFAULT_TEXT_SNIPPET_LENGTH
+            assert features[0][0][0].text == _LONG_HEADING
 
     def test_extract_features_skips_non_text_blocks(self):
         """Test that non-text blocks (type != 0) are skipped."""
@@ -1126,7 +1096,7 @@ class TestFeatureExtractionMultiprocessing:
             mock_doc.__getitem__ = lambda self, idx: mock_page
             mock_pymupdf.open.return_value = mock_doc
 
-            _, _, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 10, 5, 25))
+            _, _, features, _ = _extract_features_from_page_range((0, 1, "/fake/path.pdf", 10, 5))
 
             # Should have 3 blocks in features list, but image block will have empty lines
             assert len(features) == 3
@@ -1168,7 +1138,7 @@ class TestFeatureExtractionMultiprocessing:
             results = []
             for proc_idx in range(num_processes):
                 start, end, features, _ = _extract_features_from_page_range(
-                    (proc_idx, num_processes, "/fake/path.pdf", 3, 5, 25)
+                    (proc_idx, num_processes, "/fake/path.pdf", 3, 5)
                 )
                 results.append((start, end, features))
 
@@ -1199,7 +1169,7 @@ class TestFeatureExtractionMultiprocessing:
             # Verify content matches expected pages
             for i, block in enumerate(all_features):
                 expected_text = f"Chapter {i + 1}"
-                actual_text = block[0][0].text_snippet
+                actual_text = block[0][0].text
                 assert expected_text in actual_text, f"Page {i + 1}: expected '{expected_text}' in '{actual_text}'"
 
 
@@ -1242,7 +1212,7 @@ class TestTOCGeneratorParallelExtraction:
         doc.close()
 
         assert parallel == sequential
-        texts = [span.text_snippet for block in sequential for line in block for span in line]
+        texts = [span.text for block in sequential for line in block for span in line]
         assert [f"Section {page_number}" in texts for page_number in range(1, self.PAGES + 1)] == [True] * self.PAGES
 
     class DummyLLM:
@@ -1344,8 +1314,7 @@ class TestTOCPostprocessing:
                         page_number=page_num,
                         font_name="Times-Bold",
                         font_size=16,
-                        text_length=20,
-                        text_snippet=f"Heading {page_num}",
+                        text=f"Heading {page_num}",
                     )
                 ]
             ]
@@ -1599,29 +1568,25 @@ class TestComputeBodyFontProfile:
             page_number=1,
             font_name="Times-Roman",
             font_size=12,
-            text_length=100,
-            text_snippet="body",
+            text="body",
         )
         body2 = TOCFeature(
             page_number=1,
             font_name="Times-Roman",
             font_size=12,
-            text_length=80,
-            text_snippet="more",
+            text="more",
         )
         heading = TOCFeature(
             page_number=2,
             font_name="Times-Bold",
             font_size=16,
-            text_length=20,
-            text_snippet="head",
+            text="head",
         )
         body3 = TOCFeature(
             page_number=2,
             font_name="Times-Roman",
             font_size=12,
-            text_length=90,
-            text_snippet="text",
+            text="text",
         )
         features = [
             [[body, body2]],
@@ -1711,11 +1676,9 @@ class TestTOCFeatureStrFormat:
 
     def test_str_without_new_fields(self):
         """Test backward compatibility: old format when new fields are None."""
-        feature = TOCFeature(
-            page_number=1, font_name="Times-Bold", font_size=16, text_length=45, text_snippet="Chapter 1"
-        )
+        feature = TOCFeature(page_number=1, font_name="Times-Bold", font_size=16, text="Chapter 1")
         result = str(feature)
-        assert result == "(1, 'Times-Bold', 16.0, 45, 'Chapter 1')"
+        assert result == "(1, 'Times-Bold', 16.0, 9, 'Chapter 1')"
 
     def test_str_with_y_position_only(self):
         """Test format with y_position set."""
@@ -1723,12 +1686,11 @@ class TestTOCFeatureStrFormat:
             page_number=1,
             font_name="Times-Bold",
             font_size=16,
-            text_length=45,
-            text_snippet="Chapter 1",
+            text="Chapter 1",
             y_position=0.12,
         )
         result = str(feature)
-        assert result == "(1, 'Times-Bold', 16.0, 45, 'Chapter 1', y=0.12)"
+        assert result == "(1, 'Times-Bold', 16.0, 9, 'Chapter 1', y=0.12)"
 
     def test_str_with_both_fields(self):
         """Test format with both y_position and is_bold set."""
@@ -1736,13 +1698,12 @@ class TestTOCFeatureStrFormat:
             page_number=1,
             font_name="Times-Bold",
             font_size=16,
-            text_length=45,
-            text_snippet="Chapter 1",
+            text="Chapter 1",
             y_position=0.45,
             is_bold=True,
         )
         result = str(feature)
-        assert result == "(1, 'Times-Bold', 16.0, 45, 'Chapter 1', y=0.45, bold=True)"
+        assert result == "(1, 'Times-Bold', 16.0, 9, 'Chapter 1', y=0.45, bold=True)"
 
     def test_str_with_is_bold_only(self):
         """Test format with only is_bold set."""
@@ -1750,12 +1711,11 @@ class TestTOCFeatureStrFormat:
             page_number=1,
             font_name="Times-Bold",
             font_size=16,
-            text_length=45,
-            text_snippet="Chapter 1",
+            text="Chapter 1",
             is_bold=False,
         )
         result = str(feature)
-        assert result == "(1, 'Times-Bold', 16.0, 45, 'Chapter 1', bold=False)"
+        assert result == "(1, 'Times-Bold', 16.0, 9, 'Chapter 1', bold=False)"
 
 
 class TestHeadingCandidateIntegration:
@@ -1830,7 +1790,7 @@ class TestHeadingCandidateIntegration:
             for line in block:
                 for span in line:
                     if isinstance(span, TOCFeature):
-                        all_snippets.append(span.text_snippet)
+                        all_snippets.append(span.text)
 
         # The mid-page heading should have been detected as a heading candidate
         assert any("5.2 Convexity" in s for s in all_snippets), (
@@ -1884,7 +1844,7 @@ class TestHeadingCandidateIntegration:
         features = generator._extract_features_sequential(doc, max_blocks_per_page=3, show_progress=False)
 
         all_snippets = [
-            span.text_snippet for block in features for line in block for span in line if isinstance(span, TOCFeature)
+            span.text for block in features for line in block for span in line if isinstance(span, TOCFeature)
         ]
 
         assert "5.2 Convexity of Functions" in all_snippets
@@ -2041,7 +2001,7 @@ class TestRomanNumeralAndLetterspacedPatterns:
             for line in block:
                 for span in line:
                     if isinstance(span, TOCFeature):
-                        all_snippets.append(span.text_snippet)
+                        all_snippets.append(span.text)
 
         assert any("III FLUCTUATIONS" in s for s in all_snippets), (
             f"Roman numeral heading not found in features. Got: {all_snippets}"
@@ -2092,7 +2052,7 @@ class TestRomanNumeralAndLetterspacedPatterns:
             for line in block:
                 for span in line:
                     if isinstance(span, TOCFeature):
-                        all_snippets.append(span.text_snippet)
+                        all_snippets.append(span.text)
 
         assert any("C H A P T E R" in s for s in all_snippets), (
             f"Letter-spaced heading not found in features. Got: {all_snippets}"
@@ -2125,8 +2085,7 @@ class TestSummarizeFeaturesForPostprocessing:
                         page_number=page_num,
                         font_name="Times-Roman",
                         font_size=12,
-                        text_length=20,
-                        text_snippet=f"Page {page_num} text",
+                        text=f"Page {page_num} text",
                     )
                     for _ in range(spans_per_page)
                 ]
@@ -3288,8 +3247,7 @@ class TestSerializeFeaturesCompact:
                         page_number=1,
                         font_name="Times-Bold",
                         font_size=16.0,
-                        text_length=25,
-                        text_snippet="Chapter 1: Intro",
+                        text="Chapter 1: Intro",
                         y_position=0.12,
                         is_bold=True,
                     )
@@ -3311,15 +3269,13 @@ class TestSerializeFeaturesCompact:
                         page_number=1,
                         font_name="Times-Bold",
                         font_size=16.0,
-                        text_length=10,
-                        text_snippet="Heading",
+                        text="Heading",
                     ),
                     TOCFeature(
                         page_number=1,
                         font_name="Times-Bold",
                         font_size=12.0,
-                        text_length=20,
-                        text_snippet="Subheading",
+                        text="Subheading",
                     ),
                 ]
             ]
@@ -3338,8 +3294,7 @@ class TestSerializeFeaturesCompact:
                         page_number=1,
                         font_name="ABCDEF+TimesNewRomanPS-BoldMT",
                         font_size=14.0,
-                        text_length=10,
-                        text_snippet="Test",
+                        text="Test",
                     )
                 ]
             ]
@@ -3357,8 +3312,7 @@ class TestSerializeFeaturesCompact:
                         page_number=1,
                         font_name="Arial",
                         font_size=12.0,
-                        text_length=10,
-                        text_snippet="Page one",
+                        text="Page one",
                     )
                 ]
             ],
@@ -3368,8 +3322,7 @@ class TestSerializeFeaturesCompact:
                         page_number=2,
                         font_name="Arial",
                         font_size=12.0,
-                        text_length=10,
-                        text_snippet="Page two",
+                        text="Page two",
                     )
                 ]
             ],
@@ -3389,15 +3342,13 @@ class TestSerializeFeaturesCompact:
                         page_number=1,
                         font_name="Font",
                         font_size=14.0,
-                        text_length=5,
-                        text_snippet="A",
+                        text="A",
                     ),
                     TOCFeature(
                         page_number=1,
                         font_name="Font",
                         font_size=12.5,
-                        text_length=5,
-                        text_snippet="B",
+                        text="B",
                     ),
                 ]
             ]
@@ -3415,24 +3366,21 @@ class TestSerializeFeaturesCompact:
                         page_number=1,
                         font_name="Font",
                         font_size=12.0,
-                        text_length=5,
-                        text_snippet="A",
+                        text="A",
                         is_bold=False,
                     ),
                     TOCFeature(
                         page_number=1,
                         font_name="Font",
                         font_size=12.0,
-                        text_length=5,
-                        text_snippet="B",
+                        text="B",
                         is_bold=None,
                     ),
                     TOCFeature(
                         page_number=1,
                         font_name="Font",
                         font_size=12.0,
-                        text_length=5,
-                        text_snippet="C",
+                        text="C",
                         is_bold=True,
                     ),
                 ]
@@ -3455,8 +3403,7 @@ class TestSerializeFeaturesCompact:
                         page_number=page_num,
                         font_name="ABCDEF+TimesNewRomanPS-BoldMT",
                         font_size=14.0,
-                        text_length=50,
-                        text_snippet=f"Chapter {page_num}: Some Title",
+                        text=f"Chapter {page_num}: Some Title",
                         y_position=0.12,
                         is_bold=True,
                     )
@@ -3573,7 +3520,7 @@ class TestHeadingCandidateCap:
         for block in features[2:]:
             for line in block:
                 for span in line:
-                    if isinstance(span, TOCFeature) and "Heading" in span.text_snippet:
+                    if isinstance(span, TOCFeature) and "Heading" in span.text:
                         heading_candidates.append(span)
 
         assert len(heading_candidates) <= _MAX_HEADING_CANDIDATES_PER_PAGE
@@ -3685,8 +3632,7 @@ class TestCorrectRunningHeaderPages:
             page_number=page,
             font_name="Times-Bold" if bold else "Times-Roman",
             font_size=14.0 if bold else 12.0,
-            text_length=len(text),
-            text_snippet=text[:25],
+            text=text,
             y_position=y_pos,
             is_bold=bold,
         )
@@ -3710,6 +3656,39 @@ class TestCorrectRunningHeaderPages:
 
         result = generator._correct_running_header_pages(toc, features)
         assert result.entries[0].page_number == 5
+
+    def test_corrects_a_running_header_longer_than_the_llm_snippet(self, mock_llm):
+        """Extracted features keep a title longer than an LLM snippet whole, so the correction still recognizes it."""
+        page_height = 800.0
+
+        def page_with(*lines: tuple[str, float]) -> MagicMock:
+            page = MagicMock()
+            page.rect.height = page_height
+            spans = [
+                {"font": "Times-Bold", "size": 14, "text": text, "bbox": (50, top, 500, top + 14)}
+                for text, top in lines
+            ]
+            page.get_text.return_value = {
+                "height": page_height,
+                "blocks": [{"type": 0, "lines": [{"spans": [span]}]} for span in spans],
+            }
+            return page
+
+        pages = [
+            page_with(("Body text ends the chapter", 100.0), (_LONG_HEADING, 0.82 * page_height)),
+            page_with((_LONG_HEADING, 0.03 * page_height), ("Body text continues", 0.15 * page_height)),
+        ]
+        doc = MagicMock()
+        doc.page_count = len(pages)
+        doc.name = None
+        doc.__iter__ = lambda self: iter(pages)
+        generator = TOCGenerator(doc, mock_llm)
+        features = generator._extract_features_sequential(doc, show_progress=False)
+        toc = TOC(entries=[TOCEntry(title=_LONG_HEADING, page_number=2, level=2, confidence=0.9)])
+
+        result = generator._correct_running_header_pages(toc, features)
+
+        assert result.entries[0].page_number == 1
 
     def test_no_correction_when_heading_mid_page(self, mock_doc, mock_llm):
         """Entry with mid-page occurrence should NOT be corrected."""
@@ -4286,8 +4265,7 @@ class TestFilterFeaturesForLlm:
                 page_number=page_number,
                 font_name=font_name,
                 font_size=font_size,
-                text_length=len(text),
-                text_snippet=text,
+                text=text,
                 y_position=y_position,
                 is_bold=is_bold,
             )
@@ -4327,7 +4305,7 @@ class TestFilterFeaturesForLlm:
 
         filtered = filter_features_for_llm(features)
 
-        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        kept_texts = [span.text for span in self.flatten(filtered)]
         assert kept_texts == ["Chapter 1: Introduction", "First body line on the page."]
 
     @pytest.mark.parametrize(
@@ -4346,7 +4324,7 @@ class TestFilterFeaturesForLlm:
 
         filtered = filter_features_for_llm(features, max_body_spans_per_page=0)
 
-        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        kept_texts = [span.text for span in self.flatten(filtered)]
         assert kept_texts == [text]
 
     def test_body_span_budget_is_per_page_across_blocks(self, make_feature, make_block) -> None:
@@ -4359,7 +4337,7 @@ class TestFilterFeaturesForLlm:
 
         filtered = filter_features_for_llm(features)
 
-        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        kept_texts = [span.text for span in self.flatten(filtered)]
         assert kept_texts == ["Page 1 body A.", "Page 2 body A."]
 
     def test_body_span_budget_is_configurable(self, make_feature, make_block) -> None:
@@ -4373,7 +4351,7 @@ class TestFilterFeaturesForLlm:
 
         filtered = filter_features_for_llm(features, max_body_spans_per_page=2)
 
-        kept_texts = [span.text_snippet for span in self.flatten(filtered)]
+        kept_texts = [span.text for span in self.flatten(filtered)]
         assert kept_texts == ["Body line one.", "Body line two."]
 
     def test_empty_blocks_and_lines_are_pruned(self, make_feature, make_block) -> None:
@@ -4481,8 +4459,7 @@ class TestRealTokenAccounting:
                         page_number=1,
                         font_name="Times-Bold",
                         font_size=16,
-                        text_length=23,
-                        text_snippet="Chapter 1: Introduction",
+                        text="Chapter 1: Introduction",
                         y_position=0.1,
                         is_bold=True,
                     )
@@ -4766,8 +4743,7 @@ class TestExtractionArtifactHeadingMatching:
                 page_number=page,
                 font_name="Times-Bold",
                 font_size=14.0,
-                text_length=len(text),
-                text_snippet=text,
+                text=text,
                 y_position=y_position,
                 is_bold=True,
             )
@@ -4910,3 +4886,69 @@ class TestExtractionArtifactHeadingMatching:
         features = [[[make_feature(self.HEADING_PAGE, pdf_text, self.HEADING_Y)]]]
 
         assert pdf_text in serialize_features_compact(filter_features_for_llm(features))
+
+
+class TestLlmSnippets:
+    """Features keep their whole text; the LLM sees TEXT_SNIPPET_LENGTH characters of it.
+
+    Regression: extraction cut every feature to its snippet, and the deterministic steps
+    matched against those snippets, so a title longer than a snippet was never recognized
+    (the running header correction), and Phase 2's maximum heading length never applied.
+    """
+
+    BODY_SIZE = 12
+    HEADING_SIZE = 16
+    PAGE_HEIGHT = 800.0
+
+    def _feature(self, text: str) -> TOCFeature:
+        return TOCFeature(page_number=1, font_name="Times-Bold", font_size=self.HEADING_SIZE, text=text, is_bold=True)
+
+    def test_payload_cuts_text_at_the_snippet_length(self):
+        payload = serialize_features_compact([[[self._feature(_LONG_HEADING)]]])
+
+        assert _LONG_HEADING[:TEXT_SNIPPET_LENGTH] in payload
+        assert _LONG_HEADING not in payload
+
+    def test_postprocess_summary_cuts_text_at_the_snippet_length(self, mock_doc, mock_llm):
+        summary = TOCGenerator(mock_doc, mock_llm)._summarize_features_for_postprocessing(
+            [[[self._feature(_LONG_HEADING)]]]
+        )
+
+        assert f'"{_LONG_HEADING[:TEXT_SNIPPET_LENGTH]}"' in summary
+
+    def _phase2_features(self, candidate_text: str) -> list[str]:
+        """Texts extracted from a page whose fourth block (scanned by Phase 2) is candidate_text at heading size."""
+        body = {"font": "Times-Roman", "size": self.BODY_SIZE, "text": "Body paragraph", "bbox": (50, 50, 400, 65)}
+        candidate = {
+            "font": "Times-Bold",
+            "size": self.HEADING_SIZE,
+            "text": candidate_text,
+            "bbox": (50, 400, 400, 420),
+        }
+        page = MagicMock()
+        page.rect.height = self.PAGE_HEIGHT
+        page.get_text.return_value = {
+            "height": self.PAGE_HEIGHT,
+            "blocks": [{"type": 0, "lines": [{"spans": [span]}]} for span in [body, body, body, candidate]],
+        }
+        doc = MagicMock()
+        doc.page_count = 1
+        doc.name = None
+        doc.__iter__ = lambda self: iter([page])
+        features = TOCGenerator(doc=doc, llm=MagicMock())._extract_features_sequential(
+            doc, max_blocks_per_page=3, show_progress=False
+        )
+        return [span.text for block in features for line in block for span in line]
+
+    @pytest.mark.parametrize(
+        ("candidate_text", "is_candidate"),
+        [
+            (_LONG_HEADING, True),
+            (_LARGE_BODY_TEXT * (_HEADING_MAX_LENGTH // len(_LARGE_BODY_TEXT) + 1), False),
+        ],
+        ids=["heading", "longer-than-a-heading"],
+    )
+    def test_phase2_measures_a_line_whole(self, candidate_text, is_candidate):
+        found = [text for text in self._phase2_features(candidate_text) if text.startswith(candidate_text[:10])]
+
+        assert found == ([candidate_text.strip()] if is_candidate else [])

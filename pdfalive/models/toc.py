@@ -228,14 +228,14 @@ class TOCFeature(BaseModel):
     page_number: int = Field(description="Page number of the feature (1-indexed)")
     font_name: str = Field(description="Font name of the text span")
     font_size: float = Field(description="Font size of the text span")
-    text_length: int = Field(description="Length of the text span")
-    text_snippet: str = Field(description="Snippet of the text span (truncated)")
+    text: str = Field(description="Whole text of the span, or of a line merged from its spans")
     y_position: float | None = Field(default=None, description="Normalized vertical position (0.0=top, 1.0=bottom)")
     is_bold: bool | None = Field(default=None, description="Whether the span uses a bold font")
 
     def __str__(self) -> str:
-        # Nb. This format is used in the LLM prompt and so is kept compact. Prompt instructions include details.
-        base = f"({self.page_number}, '{self.font_name}', {self.font_size}, {self.text_length}, '{self.text_snippet}'"
+        # A compact form for debugging and test output; the LLM prompt uses
+        # pdfalive.processors.toc_generator.serialize_features_compact().
+        base = f"({self.page_number}, '{self.font_name}', {self.font_size}, {len(self.text)}, '{self.text}'"
         extras = []
         if self.y_position is not None:
             extras.append(f"y={self.y_position}")
