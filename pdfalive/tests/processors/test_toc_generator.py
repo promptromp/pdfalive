@@ -15,6 +15,7 @@ from pdfalive.processors.toc_generator import (
     _HEADING_FONT_SIZE_RATIO,
     _HEADING_FONT_SIZE_RATIO_PHASE2,
     _HEADING_MAX_LENGTH,
+    _HEADING_SEARCH_HEADER_Y_THRESHOLD,
     _LETTERSPACED_PATTERN,
     _MAX_DROPPED_ENTRIES_SHOWN,
     _MAX_FOLIO_MATCH_DISTANCE,
@@ -2735,6 +2736,73 @@ class TestCorrectPostprocessedPageNumbers:
 
         assert result.entries[-1].page_number == (original_page if expect_first_pass_page else folio_page)
 
+    @pytest.mark.parametrize(
+        "folio_distance,seen_only_in_running_header,expect_first_pass_page",
+        [
+            pytest.param(-1, True, False, id="located-page-before-a-running-header-sighting-wins"),
+            pytest.param(-_MAX_FOLIO_MATCH_DISTANCE, True, False, id="up-to-the-match-distance"),
+            pytest.param(1, True, True, id="located-page-after-a-running-header-sighting-is-a-misread"),
+            pytest.param(-1, False, True, id="first-pass-page-that-saw-the-heading-wins"),
+        ],
+    )
+    def test_first_pass_page_seen_only_in_a_running_header_versus_located_printed_page(
+        self, generator, monkeypatch, folio_distance, seen_only_in_running_header, expect_first_pass_page
+    ):
+        """A first-pass page that showed the title only in its running header did not see the heading.
+
+        The section had begun by that page, so a located printed page at or before it is the
+        better evidence; a located page after it is a misread, and the first-pass page stays.
+        """
+        title, level = "Tidal Basins", 2
+        original_page = 100
+        printed_page, folio_page = 80, original_page + folio_distance
+        printed_pages = PrintedPageMap({printed_page: folio_page}, generator.doc.page_count)
+        monkeypatch.setattr(PrintedPageMap, "from_document", classmethod(lambda cls, doc: printed_pages))
+        original = self._make_toc([*self.OFFSET_ANCHOR_CHAPTERS, (title, original_page, level)])
+        refined = PostprocessedTOC(
+            entries=[
+                *make_refined_toc(self.OFFSET_ANCHOR_CHAPTERS).entries,
+                self._make_refined_entry(title, original_page, level, printed_page),
+            ]
+        )
+        sighting_index = len(self.OFFSET_ANCHOR_CHAPTERS)
+        sightings = frozenset({sighting_index}) if seen_only_in_running_header else frozenset()
+
+        result = generator._correct_postprocessed_page_numbers(original, refined, running_header_sightings=sightings)
+
+        assert result.entries[-1].page_number == (original_page if expect_first_pass_page else folio_page)
+
+    def test_a_running_header_sighting_passed_over_restores_no_other_entry(self, generator, monkeypatch):
+        """The original passed over for a located page stays claimed: a later same-title entry keeps its own page.
+
+        The first pass saw one "Exercises" (in a running header); the postprocessor lists the
+        exercises of two sections, both located through the folios near that page.
+        """
+        title, level = "Exercises", 2
+        sighting_page = 100
+        first_printed, second_printed = 80, 84
+        first_located, second_located = sighting_page - 1, sighting_page + 3
+        printed_pages = PrintedPageMap(
+            {first_printed: first_located, second_printed: second_located}, generator.doc.page_count
+        )
+        monkeypatch.setattr(PrintedPageMap, "from_document", classmethod(lambda cls, doc: printed_pages))
+        original = self._make_toc([*self.OFFSET_ANCHOR_CHAPTERS, (title, sighting_page, level)])
+        refined = PostprocessedTOC(
+            entries=[
+                *make_refined_toc(self.OFFSET_ANCHOR_CHAPTERS).entries,
+                self._make_refined_entry(title, sighting_page, level, first_printed),
+                self._make_refined_entry(title, sighting_page + 4, level, second_printed),
+            ]
+        )
+        sightings = frozenset({len(self.OFFSET_ANCHOR_CHAPTERS)})
+
+        result = generator._correct_postprocessed_page_numbers(original, refined, running_header_sightings=sightings)
+
+        assert [entry.page_number for entry in result.entries if entry.title == title] == [
+            first_located,
+            second_located,
+        ]
+
     def test_verbatim_repeat_of_a_placed_entry_is_dropped(self, generator):
         """An exact-title copy left over once its original is claimed, with nothing locating it, is a repeat."""
         title, original_page, level = self.OFFSET_ANCHOR_CHAPTERS[-1]
@@ -2768,17 +2836,16 @@ class TestCorrectPostprocessedPageNumbers:
         assert result.entries[-1].page_number == heading_page
 
     @pytest.mark.parametrize(
-        "printed_page_on_matched,printed_page_on_unmatched,expected_scans",
+        "printed_page_on_matched,printed_page_on_unmatched",
         [
-            pytest.param(None, None, 0, id="no-printed-pages"),
-            pytest.param(DRIFTED_PRINTED_PAGE, None, 1, id="matched-entry-cites-printed-page"),
-            pytest.param(None, DRIFTED_PRINTED_PAGE, 1, id="unmatched-entries-cite-printed-pages"),
+            pytest.param(None, None, id="no-printed-pages"),
+            pytest.param(DRIFTED_PRINTED_PAGE, None, id="matched-entry-cites-printed-page"),
+            pytest.param(None, DRIFTED_PRINTED_PAGE, id="unmatched-entries-cite-printed-pages"),
         ],
     )
-    def test_scans_printed_pages_only_when_needed(
-        self, generator, monkeypatch, printed_page_on_matched, printed_page_on_unmatched, expected_scans
-    ):
-        """The whole-document folio scan runs at most once, and only when an entry cites a printed page."""
+    def test_scans_printed_pages_once(self, generator, monkeypatch, printed_page_on_matched, printed_page_on_unmatched):
+        """The whole-document folio scan runs once: for printed pages, and for the heading search's running headers."""
+        expected_scans = 1
         scans = []
 
         def counting_scan(cls, doc):
@@ -3697,7 +3764,7 @@ class TestCorrectRunningHeaderPages:
             ]
         )
 
-        result = generator._correct_running_header_pages(toc, features)
+        result, _sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
         assert result.entries[0].page_number == 5
 
     @pytest.mark.parametrize(
@@ -3727,7 +3794,7 @@ class TestCorrectRunningHeaderPages:
         )
 
         with patch.object(generator, "_page_has_heading_in_bottom", return_value=False):
-            result = generator._correct_running_header_pages(toc, features)
+            result, _sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
 
         assert result.entries[0].page_number == (running_header_page - 1 if corrected else running_header_page)
 
@@ -3747,7 +3814,7 @@ class TestCorrectRunningHeaderPages:
             ]
         )
 
-        result = generator._correct_running_header_pages(toc, features)
+        result, _sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
         assert result.entries[0].page_number == 3
 
     def test_no_correction_for_page_1(self, mock_doc, mock_llm):
@@ -3764,7 +3831,7 @@ class TestCorrectRunningHeaderPages:
             ]
         )
 
-        result = generator._correct_running_header_pages(toc, features)
+        result, _sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
         assert result.entries[0].page_number == 1
 
     def test_fallback_to_pdf_text_search(self, mock_doc, mock_llm):
@@ -3803,7 +3870,7 @@ class TestCorrectRunningHeaderPages:
         }
         mock_doc.__getitem__ = lambda self_doc, idx: page7 if idx == 6 else MagicMock()
 
-        result = generator._correct_running_header_pages(toc, features)
+        result, _sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
         assert result.entries[0].page_number == 7
 
     def test_no_correction_when_not_found_on_prev_page(self, mock_doc, mock_llm):
@@ -3835,7 +3902,7 @@ class TestCorrectRunningHeaderPages:
         }
         mock_doc.__getitem__ = lambda self_doc, idx: page4 if idx == 3 else MagicMock()
 
-        result = generator._correct_running_header_pages(toc, features)
+        result, _sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
         assert result.entries[0].page_number == 5
 
     def test_no_correction_when_page_has_no_header_text(self, mock_doc, mock_llm):
@@ -3852,15 +3919,133 @@ class TestCorrectRunningHeaderPages:
             ]
         )
 
-        result = generator._correct_running_header_pages(toc, features)
+        result, _sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
         assert result.entries[0].page_number == 5
 
     def test_empty_toc_returns_unchanged(self, mock_doc, mock_llm):
         """Empty TOC should be returned as-is."""
         generator = TOCGenerator(mock_doc, mock_llm)
         toc = TOC(entries=[])
-        result = generator._correct_running_header_pages(toc, [])
+        result, _sightings = generator._correct_running_header_pages(toc, generator._page_zone_text([]))
         assert result.entries == []
+
+
+class TestRunningHeadersFoundFromFolios:
+    """A running header is found from the page's own folio, below any fixed position.
+
+    The book below was scanned with a wide top margin: each page's running header (the
+    current section's title and the folio) starts lower on the page than the fixed
+    running-header thresholds, as on scans whose header sits 7-8% down the page.
+    """
+
+    PAGE_COUNT = 12
+    SECTION_PAGE = 6  # where the section's heading is; its title runs in the headers from here on
+    SECTION_TITLE = "4.2 Tidal Basins"
+    PREVIOUS_SECTION_TITLE = "4.1 Coastal Shelves"
+    # Baseline of the running header, and of the body lines below it, as fractions of the page height.
+    HEADER_BASELINE = 0.09
+    BODY_BASELINES = (0.2, 0.3, 0.4, 0.95)
+    MID_PAGE = 0.5
+    PAGE_FOOT = 0.85
+    LEFT_X, FOLIO_X = 72.0, 500.0
+
+    def _book(self, heading_y: float) -> pymupdf.Document:
+        """Pages numbered from 1, the section heading at ``heading_y`` on SECTION_PAGE."""
+        doc = pymupdf.open()
+        for page_number in range(1, self.PAGE_COUNT + 1):
+            page = doc.new_page()
+            height = page.rect.height
+            running_title = self.SECTION_TITLE if page_number > self.SECTION_PAGE else self.PREVIOUS_SECTION_TITLE
+            page.insert_text((self.LEFT_X, self.HEADER_BASELINE * height), running_title.upper())
+            page.insert_text((self.FOLIO_X, self.HEADER_BASELINE * height), str(page_number))
+            for baseline in self.BODY_BASELINES:
+                page.insert_text((self.LEFT_X, baseline * height), "Body text of the page")
+            if page_number == self.SECTION_PAGE:
+                page.insert_text((self.LEFT_X, heading_y * height), self.SECTION_TITLE)
+        return doc
+
+    @pytest.fixture
+    def make_generator(self, mock_llm):
+        docs: list[pymupdf.Document] = []
+
+        def _make(heading_y: float) -> TOCGenerator:
+            docs.append(self._book(heading_y))
+            return TOCGenerator(docs[-1], mock_llm)
+
+        yield _make
+        for doc in docs:
+            doc.close()
+
+    def _entry(self, page_number: int) -> TOCEntry:
+        return TOCEntry(title=self.SECTION_TITLE, page_number=page_number, level=2, confidence=_HELPER_CONFIDENCE)
+
+    def test_running_headers_sit_below_the_fixed_thresholds(self, make_generator):
+        """The book exercises the case: its running header starts below both fixed thresholds."""
+        generator = make_generator(self.MID_PAGE)
+        page = generator.doc[0]
+        header_top = page.get_text("dict")["blocks"][0]["bbox"][1] / page.rect.height
+
+        assert header_top > max(_RUNNING_HEADER_Y_THRESHOLD, _HEADING_SEARCH_HEADER_Y_THRESHOLD)
+
+    def test_heading_search_skips_the_running_header(self, make_generator):
+        """The next page's running header is not the heading, though it starts below the fixed threshold."""
+        generator = make_generator(self.MID_PAGE)
+
+        found = generator._find_heading_page(
+            _HeadingTitle.of(self.SECTION_TITLE), 1, self.PAGE_COUNT + 1, hint_page=self.SECTION_PAGE + 1
+        )
+
+        assert found == self.SECTION_PAGE
+
+    def test_corrects_a_running_header_page_to_the_heading_at_the_foot_of_the_previous_page(self, make_generator):
+        generator = make_generator(self.PAGE_FOOT)
+        features = generator._extract_features_sequential(generator.doc, show_progress=False)
+        toc = TOC(entries=[self._entry(self.SECTION_PAGE + 1)])
+
+        result, sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
+
+        assert result.entries[0].page_number == self.SECTION_PAGE
+        assert sightings == set()
+
+    def test_reports_the_running_header_sightings_it_cannot_correct(self, make_generator):
+        """An entry left on a page showing its title only in its running header is a sighting; one on the heading
+        is not."""
+        generator = make_generator(self.MID_PAGE)
+        features = generator._extract_features_sequential(generator.doc, show_progress=False)
+        toc = TOC(entries=[self._entry(self.SECTION_PAGE), self._entry(self.SECTION_PAGE + 1)])
+
+        result, sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
+
+        assert [entry.page_number for entry in result.entries] == [self.SECTION_PAGE, self.SECTION_PAGE + 1]
+        assert sightings == {1}
+
+    def test_postprocessing_is_told_the_running_header_sightings(self, make_generator, make_structured_answer):
+        """generate() hands the first pass's running header sightings to the postprocessed entries' placement."""
+        generator = make_generator(self.MID_PAGE)
+        first_pass = TOC(entries=[self._entry(self.SECTION_PAGE + 1)])
+        generator.llm.with_structured_output.return_value.invoke.return_value = make_structured_answer(first_pass)
+
+        with patch.object(generator, "_postprocess_toc", return_value=(first_pass, TokenUsage())) as postprocess:
+            generator.generate(request_delay=0, postprocess=True)
+
+        assert postprocess.call_args.kwargs["running_header_sightings"] == {0}
+
+    @pytest.mark.parametrize(
+        "header_bottom,expected_limit",
+        [
+            pytest.param(None, _RUNNING_HEADER_Y_THRESHOLD, id="no-header-folio-keeps-the-fixed-limit"),
+            pytest.param(2 * _RUNNING_HEADER_Y_THRESHOLD, 2 * _RUNNING_HEADER_Y_THRESHOLD, id="lower-header"),
+            pytest.param(_RUNNING_HEADER_Y_THRESHOLD / 2, _RUNNING_HEADER_Y_THRESHOLD, id="never-above-the-fixed"),
+        ],
+    )
+    def test_running_header_limit(self, mock_llm, monkeypatch, header_bottom, expected_limit):
+        page_number, page_count = 1, 1
+        header_bottoms = {} if header_bottom is None else {page_number: header_bottom}
+        printed_pages = PrintedPageMap({}, page_count, header_bottom_by_pdf_page=header_bottoms)
+        monkeypatch.setattr(PrintedPageMap, "from_document", classmethod(lambda cls, doc: printed_pages))
+        generator = TOCGenerator(MagicMock(page_count=page_count), mock_llm)
+
+        assert generator._running_header_limit(page_number, _RUNNING_HEADER_Y_THRESHOLD) == expected_limit
 
 
 class TestPageHasHeadingInBottom:
@@ -4867,7 +5052,7 @@ class TestExtractionArtifactHeadingMatching:
         ]
         toc = TOC(entries=[self._entry(title, running_header_page)])
 
-        result = generator._correct_running_header_pages(toc, features)
+        result, _sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
 
         assert result.entries[0].page_number == self.HEADING_PAGE
 

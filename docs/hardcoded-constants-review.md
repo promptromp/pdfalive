@@ -26,7 +26,7 @@ The TOC generation pipeline in `pdfalive/processors/toc_generator.py` uses sever
 | `_HEADING_FONT_SIZE_RATIO` | 1.15 | Font must be >= 1.15x body text size to be considered a heading (Phase 1 default) |
 | `_HEADING_FONT_SIZE_RATIO_PHASE2` | 1.2 | Stricter font size ratio for Phase 2 heading candidates from remaining blocks |
 | `_BOTTOM_OF_PAGE_Y_THRESHOLD` | 0.6 | Spans below this y-position use relaxed (Phase 1) criteria in Phase 2 |
-| `_RUNNING_HEADER_Y_THRESHOLD` | 0.05 | Features at y < this are likely running headers (used by running header correction) |
+| `_RUNNING_HEADER_Y_THRESHOLD` | 0.05 | Features at y < this are likely running headers (used by running header correction) on pages whose folio is not printed in their running header; elsewhere the header is found from the folio's line |
 
 ## Where They Sit in the Pipeline
 
@@ -50,10 +50,10 @@ After extracting the first N blocks per page, remaining blocks are scanned for h
 
 **Used by:** `_correct_running_header_pages()`, called from `run()` after `_extract_toc()` and before `_postprocess_toc()`
 
-After the LLM generates the initial TOC, a deterministic correction step detects entries whose title appears only at running header position (y < `_RUNNING_HEADER_Y_THRESHOLD`) in the features. For suspicious entries, it checks the previous page for the actual heading in the bottom half (via feature index lookup or PDF text search fallback), and corrects the page number if found. This requires no additional LLM calls.
+After the LLM generates the initial TOC, a deterministic correction step detects entries whose title appears only in the page's running header in the features: above the bottom of the folio's line on a page whose folio is printed in its header, else above `_RUNNING_HEADER_Y_THRESHOLD`. For suspicious entries, it checks the previous page for the actual heading in the bottom half (via feature index lookup or PDF text search fallback), and corrects the page number if found. This requires no additional LLM calls.
 
 **Constants involved:**
-- `_RUNNING_HEADER_Y_THRESHOLD` — y-position threshold for running header detection
+- `_RUNNING_HEADER_Y_THRESHOLD` — y-position threshold for running header detection, where the page's folio does not locate its running header
 
 **Key point:** This always runs (not gated behind `--postprocess`). It fixes the common "off-by-one" error where a section starts near the bottom of page N but the LLM assigns it to page N+1 because it only sees the running header at the top of the next page.
 

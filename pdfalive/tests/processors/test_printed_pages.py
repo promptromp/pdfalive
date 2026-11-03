@@ -11,7 +11,7 @@ from pdfalive.processors.printed_pages import (
     MIN_ALTERNATE_SEQUENCE_FOLIOS,
     MIN_FOLIO_PAGE_COVERAGE,
     PrintedPageMap,
-    page_folio_candidates,
+    page_folios,
 )
 
 
@@ -57,7 +57,7 @@ def _body_with(mid_page_text: str) -> list[dict]:
 
 
 class TestPageFolioCandidates:
-    """Tests for page_folio_candidates()."""
+    """Tests for page_folios().candidates."""
 
     @pytest.mark.parametrize(
         "page_dict,expected",
@@ -101,13 +101,13 @@ class TestPageFolioCandidates:
         ],
     )
     def test_detects_folio_lines_on_top_or_bottom_edge(self, page_dict, expected):
-        assert page_folio_candidates(page_dict) == expected
+        assert page_folios(page_dict).candidates == expected
 
     def test_punctuation_only_lines_do_not_define_page_edges(self):
         """OCR noise ("|") or a symbol glyph below the footer must not hide the folio."""
         page_dict = _page_dict(_line(HEADER_Y, "Running title"), _line(FOOTER_Y, str(FOLIO)), _line(FOOTER_Y + 40, "|"))
 
-        assert page_folio_candidates(page_dict) == {FOLIO}
+        assert page_folios(page_dict).candidates == {FOLIO}
 
     def test_diagonal_watermark_does_not_define_page_edges(self):
         """A watermark tilted well below 45 degrees still is not a horizontal edge line."""
@@ -120,7 +120,7 @@ class TestPageFolioCandidates:
             watermark, _line(HEADER_Y, "Running title"), *_body_with("12"), _line(FOOTER_Y, str(FOOTER_FOLIO))
         )
 
-        assert page_folio_candidates(page_dict) == {FOOTER_FOLIO}
+        assert page_folios(page_dict).candidates == {FOOTER_FOLIO}
 
     def test_rotated_margin_text_does_not_define_page_edges(self):
         """A vertical watermark spanning the page must not turn mid-page numbers into folio candidates."""
@@ -129,7 +129,7 @@ class TestPageFolioCandidates:
             watermark, _line(HEADER_Y, "Running title"), *_body_with("12"), _line(FOOTER_Y, str(FOOTER_FOLIO))
         )
 
-        assert page_folio_candidates(page_dict) == {FOOTER_FOLIO}
+        assert page_folios(page_dict).candidates == {FOOTER_FOLIO}
 
     def test_stamp_line_below_the_footer_does_not_hide_the_folio(self):
         """A per-page repository notice under the footer folio (one row inside the edge) is tolerated."""
@@ -138,13 +138,13 @@ class TestPageFolioCandidates:
             _line(HEADER_Y, "Running title"), *_body_with("Body"), _line(FOOTER_Y, str(FOLIO)), stamp
         )
 
-        assert page_folio_candidates(page_dict) == {FOLIO}
+        assert page_folios(page_dict).candidates == {FOLIO}
 
     def test_zero_height_folio_line_is_read(self):
         """Degenerate font metrics can give a line a zero-height bbox; it still sits on its own row."""
         flat_folio = {"dir": HORIZONTAL, "spans": [{"text": str(FOLIO), "bbox": (LEFT_X, FOOTER_Y, RIGHT_X, FOOTER_Y)}]}
 
-        assert page_folio_candidates(_page_dict(_line(HEADER_Y, "Running title"), flat_folio)) == {FOLIO}
+        assert page_folios(_page_dict(_line(HEADER_Y, "Running title"), flat_folio)).candidates == {FOLIO}
 
     @pytest.mark.parametrize("rotation", [90, 180, 270])
     def test_reads_folios_on_rotated_pages_as_displayed(self, rotation):
@@ -155,11 +155,74 @@ class TestPageFolioCandidates:
             for y, text in ((HEADER_Y, str(FOLIO)), (BODY_Y, "Body text of the page")):
                 page.insert_text(pymupdf.Point(LEFT_X, y) * page.derotation_matrix, text, rotate=rotation)
 
-            assert page_folio_candidates(page.get_text("dict"), page.rotation_matrix) == {FOLIO}
+            assert page_folios(page.get_text("dict"), page.rotation_matrix).candidates == {FOLIO}
 
     def test_ignores_spans_without_bbox(self):
         page_dict = {"blocks": [{"lines": [{"spans": [{"text": "7"}]}]}]}
-        assert page_folio_candidates(page_dict) == set()
+        assert page_folios(page_dict).candidates == set()
+
+
+# Where a running header whose top is at HEADER_Y ends: the bottom of its folio's line.
+HEADER_BOTTOM = (HEADER_Y + LINE_HEIGHT) / PAGE_HEIGHT
+
+
+class TestPageHeaderFolios:
+    """Tests for page_folios().header_bottoms."""
+
+    @pytest.mark.parametrize(
+        "page_dict,expected",
+        [
+            pytest.param(
+                _page_dict(
+                    _line(HEADER_Y, str(FOLIO)),
+                    _line(HEADER_Y, "8 Running Title", x=RIGHT_X),
+                    *_body_with("Body"),
+                    _line(FOOTER_Y, "Last line"),
+                ),
+                {FOLIO: HEADER_BOTTOM},
+                id="folio-beside-running-title",
+            ),
+            pytest.param(
+                _page_dict(
+                    _line(HEADER_Y - LINE_SPACING, "Downloaded from repository on 1 January"),
+                    _line(HEADER_Y, str(FOLIO)),
+                    *_body_with("Body"),
+                    _line(FOOTER_Y, "Last line"),
+                ),
+                {FOLIO: HEADER_BOTTOM},
+                id="folio-under-a-stamp-line",
+            ),
+            pytest.param(
+                _page_dict(_line(HEADER_Y, "Running title"), *_body_with("Body"), _line(FOOTER_Y, str(FOLIO))),
+                {},
+                id="folio-in-the-footer",
+            ),
+            pytest.param(
+                _page_dict(_line(HEADER_Y, str(FOLIO)), _line(BODY_Y, "Body")),
+                {},
+                id="page-too-short-to-tell-its-header-from-its-footer",
+            ),
+            pytest.param({"blocks": []}, {}, id="no-page-height"),
+        ],
+    )
+    def test_reports_folios_printed_in_the_running_header(self, page_dict, expected):
+        assert page_folios(page_dict).header_bottoms == pytest.approx(expected)
+
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_reports_header_positions_only_for_pages_displayed_as_stored(self, rotation):
+        """A /Rotate page's header, found as displayed, has no position in the unrotated coordinates the TOC
+        generator reads; its folio is still a candidate."""
+        with pymupdf.open() as doc:
+            page = doc.new_page()
+            page.set_rotation(rotation)
+            lines = [(HEADER_Y, str(FOLIO)), *((BODY_Y + row * LINE_SPACING, "Body text") for row in range(BODY_ROWS))]
+            for y, text in lines:
+                page.insert_text(pymupdf.Point(LEFT_X, y) * page.derotation_matrix, text, rotate=rotation)
+
+            folios = page_folios(page.get_text("dict"), page.rotation_matrix)
+
+        assert folios.candidates == {FOLIO}
+        assert bool(folios.header_bottoms) == (rotation == 0)
 
 
 def _consecutive_folios(first_folio: int, count: int) -> list[set[int]]:
@@ -240,7 +303,35 @@ class TestPrintedPageMapConstruction:
         page_count = int(stray_pages / MIN_FOLIO_PAGE_COVERAGE) + 1
         candidates = _consecutive_folios(1, stray_pages) + [set()] * (page_count - stray_pages)
 
-        assert len(PrintedPageMap.from_folio_candidates(candidates)) == 0
+        header_bottoms = [{folio: HEADER_BOTTOM} for folio in range(1, stray_pages + 1)]
+
+        page_map = PrintedPageMap.from_folio_candidates(candidates, header_bottoms)
+
+        assert len(page_map) == 0
+        assert page_map.running_header_bottom(1) is None
+
+    def test_knows_the_running_header_of_pages_whose_folio_is_printed_in_it(self):
+        """Only folios of the book's numbering sequence mark a running header; footer folios mark none."""
+        first_numbered_page = self.FRONT_MATTER_PAGES + 1
+        footer_folio_page = first_numbered_page + 1
+        stray_header_number = 99  # a chapter number above a page whose folio is in its footer
+        candidates = [set()] * self.FRONT_MATTER_PAGES + _consecutive_folios(1, self.RUN_LENGTH)
+        candidates[footer_folio_page - 1] = candidates[footer_folio_page - 1] | {stray_header_number}
+        header_bottoms: list[dict[int, float]] = [{}] * self.FRONT_MATTER_PAGES + [
+            {folio: HEADER_BOTTOM} for folio in range(1, self.RUN_LENGTH + 1)
+        ]
+        header_bottoms[footer_folio_page - 1] = {stray_header_number: HEADER_BOTTOM}
+
+        page_map = PrintedPageMap.from_folio_candidates(candidates, header_bottoms)
+
+        assert page_map.running_header_bottom(first_numbered_page) == HEADER_BOTTOM
+        assert page_map.running_header_bottom(footer_folio_page) is None
+        assert page_map.running_header_bottom(1) is None
+
+    def test_no_running_headers_without_their_positions(self):
+        page_map = PrintedPageMap.from_folio_candidates(_consecutive_folios(1, self.RUN_LENGTH))
+
+        assert page_map.running_header_bottom(1) is None
 
     def test_keeps_one_folio_per_page(self):
         candidates = [{1}, {2, 3}, {3}, {4}]
@@ -394,3 +485,29 @@ class TestPrintedPageMapFromDocument:
         assert page_map.pdf_page_by_printed == {
             folio: folio + self.FRONT_MATTER_PAGES for folio in range(1, self.NUMBERED_PAGES + 1)
         }
+
+    BODY_LINES = 3
+
+    @pytest.fixture
+    def book_with_running_headers(self):
+        """Numbered pages with the folio in a running header above several body lines."""
+        doc = pymupdf.open()
+        for folio in range(1, self.NUMBERED_PAGES + 1):
+            page = doc.new_page()
+            page.insert_text((LEFT_X, HEADER_Y), str(folio))
+            page.insert_text((RIGHT_X - LEFT_X, HEADER_Y), "Running Title")
+            for line in range(self.BODY_LINES):
+                page.insert_text((LEFT_X, BODY_Y + line * LINE_SPACING), "Body text of the page")
+        yield doc
+        doc.close()
+
+    def test_knows_where_each_running_header_ends(self, book_with_running_headers):
+        """The header ends between the folio's baseline and the first body line."""
+        page_map = PrintedPageMap.from_document(book_with_running_headers)
+        page_height = book_with_running_headers[0].rect.height
+        first_body_line_top = (BODY_Y - LINE_HEIGHT) / page_height
+
+        for pdf_page in range(1, self.NUMBERED_PAGES + 1):
+            header_bottom = page_map.running_header_bottom(pdf_page)
+            assert header_bottom is not None
+            assert HEADER_Y / page_height <= header_bottom < first_body_line_top

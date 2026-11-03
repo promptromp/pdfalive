@@ -4,7 +4,7 @@ import re
 import time
 import warnings
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from itertools import islice
@@ -136,10 +136,14 @@ _ROOT_TOC_LEVEL = 1
 # where relaxed heading detection criteria are applied (Phase 2)
 _BOTTOM_OF_PAGE_Y_THRESHOLD = 0.6
 
-# Running header y-position threshold: features at y < this are likely running headers
+# Running header y-position threshold: features at y < this are likely running headers.
+# A page whose folio is printed in its running header has its header found from that
+# folio's row instead, wherever the page's margin puts it (TOCGenerator._running_header_limit());
+# this applies to the other pages (a folio in the footer, unnumbered pages).
 _RUNNING_HEADER_Y_THRESHOLD = 0.05
 
-# Running-header-aware search skips very top/bottom page regions.
+# Running-header-aware search skips very top/bottom page regions (the top region also
+# extends down to the page's running header when its folio is printed there).
 _HEADING_SEARCH_HEADER_Y_THRESHOLD = 0.06
 _HEADING_SEARCH_FOOTER_Y_THRESHOLD = 0.95
 
@@ -1056,10 +1060,21 @@ class _OriginalEntryMatcher:
     refined entries' keys (``_HeadingTitle.title_key``), so no title is converted twice.
     """
 
-    def __init__(self, original_toc: TOC) -> None:
+    def __init__(self, original_toc: TOC, running_header_sightings: Collection[int] = frozenset()) -> None:
+        """Index the original entries.
+
+        Args:
+            original_toc: The first pass's TOC.
+            running_header_sightings: Indices of original entries whose page shows their
+                title only in its running header (see _correct_running_header_pages()).
+        """
         self._pages_by_key: dict[str, list[tuple[int, int]]] = {}  # title key -> [(page_number, level)]
-        for entry in original_toc.entries:
-            self._pages_by_key.setdefault(title_key(entry.title), []).append((entry.page_number, entry.level))
+        self._sightings: set[tuple[str, int, int]] = set()  # (title key, page, level) seen only in a running header
+        for index, entry in enumerate(original_toc.entries):
+            key = title_key(entry.title)
+            self._pages_by_key.setdefault(key, []).append((entry.page_number, entry.level))
+            if index in running_header_sightings:
+                self._sightings.add((key, entry.page_number, entry.level))
         # title key -> (designator-stripped core, digits)
         self._parts_by_key = {
             key: (_strip_leading_designators(key), _NUMBER_PATTERN.findall(key)) for key in self._pages_by_key
@@ -1091,6 +1106,10 @@ class _OriginalEntryMatcher:
                 self._claimed.add((key, page, level))
                 assigned[index] = page
         return assigned
+
+    def seen_only_in_running_header(self, key: str, page: int, level: int) -> bool:
+        """Whether the original with this title key, page and level showed its title only in a running header."""
+        return (key, page, level) in self._sightings
 
     def has_title(self, key: str, level: int) -> bool:
         """Whether any original entry has this title key at this level."""
@@ -1141,6 +1160,64 @@ class _OriginalEntryMatcher:
         _ratio, _distance, best_key, best_page = best
         self._claimed.add((best_key, best_page, level))
         return best_page
+
+
+def _zone_contains(zone_text: str, key: str) -> bool:
+    """Whether a page zone's text holds the title key, or is all part of it."""
+    stripped = zone_text.strip()
+    return bool(stripped) and (key in zone_text or stripped in key)
+
+
+class _PageZoneText:
+    """Each page's feature text by zone: its running header, its body, and the body's bottom part.
+
+    A title can span several features (a line's style runs, or several lines), so
+    matching individual features against multi-word titles fails. Instead the features
+    of each zone are concatenated (each feature's whole text, as a snippet key) and
+    titles are matched against that. A feature is in the page's running header when it
+    starts above the page's header limit (TOCGenerator._running_header_limit()).
+    """
+
+    def __init__(self, features: list, header_limit: Callable[[int], float]) -> None:
+        """Index the features.
+
+        Args:
+            features: The extracted features (nested blocks, lines, spans).
+            header_limit: Page number -> the y-position above which its text is the running header.
+        """
+        self._header: dict[int, str] = {}
+        self._body: dict[int, str] = {}
+        # The body's bottom part (y >= _PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD), where a
+        # section continued under the next page's running header starts.
+        self._bottom: dict[int, str] = {}
+        header_limits: dict[int, float] = {}
+        for block in features:
+            for line in block:
+                for span in line:
+                    if not isinstance(span, TOCFeature) or span.y_position is None:
+                        continue
+                    norm = _snippet_key(matching_form(span.text))
+                    if not norm:
+                        continue
+                    page = span.page_number
+                    if page not in header_limits:
+                        header_limits[page] = header_limit(page)
+                    zone = self._header if span.y_position < header_limits[page] else self._body
+                    zone[page] = zone.get(page, "") + " " + norm
+                    if span.y_position >= _PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD:
+                        self._bottom[page] = self._bottom.get(page, "") + " " + norm
+
+    def shows_only_in_running_header(self, page: int, heading: _HeadingTitle) -> bool:
+        """Whether the page's features show the title in its running header but not in its body."""
+        return (
+            heading.is_matchable()
+            and _zone_contains(self._header.get(page, ""), heading.key)
+            and not _zone_contains(self._body.get(page, ""), heading.key)
+        )
+
+    def in_bottom(self, page: int, heading: _HeadingTitle) -> bool:
+        """Whether the title is in the features of the page's bottom part."""
+        return _zone_contains(self._bottom.get(page, ""), heading.key)
 
 
 @dataclass(frozen=True)
@@ -1242,7 +1319,7 @@ class TOCGenerator:
         # instead of actual section starts (e.g., when a section starts near the
         # bottom of page N but the feature extraction only picked up the running
         # header at the top of page N+1).
-        toc = self._correct_running_header_pages(toc, features)
+        toc, running_header_sightings = self._correct_running_header_pages(toc, self._page_zone_text(features))
         if not postprocess:
             final_toc, dropped = self._finalize(toc)
             self._report_dropped_entries(dropped)
@@ -1250,9 +1327,12 @@ class TOCGenerator:
 
         # Postprocess the TOC to clean up duplicates, fix errors, etc. The finalized first
         # pass is kept as what a run without postprocessing would write; only the TOC that
-        # will be written has its dropped entries reported.
+        # will be written has its dropped entries reported. First-pass entries still seen
+        # only in a running header do not place the postprocessed entries.
         first_pass_toc, _ = self._finalize(toc)
-        postprocessed_toc, postprocess_usage = self._postprocess_toc(toc, features)
+        postprocessed_toc, postprocess_usage = self._postprocess_toc(
+            toc, features, running_header_sightings=running_header_sightings
+        )
         final_toc, dropped = self._finalize(postprocessed_toc)
         self._report_dropped_entries(dropped)
         return TOCGenerationResult(toc=final_toc, first_pass_toc=first_pass_toc, usage=usage + postprocess_usage)
@@ -1672,6 +1752,7 @@ class TOCGenerator:
         toc: TOC,
         features: list,
         max_pages_for_reference_toc: int = DEFAULT_REFERENCE_TOC_MAX_PAGES,
+        running_header_sightings: Collection[int] = frozenset(),
     ) -> tuple[TOC, TokenUsage]:
         """Postprocess a generated TOC using LLM to clean up and improve entries.
 
@@ -1686,6 +1767,8 @@ class TOCGenerator:
             toc: The previously generated TOC to postprocess.
             features: The document features used for the original extraction.
             max_pages_for_reference_toc: Maximum pages to scan for a printed TOC.
+            running_header_sightings: Indices of ``toc`` entries whose page shows their
+                title only in its running header (_correct_running_header_pages()).
 
         Returns:
             A tuple of (refined TOC, TokenUsage) with the improved TOC.
@@ -1757,7 +1840,9 @@ number exactly as printed.
         )
 
         # Place the postprocessed entries on PDF pages and verify them.
-        refined_toc = self._correct_postprocessed_page_numbers(toc, postprocessed_toc, reference_text=reference_text)
+        refined_toc = self._correct_postprocessed_page_numbers(
+            toc, postprocessed_toc, reference_text=reference_text, running_header_sightings=running_header_sightings
+        )
 
         console.print(
             f"Postprocessing complete. Refined TOC has {len(refined_toc.entries)} entries (was {len(toc.entries)})",
@@ -1907,7 +1992,8 @@ number exactly as printed.
         """Find the page where a heading appears as an actual heading, not a running header.
 
         Searches pages in [start_page, end_page) for the title text in a
-        non-running-header position. Uses block-level text
+        non-running-header position (below the page's running header,
+        _running_header_limit()). Uses block-level text
         concatenation to handle OCR text where each word is a separate span.
 
         When hint_page is provided, searches outward from that page so the
@@ -1941,6 +2027,7 @@ number exactly as printed.
             page = self.doc[page_idx]
             page_dict = page.get_text("dict")
             page_height = page_dict.get("height", _DEFAULT_PAGE_HEIGHT)
+            header_limit = self._running_header_limit(page_idx + 1, _HEADING_SEARCH_HEADER_Y_THRESHOLD)
 
             for block in page_dict.get("blocks", []):
                 if block.get("type") != _PYMUPDF_TEXT_BLOCK_TYPE:
@@ -1953,7 +2040,7 @@ number exactly as printed.
                     continue
                 y_pos = first_bbox[1] / page_height
                 # Skip running headers and footers.
-                if y_pos < _HEADING_SEARCH_HEADER_Y_THRESHOLD or y_pos > _HEADING_SEARCH_FOOTER_Y_THRESHOLD:
+                if y_pos < header_limit or y_pos > _HEADING_SEARCH_FOOTER_Y_THRESHOLD:
                     continue
                 block_text = " ".join(s.get("text", "") for s in block_spans)
                 # Anchored: only structural heading evidence may relocate a page.
@@ -2010,95 +2097,47 @@ number exactly as printed.
                 return True
         return False
 
-    def _correct_running_header_pages(self, toc: TOC, features: list) -> TOC:
+    def _correct_running_header_pages(self, toc: TOC, zones: _PageZoneText) -> tuple[TOC, frozenset[int]]:
         """Correct TOC entries that point to running headers instead of actual headings.
 
-        For each entry, checks if the title text appears only at running header
-        position (y < 0.05) in the extracted features. If so, searches page N-1
-        for the actual heading in the bottom portion and corrects the page number.
+        For each entry, checks if the title text appears only in the page's running
+        header in the extracted features. If so, searches page N-1 for the actual
+        heading in the bottom portion and corrects the page number.
 
         This is a deterministic correction that requires no additional LLM calls.
 
         Args:
             toc: The generated TOC to correct.
-            features: The extracted features used for TOC generation.
+            zones: The extracted features' text by page zone (_page_zone_text()).
 
         Returns:
-            A corrected TOC with running header misattributions fixed.
+            The corrected TOC with running header misattributions fixed, and the indices
+            of its entries left on a page that shows their title only in its running
+            header (the first pass did not see the heading there, only the header of a
+            page within its section).
         """
-        if not toc.entries:
-            return toc
-
-        # Build page-zone text index: group feature text by page and y-zone.
-        # A title can span several features (a line's style runs, or several
-        # lines), so matching individual features against multi-word titles
-        # fails. Instead, concatenate all feature text per page in two zones:
-        # "header" (y < RUNNING_HEADER_Y_THRESHOLD) and "body"
-        # (y >= RUNNING_HEADER_Y_THRESHOLD), then match against the concatenated
-        # text (each feature's whole text).
-        page_header_text: dict[int, str] = {}  # page -> concatenated header zone text
-        page_body_text: dict[int, str] = {}  # page -> concatenated body zone text
-        # page -> concatenated text of the body zone's bottom part (y >= _PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD),
-        # where a section continued under the next page's running header starts
-        page_bottom_text: dict[int, str] = {}
-        for block in features:
-            for line in block:
-                for span in line:
-                    if isinstance(span, TOCFeature) and span.y_position is not None:
-                        norm = _snippet_key(matching_form(span.text))
-                        if not norm:
-                            continue
-                        if span.y_position < _RUNNING_HEADER_Y_THRESHOLD:
-                            page_header_text.setdefault(span.page_number, "")
-                            page_header_text[span.page_number] += " " + norm
-                        else:
-                            page_body_text.setdefault(span.page_number, "")
-                            page_body_text[span.page_number] += " " + norm
-                        if span.y_position >= _PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD:
-                            page_bottom_text.setdefault(span.page_number, "")
-                            page_bottom_text[span.page_number] += " " + norm
-
         corrected = []
         corrections = 0
+        sightings: set[int] = set()
 
         for entry in toc.entries:
             page = entry.page_number
             heading = _HeadingTitle.of(entry.title)
-            entry_text = heading.key
 
-            if not heading.is_matchable() or page <= 1:
+            # Only an entry whose title the page shows in its running header but not in
+            # its body is suspicious.
+            if page <= 1 or not zones.shows_only_in_running_header(page, heading):
                 corrected.append(entry)
                 continue
 
-            # Check if the title appears in the header zone of this page
-            header_text = page_header_text.get(page, "")
-            in_header = bool(header_text.strip()) and (entry_text in header_text or header_text.strip() in entry_text)
-
-            # Check if the title also appears in the body zone of this page
-            body_text = page_body_text.get(page, "")
-            in_body = bool(body_text) and (entry_text in body_text or body_text.strip() in entry_text)
-
-            # Only flag as suspicious if title IS in header zone but NOT in body zone
-            is_running_header_only = in_header and not in_body
-
-            if not is_running_header_only:
-                corrected.append(entry)
-                continue
-
-            # Suspicious entry: check if heading exists in the bottom part of the previous page
-            # First try: check features in the bottom part of page N-1
+            # Suspicious entry: check if heading exists in the bottom part of the previous page,
+            # first in its features, then in the actual PDF text.
             prev_page = page - 1
-            prev_bottom = page_bottom_text.get(prev_page, "")
-            found_on_prev = bool(prev_bottom) and (entry_text in prev_bottom or prev_bottom.strip() in entry_text)
-
-            # Fallback: search the actual PDF for heading in bottom of previous page
-            if not found_on_prev:
-                found_on_prev = self._page_has_heading_in_bottom(prev_page, heading)
-
-            if found_on_prev:
+            if zones.in_bottom(prev_page, heading) or self._page_has_heading_in_bottom(prev_page, heading):
                 corrected.append(entry.model_copy(update={"page_number": prev_page}))
                 corrections += 1
             else:
+                sightings.add(len(corrected))
                 corrected.append(entry)
 
         if corrections > 0:
@@ -2106,10 +2145,29 @@ number exactly as printed.
                 f"  Corrected {corrections} entries from running headers to actual section starts", style="yellow"
             )
 
-        return TOC(entries=corrected)
+        return TOC(entries=corrected), frozenset(sightings)
+
+    def _page_zone_text(self, features: list) -> _PageZoneText:
+        """Index the features' text by page zone, each page's running header found by _running_header_limit()."""
+        return _PageZoneText(features, lambda page: self._running_header_limit(page, _RUNNING_HEADER_Y_THRESHOLD))
+
+    def _running_header_limit(self, page_number: int, fixed_limit: float) -> float:
+        """Return the y-position (fraction of the page height) above which the page's text is its running header.
+
+        A page whose folio is printed in its running header has the header end with the
+        folio's line, wherever the page's top margin puts it (running headers sit lower
+        than any fixed position on pages with wide margins or scans with a border).
+        Elsewhere ``fixed_limit`` applies, and the limit is never less than it.
+        """
+        header_bottom = self._printed_page_map.running_header_bottom(page_number)
+        return fixed_limit if header_bottom is None else max(fixed_limit, header_bottom)
 
     def _correct_postprocessed_page_numbers(
-        self, original_toc: TOC, refined_toc: PostprocessedTOC, reference_text: str = ""
+        self,
+        original_toc: TOC,
+        refined_toc: PostprocessedTOC,
+        reference_text: str = "",
+        running_header_sightings: Collection[int] = frozenset(),
     ) -> TOC:
         """Correct page numbers for entries added or modified by the postprocessor.
 
@@ -2117,9 +2175,11 @@ number exactly as printed.
         1. Detect the front matter offset from Phase 1 data.
         2. Index the original entries by normalized title.
         3. Place each refined entry: matched entries (in both original and refined)
-           get their original PDF page back; other entries citing a printed-TOC page
-           (``printed_page``) are placed through the printed page numbers found on
-           the pages; the rest keep the postprocessor's page.
+           get their original PDF page back, unless the original page shows the title
+           only in its running header and the entry's printed-TOC page is located at or
+           before it; other entries citing a printed-TOC page (``printed_page``) are
+           placed through the printed page numbers found on the pages; the rest keep
+           the postprocessor's page.
         4. With significant front matter, verify every entry by searching the PDF
            text for its heading within ±offset pages.
 
@@ -2128,6 +2188,9 @@ number exactly as printed.
             refined_toc: The postprocessed TOC that may have shifted page numbers.
             reference_text: Text of the document's first pages (printed TOC), used to
                 detect the front matter offset.
+            running_header_sightings: Indices of ``original_toc`` entries whose page shows
+                their title only in its running header: the first pass did not see the
+                heading there, only the header of a page within its section.
 
         Returns:
             The corrected TOC with PDF page numbers restored.
@@ -2139,10 +2202,12 @@ number exactly as printed.
         offset = self._detect_front_matter_offset(original_toc, reference_text=reference_text)
 
         # Step 2: Index the original entries for one-to-one matching.
-        originals = _OriginalEntryMatcher(original_toc)
+        originals = _OriginalEntryMatcher(original_toc, running_header_sightings)
 
         # Step 3: Place each refined entry, by the strongest evidence available:
-        #         1. an exact first-pass match (the first pass saw the heading there);
+        #         1. an exact first-pass match (the first pass saw the heading there;
+        #            when it saw the title only in the page's running header, a located
+        #            printed page at or before that page outranks it);
         #         2. the printed-TOC page it cites, located through the printed page
         #            numbers on the pages themselves (correct where a single
         #            front-matter offset drifts);
@@ -2178,8 +2243,19 @@ number exactly as printed.
         for index, (entry, heading, printed_pdf_page, position) in enumerate(
             zip(entries, headings, printed_pdf_pages, positions, strict=True)
         ):
-            if index in exact_pages:
-                page = exact_pages[index]
+            exact_page = exact_pages.get(index)
+            if (
+                exact_page is not None
+                and printed_pdf_page is not None
+                and printed_pdf_page <= exact_page
+                and originals.seen_only_in_running_header(heading.title_key, exact_page, entry.level)
+            ):
+                # The first pass saw only a running header there: the section had begun by that
+                # page, so the located printed page at or before it is the better evidence. The
+                # original stays claimed, so no other entry is restored to that page.
+                exact_page = None
+            if exact_page is not None:
+                page = exact_page
                 restored_count += entry.page_number != page
             elif printed_pdf_page is not None:
                 page = printed_pdf_page
