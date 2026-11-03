@@ -34,6 +34,8 @@ from pdfalive.processors.toc_generator import (
     _is_bold_font,
     _is_heading_candidate,
     _line_spans,
+    _on_a_longest_non_decreasing_run,
+    _section_order,
     _snippet_key,
     _strip_subset_prefix,
     _weighted_median,
@@ -2481,6 +2483,79 @@ class TestUnanchoredHeadingMatching:
         assert _HeadingTitle.of("AB").is_matchable() is False
 
 
+class TestOnALongestNonDecreasingRun:
+    """Tests for _on_a_longest_non_decreasing_run()."""
+
+    @pytest.mark.parametrize(
+        "values,expected",
+        [
+            pytest.param([5, 12, 12, 19], [True] * 4, id="non-decreasing-values-are-all-on-it"),
+            pytest.param(
+                [12, 19, 69, 69, 26, 31, 40],
+                [True, True, False, False, True, True, True],
+                id="values-too-high-are-off-every-longest-run",
+            ),
+            pytest.param([100, 110, 15, 120, 130], [True, True, False, True, True], id="value-too-low-is-off"),
+            pytest.param([96, 6, 14, 19], [False, True, True, True], id="first-value-off"),
+            pytest.param([10, 50, 20, 60], [True] * 4, id="values-on-either-of-two-longest-runs"),
+            pytest.param([], [], id="no-values"),
+        ],
+    )
+    def test_marks_values_some_longest_run_passes_through(self, values, expected):
+        assert _on_a_longest_non_decreasing_run(values) == expected
+
+
+class TestSectionOrder:
+    """Tests for _section_order() and _SectionOrder.neighbour_pages()."""
+
+    @pytest.mark.parametrize(
+        "section_prefixes,cited,expected",
+        [
+            pytest.param(
+                ["1.2", "1.3", "1.3.1", "1.3.2", "1.3.3", "1.4"],
+                [18, 77, 77, 30, 38, 46],
+                {1, 2},
+                id="pages-breaking-section-order",
+            ),
+            pytest.param(
+                ["1.3.2", "1.2", "1.4", "1.3.3", "1.3", "1.3.1"],
+                [30, 18, 46, 38, 77, 77],
+                {4, 5},
+                id="section-order-is-judged-whatever-the-listing-order",
+            ),
+            pytest.param([None, "1.1", None, "1.2", None], [40, 22, 30, 29, None], set(), id="unnumbered-not-judged"),
+            pytest.param(["1.1", "1.2", "1.1", "1.2"], [5, 9, 205, 209], set(), id="repeated-numbers-not-judged"),
+            pytest.param(["2.9", "2.10", "2.11"], [50, 60, 70], set(), id="numbers-compare-numerically"),
+            pytest.param([], [], set(), id="no-entries"),
+        ],
+    )
+    def test_finds_pages_out_of_section_number_order(self, section_prefixes, cited, expected):
+        assert _section_order(section_prefixes, cited).out_of_order == expected
+
+    SECTIONS = ["1.1", "1.2", "1.3", "1.4", "1.5", "1.6"]
+
+    @pytest.mark.parametrize(
+        "cited,located,index,expected",
+        [
+            pytest.param(
+                [10, 20, 99, 30, 40, 50], [15, 25, 104, 35, 45, 55], 2, (25, 35), id="nearest-in-order-neighbours"
+            ),
+            pytest.param(
+                [10, 20, 99, 30, 40, 50], [15, None, 104, None, 45, 55], 2, (15, 45), id="unlocated-neighbours-skipped"
+            ),
+            pytest.param([10, 20, 30, 40, 50, 9], [15, 25, 35, 45, 55, 14], 5, None, id="no-neighbour-after"),
+            pytest.param(
+                [10, 50, 99, 20, 60, 70], [15, 55, 104, 25, 65, 75], 2, None, id="neighbours-cross-on-tied-runs"
+            ),
+        ],
+    )
+    def test_neighbour_pages(self, cited, located, index, expected):
+        order = _section_order(self.SECTIONS, cited)
+
+        assert index in order.out_of_order
+        assert order.neighbour_pages(index, located) == expected
+
+
 class TestCorrectPostprocessedPageNumbers:
     """Tests for _correct_postprocessed_page_numbers."""
 
@@ -2801,6 +2876,149 @@ class TestCorrectPostprocessedPageNumbers:
         assert [entry.page_number for entry in result.entries if entry.title == title] == [
             first_located,
             second_located,
+        ]
+
+    # Numbered sections with their printed pages, and the offset at which the document's folios
+    # locate those pages (the postprocessor estimates with the prompt's single global offset,
+    # OFFSET_ANCHOR_OFFSET).
+    NUMBERED_SECTIONS = [
+        ("4.1 Coastal Shelves", 22),
+        ("4.2 Tidal Basins", 29),
+        ("4.3 River Deltas", 36),
+        ("4.4 Salt Marshes", 43),
+    ]
+    FOLIO_OFFSET = 12
+
+    def _place_cited(self, generator, monkeypatch, listed, originals=()):
+        """Place refined entries citing printed pages, listed as (title, level, cited page); return title -> page."""
+        cited_pages = {cited for _title, _level, cited in listed}
+        printed_pages = PrintedPageMap(
+            {cited: cited + self.FOLIO_OFFSET for cited in cited_pages}, generator.doc.page_count
+        )
+        monkeypatch.setattr(PrintedPageMap, "from_document", classmethod(lambda cls, doc: printed_pages))
+        original = self._make_toc([*self.OFFSET_ANCHOR_CHAPTERS, *originals])
+        refined = PostprocessedTOC(
+            entries=[
+                *make_refined_toc(self.OFFSET_ANCHOR_CHAPTERS).entries,
+                *(
+                    self._make_refined_entry(title, cited + self.OFFSET_ANCHOR_OFFSET, level, cited)
+                    for title, level, cited in listed
+                ),
+            ]
+        )
+        result = generator._correct_postprocessed_page_numbers(original, refined)
+        return {entry.title: entry.page_number for entry in result.entries}
+
+    @pytest.mark.parametrize("first_pass_found_it", [True, False])
+    def test_printed_page_breaking_the_section_order_is_a_misread(self, generator, monkeypatch, first_pass_found_it):
+        """A section whose cited page breaks the section numbers' order goes where its heading is found
+        between its neighbours' pages, whether or not the first pass found it.
+
+        The misread page is located far from the heading's page: without the order check it would
+        outrank the first pass's page, and an entry the first pass missed would keep it.
+        """
+        level = 2
+        misread_title, true_printed = self.NUMBERED_SECTIONS[1]
+        misread_printed = 79
+        heading_page = true_printed + self.FOLIO_OFFSET
+        generator.doc._page_texts[heading_page - 1] = misread_title
+        listed = [
+            (title, level, misread_printed if title == misread_title else printed)
+            for title, printed in self.NUMBERED_SECTIONS
+        ]
+        originals = [(misread_title, heading_page, level)] if first_pass_found_it else []
+
+        pages = self._place_cited(generator, monkeypatch, listed, originals=originals)
+
+        assert [pages[title] for title, _printed in self.NUMBERED_SECTIONS] == [
+            heading_page if title == misread_title else printed + self.FOLIO_OFFSET
+            for title, printed in self.NUMBERED_SECTIONS
+        ]
+
+    def test_misread_section_number_keeps_its_located_page(self, generator, monkeypatch):
+        """A section number misread out of order (4.1.1 as 4.3.1) puts the entry out of order with a
+        correct page: its heading is not between the neighbours its number gives, so it is placed
+        through its cited page, as without the order check."""
+        level = 2
+        true_title, misread_title, printed = "4.1.1 Sandbars", "4.3.1 Sandbars", 24
+        generator.doc._page_texts[printed + self.FOLIO_OFFSET - 1] = true_title
+        listed = [(title, level, cited) for title, cited in self.NUMBERED_SECTIONS]
+        listed.insert(1, (misread_title, level, printed))
+
+        pages = self._place_cited(generator, monkeypatch, listed)
+
+        assert pages[misread_title] == printed + self.FOLIO_OFFSET
+
+    def test_misread_pair_outvoting_a_correct_section_leaves_it_placed(self, generator, monkeypatch):
+        """Two subsections misread to one later page can outvote the correct section after them: that
+        section is out of order, has no in-order neighbour after it, and keeps its located page."""
+        level = 2
+        *earlier, (last_title, last_printed) = self.NUMBERED_SECTIONS
+        misread_pair = [("4.3.1 Mudflats", 86), ("4.3.2 Reed Beds", 86)]
+        listed = [(title, level, cited) for title, cited in [*earlier, *misread_pair, (last_title, last_printed)]]
+
+        pages = self._place_cited(generator, monkeypatch, listed)
+
+        assert pages[last_title] == last_printed + self.FOLIO_OFFSET
+
+    # A chapter's sections where three subsections are cited at a misread page, outvoting the
+    # correct section after them, which still has an in-order section after it.
+    OUTVOTED_SECTIONS = [
+        ("9.1 Trade Winds", 300),
+        ("9.2 Monsoons", 310),
+        ("9.3 Jet Streams", 320),
+        ("9.3.1 Polar Jets", 383),
+        ("9.3.2 Subtropical Jets", 383),
+        ("9.4 Zonal Winds", 340),
+        ("10.1 Pressure Systems", 400),
+    ]
+    OUTVOTED_TITLE = "9.4 Zonal Winds"
+    CHAPTER_REVIEW_PDF_PAGE = 409  # between the outvoted section's neighbours' located pages
+
+    def test_correct_page_outvoted_by_misreads_keeps_its_heading(self, generator, monkeypatch):
+        """A correct cited page outvoted by misreads carries its heading: a copy of the heading between its
+        neighbours' pages (a chapter-end review) does not move it."""
+        level = 2
+        cited = dict(self.OUTVOTED_SECTIONS)[self.OUTVOTED_TITLE]
+        heading_page = cited + self.FOLIO_OFFSET
+        generator.doc._page_texts[heading_page - 1] = self.OUTVOTED_TITLE
+        generator.doc._page_texts[self.CHAPTER_REVIEW_PDF_PAGE - 1] = self.OUTVOTED_TITLE
+        listed = [(title, level, printed) for title, printed in self.OUTVOTED_SECTIONS]
+
+        pages = self._place_cited(generator, monkeypatch, listed)
+
+        assert pages[self.OUTVOTED_TITLE] == heading_page
+
+    def test_neighbour_search_starts_where_the_first_pass_saw_the_heading(self, generator, monkeypatch):
+        """A chapter's list of its sections, earlier between the neighbours' pages, does not take the
+        misread entry: the search starts from the first pass's page in that range."""
+        level = 2
+        (first_title, first_printed), (misread_title, true_printed), *_rest = self.NUMBERED_SECTIONS
+        heading_page = true_printed + self.FOLIO_OFFSET
+        generator.doc._page_texts[first_printed + self.FOLIO_OFFSET - 1] = misread_title  # the chapter's list
+        generator.doc._page_texts[heading_page - 1] = misread_title
+        misread_printed = 79
+        listed = [
+            (title, level, misread_printed if title == misread_title else printed)
+            for title, printed in self.NUMBERED_SECTIONS
+        ]
+
+        pages = self._place_cited(generator, monkeypatch, listed, originals=[(misread_title, heading_page, level)])
+
+        assert pages[misread_title] == heading_page
+
+    def test_entry_listed_out_of_page_order_keeps_its_located_page(self, generator, monkeypatch):
+        """The postprocessor may list entries in its own page estimates' order rather than the printed
+        contents' order: an entry without a section number, listed among sections it follows in the
+        book, is still placed through the folios."""
+        chapter_title, chapter_printed = "Estuaries", 40
+        sections = [(title, 2, printed) for title, printed in self.NUMBERED_SECTIONS]
+        listed = [sections[0], (chapter_title, 1, chapter_printed), *sections[1:]]
+
+        pages = self._place_cited(generator, monkeypatch, listed)
+
+        assert [pages[title] for title, _level, _printed in listed] == [
+            printed + self.FOLIO_OFFSET for _title, _level, printed in listed
         ]
 
     def test_verbatim_repeat_of_a_placed_entry_is_dropped(self, generator):

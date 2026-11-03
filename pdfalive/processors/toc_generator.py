@@ -4,7 +4,7 @@ import re
 import time
 import warnings
 from collections import Counter
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from itertools import islice
@@ -1047,6 +1047,86 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list[list]
 _MAX_FOLIO_MATCH_DISTANCE = 5
 
 
+def _on_a_longest_non_decreasing_run(values: Sequence[int]) -> list[bool]:
+    """For each value, whether some longest non-decreasing subsequence of ``values`` passes through it."""
+    # Length of the longest non-decreasing run ending at / starting from each value.
+    ending = [0] * len(values)
+    for i, value in enumerate(values):
+        ending[i] = 1 + max((ending[j] for j in range(i) if values[j] <= value), default=0)
+    starting = [0] * len(values)
+    for i in reversed(range(len(values))):
+        starting[i] = 1 + max((starting[j] for j in range(i + 1, len(values)) if values[j] >= values[i]), default=0)
+    longest = max(ending, default=0)
+    return [ending[i] + starting[i] - 1 == longest for i in range(len(values))]
+
+
+@dataclass(frozen=True)
+class _SectionOrder:
+    """Entries citing printed-TOC pages under section numbers, judged against those numbers' order."""
+
+    # Indices of the entries citing a page under an unrepeated section number, in section-number order.
+    ordered: list[int]
+    # Indices of the entries whose cited page breaks that order.
+    out_of_order: frozenset[int]
+
+    def neighbour_pages(self, index: int, located_pages: Sequence[int | None]) -> tuple[int, int] | None:
+        """Return the located pages of the nearest in-order sections before and after an out-of-order entry.
+
+        Args:
+            index: The out-of-order entry's index.
+            located_pages: Each entry's cited printed page, located through the folios (or None).
+
+        Returns:
+            (before, after), or None when either is missing or they cross (with several longest
+            runs, the pages kept need not be in order).
+        """
+        position = self.ordered.index(index)
+
+        def nearest(indices: Iterable[int]) -> int | None:
+            return next(
+                (page for i in indices if i not in self.out_of_order and (page := located_pages[i]) is not None),
+                None,
+            )
+
+        before = nearest(reversed(self.ordered[:position]))
+        after = nearest(self.ordered[position + 1 :])
+        if before is None or after is None or before > after:
+            return None
+        return before, after
+
+
+def _section_order(section_prefixes: Sequence[str | None], printed_pages: Sequence[int | None]) -> _SectionOrder:
+    """Judge the cited printed-TOC pages against the order of the section numbers.
+
+    A book's printed pages never decrease as its dotted section numbers increase (1.2, 1.3,
+    1.3.1, 1.4), whatever order the postprocessor lists its entries in. Among the entries
+    citing a printed page under a section number no other such entry shares, ordered by
+    that number, a page that no longest non-decreasing run of their pages passes through
+    is out of order: its page or its section number was misread. Where several runs are
+    longest, a page on any of them is in order.
+
+    Args:
+        section_prefixes: Each entry's dotted section number (``_HeadingTitle.section_prefix``).
+        printed_pages: Each entry's cited printed-TOC page.
+    """
+    numbers = [None if prefix is None else tuple(map(int, prefix.split("."))) for prefix in section_prefixes]
+    numbered = [
+        (number, index, page)
+        for index, (number, page) in enumerate(zip(numbers, printed_pages, strict=True))
+        if number is not None and page is not None
+    ]
+    # A repeated number (numbering restarting in another part) orders nothing.
+    repeats = Counter(number for number, _index, _page in numbered)
+    judged = sorted(entry for entry in numbered if repeats[entry[0]] == 1)
+    in_order = _on_a_longest_non_decreasing_run([page for _number, _index, page in judged])
+    return _SectionOrder(
+        ordered=[index for _number, index, _page in judged],
+        out_of_order=frozenset(
+            index for (_number, index, _page), kept in zip(judged, in_order, strict=True) if not kept
+        ),
+    )
+
+
 class _OriginalEntryMatcher:
     """Matches postprocessed entries to first-pass (original) entries, one-to-one.
 
@@ -1111,9 +1191,13 @@ class _OriginalEntryMatcher:
         """Whether the original with this title key, page and level showed its title only in a running header."""
         return (key, page, level) in self._sightings
 
+    def pages(self, key: str, level: int) -> list[int]:
+        """Return the pages of the original entries with this title key at this level."""
+        return [page for page, original_level in self._pages_by_key.get(key, []) if original_level == level]
+
     def has_title(self, key: str, level: int) -> bool:
         """Whether any original entry has this title key at this level."""
-        return any(original_level == level for _page, original_level in self._pages_by_key.get(key, []))
+        return bool(self.pages(key, level))
 
     def claim_fuzzy(self, key: str, level: int, position: int) -> int | None:
         """Claim the best unclaimed prefix-aligned original at the same level; return its page or None.
@@ -2178,8 +2262,9 @@ number exactly as printed.
            get their original PDF page back, unless the original page shows the title
            only in its running header and the entry's printed-TOC page is located at or
            before it; other entries citing a printed-TOC page (``printed_page``) are
-           placed through the printed page numbers found on the pages; the rest keep
-           the postprocessor's page.
+           placed through the printed page numbers found on the pages; the rest keep the
+           postprocessor's page. An entry whose cited page breaks the order of the section
+           numbers is first looked for between its section neighbours' pages.
         4. With significant front matter, verify every entry by searching the PDF
            text for its heading within ±offset pages.
 
@@ -2213,6 +2298,9 @@ number exactly as printed.
         #            front-matter offset drifts);
         #         3. a fuzzy (prefix) first-pass match;
         #         4. the postprocessor's own estimate (verified below).
+        #         Before all of these, an entry whose cited page breaks the section
+        #         numbers' order goes where its heading is found between its section
+        #         neighbours, if it is (see _heading_between_section_neighbours()).
         #         An exact-title repeat left over once every same-title original was
         #         claimed, with nothing else locating it, is dropped as a duplicate.
         #         Exact matches are assigned globally, nearest first, with the printed
@@ -2228,6 +2316,9 @@ number exactly as printed.
             entry.page_number if printed is None else printed
             for entry, printed in zip(entries, printed_pdf_pages, strict=True)
         ]
+        section_order = _section_order(
+            [heading.section_prefix for heading in headings], [entry.printed_page for entry in entries]
+        )
         exact_pages = originals.claim_exact(
             [
                 (heading.title_key, entry.level, position, printed is not None)
@@ -2240,9 +2331,20 @@ number exactly as printed.
         placed: list[tuple[TOCEntry, _HeadingTitle]] = []
         restored_count = 0
         mapped_count = 0
+        misread_count = 0
         for index, (entry, heading, printed_pdf_page, position) in enumerate(
             zip(entries, headings, printed_pdf_pages, positions, strict=True)
         ):
+            if (
+                misread_page := self._heading_between_section_neighbours(
+                    index, heading, originals.pages(heading.title_key, entry.level), section_order, printed_pdf_pages
+                )
+            ) is not None:
+                # Its cited page breaks the section numbers' order, and the heading is where its
+                # number puts it: the page was misread.
+                placed.append((entry.to_toc_entry(page_number=misread_page), heading))
+                misread_count += 1
+                continue
             exact_page = exact_pages.get(index)
             if (
                 exact_page is not None
@@ -2289,6 +2391,11 @@ number exactly as printed.
             corrected.append(placed_entry)
 
         # Log corrections
+        if misread_count > 0:
+            console.print(
+                f"  Placed {misread_count} entries between their section neighbours (misread printed-TOC page)",
+                style="yellow",
+            )
         if restored_count > 0:
             console.print(f"  Restored page numbers for {restored_count} existing entries", style="yellow")
         if mapped_count > 0:
@@ -2300,6 +2407,45 @@ number exactly as printed.
             )
 
         return TOC(entries=corrected)
+
+    def _heading_between_section_neighbours(
+        self,
+        index: int,
+        heading: _HeadingTitle,
+        first_pass_pages: Sequence[int],
+        section_order: _SectionOrder,
+        located_pages: Sequence[int | None],
+    ) -> int | None:
+        """Return the page of an out-of-order entry's heading, found between its section neighbours' pages.
+
+        An out-of-order cited page is taken for a misread only when the page it locates does
+        not carry the heading and the heading is found where its section number puts it: from
+        the located page of the nearest in-order section before it to that of the one after.
+        Otherwise the page or the section number may be the misread one (or misreads around
+        it outvoted a correct page), and the entry is placed as if the order had not been
+        judged.
+
+        Args:
+            index: The refined entry's index.
+            heading: Its prepared title.
+            first_pass_pages: Pages where the first pass saw this title at this level; the
+                search starts from one within the range, should a copy of the heading (a
+                chapter's list of its sections) come earlier in it.
+            section_order: The cited pages judged against the section numbers' order.
+            located_pages: Each entry's cited printed page, located through the folios (or None).
+        """
+        # Relocating a page needs a longer key than a presence check.
+        if index not in section_order.out_of_order or not heading.is_matchable(_FUZZY_MIN_SUBSTRING_LEN):
+            return None
+        neighbours = section_order.neighbour_pages(index, located_pages)
+        located = located_pages[index]
+        if neighbours is None or (
+            located is not None and self._find_heading_page(heading, located, located + 1) is not None
+        ):
+            return None
+        first_page, last_page = neighbours
+        hint = next((page for page in first_pass_pages if first_page <= page <= last_page), None)
+        return self._find_heading_page(heading, first_page, last_page + 1, hint_page=hint)
 
     def _verify_heading_page(self, entry: TOCEntry, heading: _HeadingTitle, window: int) -> int:
         """Return the page within ±window of the entry's page where its heading is found, or its page.
