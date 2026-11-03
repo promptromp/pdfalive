@@ -306,7 +306,7 @@ uv run pytest --impacted --impacted-module=pdfalive --impacted-git-mode=branch -
 TOC generation quality is measured against golden (ground truth) data with the `pdfalive eval` command. LLM responses are recorded once to a cassette (VCR-style), then replayed for free, deterministic evaluation runs:
 
 ```bash
-# One-time: record LLM responses for a case
+# One-time: record LLM responses for a case (the cassette names its model)
 pdfalive eval --mode record --case geometry
 
 # Iterate on heuristics/corrections and re-measure without LLM costs

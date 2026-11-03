@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pymupdf
 import pytest
@@ -13,7 +13,7 @@ from langchain.chat_models.base import BaseChatModel
 from pydantic import BaseModel
 
 from pdfalive.cli import _FIRST_PASS_TABLE_TITLE, cli
-from pdfalive.evaluation.cassette import RecordingChatModel
+from pdfalive.evaluation.cassette import Cassette, RecordingChatModel
 from pdfalive.evaluation.runner import EvalCase, discover_cases, run_eval_case
 from pdfalive.models.toc import TOC, PostprocessedTOC
 from pdfalive.processors.toc_generator import TOCGenerator
@@ -26,6 +26,8 @@ BODY_FONT = "helv"
 HEADING_FONT = "hebo"
 BODY_FONT_SIZE = 11
 HEADING_FONT_SIZE = 18
+
+RECORDING_MODEL = "test-model"
 
 # (title, page_number, level) for the synthetic book's golden TOC.
 GOLDEN_SPECS = [
@@ -89,7 +91,7 @@ def mock_llm(make_toc: Callable[..., TOC], make_structured_answer: Callable[...,
 def recorded_evals_dir(evals_dir: Path, synthetic_pdf_path: Path, mock_llm: MagicMock, tmp_path: Path) -> Path:
     """Evals dir with a cassette recorded through the real TOCGenerator pipeline."""
     cassette_path = evals_dir / "cassettes" / f"{CASE_NAME}.json"
-    recorder = RecordingChatModel(llm=mock_llm, cassette_path=cassette_path)
+    recorder = RecordingChatModel(llm=mock_llm, model_identifier=RECORDING_MODEL, cassette_path=cassette_path)
     doc = pymupdf.open(synthetic_pdf_path)
     try:
         generator = TOCGenerator(doc=doc, llm=cast(BaseChatModel, recorder), num_processes=1)
@@ -123,7 +125,9 @@ def postprocess_evals_dir(evals_dir: Path, synthetic_pdf_path: Path, refining_ll
     """Evals dir whose case runs with postprocessing, with a cassette recorded through the real pipeline."""
     golden_path = evals_dir / "golden" / f"{CASE_NAME}.json"
     golden_path.write_text(json.dumps(json.loads(golden_path.read_text()) | {"postprocess": True}))
-    recorder = RecordingChatModel(llm=refining_llm, cassette_path=evals_dir / "cassettes" / f"{CASE_NAME}.json")
+    recorder = RecordingChatModel(
+        llm=refining_llm, model_identifier=RECORDING_MODEL, cassette_path=evals_dir / "cassettes" / f"{CASE_NAME}.json"
+    )
     doc = pymupdf.open(synthetic_pdf_path)
     try:
         TOCGenerator(doc=doc, llm=cast(BaseChatModel, recorder), num_processes=1).generate(
@@ -180,6 +184,13 @@ class TestRunEvalCase:
 
         assert report.recall == pytest.approx(3 / 4)
         assert [entry.title for entry in report.missing] == ["Appendix A: Extra Material"]
+
+    def test_record_mode_names_the_model_in_the_cassette(self, case: EvalCase, mock_llm: MagicMock) -> None:
+        with patch("pdfalive.evaluation.runner.build_chat_model", return_value=mock_llm) as build_chat_model:
+            run_eval_case(case, mode="record", model_identifier=RECORDING_MODEL, request_delay=0, num_processes=1)
+
+        build_chat_model.assert_called_once_with(RECORDING_MODEL, None)
+        assert Cassette.load(case.cassette_path).model_identifier == RECORDING_MODEL
 
     def test_unknown_mode_raises(self, case: EvalCase) -> None:
         with pytest.raises(ValueError, match="mode"):

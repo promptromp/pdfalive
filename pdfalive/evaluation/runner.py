@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 
 from pdfalive.evaluation.cassette import RecordingChatModel, ReplayChatModel
 from pdfalive.evaluation.metrics import EvalReport, GoldenEntry, evaluate_toc
-from pdfalive.llm import build_chat_model
+from pdfalive.llm import DEFAULT_MODEL_IDENTIFIER, build_chat_model
 from pdfalive.models.toc import TOC, TOCEntry
 from pdfalive.processors.toc_generator import DEFAULT_REQUEST_DELAY_SECONDS, TOCGenerator
 
@@ -131,7 +131,8 @@ def _build_llm(
         return cast(BaseChatModel, ReplayChatModel(cassette_path=case.cassette_path, strict=strict_replay))
     if mode == "record":
         real_llm = build_chat_model(model_identifier, reasoning_effort)
-        return cast(BaseChatModel, RecordingChatModel(llm=real_llm, cassette_path=case.cassette_path))
+        recorder = RecordingChatModel(llm=real_llm, model_identifier=model_identifier, cassette_path=case.cassette_path)
+        return cast(BaseChatModel, recorder)
     if mode == "live":
         return build_chat_model(model_identifier, reasoning_effort)
     raise ValueError(f"Unknown evaluation mode: {mode!r}")
@@ -140,7 +141,7 @@ def _build_llm(
 def run_eval_case(
     case: EvalCase,
     mode: EvalMode,
-    model_identifier: str = "gpt-5.6",
+    model_identifier: str = DEFAULT_MODEL_IDENTIFIER,
     strict_replay: bool = True,
     request_delay: float | None = None,
     num_processes: int | None = None,

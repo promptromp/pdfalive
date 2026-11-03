@@ -40,6 +40,7 @@ class CassetteEntry(BaseModel):
 class Cassette(BaseModel):
     """An ordered collection of recorded LLM calls, persisted as JSON."""
 
+    model_identifier: str = Field(description="The model whose responses the cassette records")
     entries: list[CassetteEntry] = Field(default_factory=list)
 
     @classmethod
@@ -115,10 +116,11 @@ class RecordingChatModel:
     failed recording run cannot destroy the last good recording.
     """
 
-    def __init__(self, llm, cassette_path: Path) -> None:
+    def __init__(self, llm, model_identifier: str, cassette_path: Path) -> None:
+        """Record llm's responses, as those of model_identifier, to the cassette at cassette_path."""
         self._llm = llm
         self._cassette_path = Path(cassette_path)
-        self._cassette = Cassette()
+        self._cassette = Cassette(model_identifier=model_identifier)
         if self._cassette_path.exists():
             backup_path = self._cassette_path.with_suffix(".json.bak")
             backup_path.write_bytes(self._cassette_path.read_bytes())

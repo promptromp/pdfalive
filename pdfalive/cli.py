@@ -18,7 +18,7 @@ from pdfalive.config import load_config_as_default_map
 from pdfalive.console import TextPart, create_console, safe_text, truncate_visible, visible
 from pdfalive.evaluation.metrics import SUMMARY_PAGE_TOLERANCE, EvalReport, GoldenEntry
 from pdfalive.evaluation.runner import CaseResult, EvalCase, EvalMode, discover_cases, run_eval_case
-from pdfalive.llm import build_chat_model
+from pdfalive.llm import DEFAULT_MODEL_IDENTIFIER, build_chat_model
 from pdfalive.models.rename import PlannedRename, RejectedRename, RenameBatch, RenameInputs
 from pdfalive.models.toc import TOCEntry
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
@@ -294,7 +294,7 @@ def cli(ctx: click.Context) -> None:
 @cli.command("generate-toc")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.argument("output_file", type=click.Path(), required=False)
-@click.option("--model-identifier", type=str, default="gpt-5.6", help="LLM model to use.")
+@click.option("--model-identifier", type=str, default=DEFAULT_MODEL_IDENTIFIER, help="LLM model to use.")
 @click.option("--force", is_flag=True, default=False, help="Force overwrite existing TOC if present.")
 @click.option("--show-token-usage/--no-show-token-usage", default=True, help="Display token usage statistics.")
 @click.option(
@@ -555,7 +555,7 @@ def extract_text(
     multiple=True,
     help="Run only the named case(s). May be repeated. Defaults to all cases.",
 )
-@click.option("--model-identifier", type=str, default="gpt-5.6", help="LLM model for record/live modes.")
+@click.option("--model-identifier", type=str, default=DEFAULT_MODEL_IDENTIFIER, help="LLM model for record/live modes.")
 @click.option(
     "--loose-replay",
     is_flag=True,
@@ -730,7 +730,7 @@ def _eval_summary_table(reports: Sequence[tuple[EvalCase, EvalReport]], title: s
     default=None,
     help="Read input file paths from a text file (one path per line). Mutually exclusive with INPUT_FILES argument.",
 )
-@click.option("--model-identifier", type=str, default="gpt-5.6", help="LLM model to use.")
+@click.option("--model-identifier", type=str, default=DEFAULT_MODEL_IDENTIFIER, help="LLM model to use.")
 @click.option(
     "-y",
     "--yes",

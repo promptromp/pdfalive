@@ -6,6 +6,10 @@ from langchain.chat_models import init_chat_model
 from langchain.chat_models.base import BaseChatModel
 
 
+# The model the LLM-using commands use unless told otherwise, and the one the committed eval
+# cassettes are recorded with (a test checks each cassette's model_identifier).
+DEFAULT_MODEL_IDENTIFIER = "gpt-5.6"
+
 # Settings that switch a provider SDK's own retries off (OpenAI and Anthropic retry twice by
 # default), by LangChain provider name, so pdfalive.retry is the only retry layer. Other
 # providers get no extra setting and keep whatever their SDK does: Ollama's client has no
