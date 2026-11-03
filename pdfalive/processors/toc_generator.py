@@ -821,6 +821,106 @@ def _span_to_feature(span: dict, page_number: int, page_height: float, text_snip
     )
 
 
+# A line buffered by Phase 1 for Phase 2's heading-candidate scan:
+# (page_number, page_height, insert_index, spans), insert_index being where in the
+# features list a candidate from that line is inserted.
+_BufferedLine = tuple[int, float, int, list[dict]]
+
+
+def _append_page_features(
+    page: pymupdf.Page,
+    page_number: int,
+    features: list[list],
+    remaining_spans_buffer: list[_BufferedLine],
+    max_blocks_per_page: int,
+    max_lines_per_block: int,
+    text_snippet_length: int,
+) -> None:
+    """Phase 1 of feature extraction for one page, shared by sequential and parallel extraction.
+
+    Appends a feature block for each of the page's first max_blocks_per_page blocks (the
+    spans of its first max_lines_per_block lines), and buffers the first line of each later
+    text block for Phase 2 (_insert_heading_candidates).
+    """
+    page_dict = page.get_text("dict")
+    page_height = page_dict.get("height", page.rect.height) if hasattr(page, "rect") else _DEFAULT_PAGE_HEIGHT
+
+    for block_ix, block in enumerate(page_dict["blocks"]):
+        if block_ix >= max_blocks_per_page:
+            # Buffer first span of remaining blocks for heading candidate scanning
+            if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
+                lines = block.get("lines", [])
+                if lines:
+                    spans = lines[0].get("spans", [])
+                    if spans:
+                        remaining_spans_buffer.append((page_number, page_height, len(features), spans))
+            continue
+
+        features.append([])
+        if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
+            # text block
+            for line_ix, line in enumerate(block["lines"]):
+                if line_ix >= max_lines_per_block:
+                    break
+
+                features[-1].append([])
+
+                for span in line["spans"]:
+                    features[-1][-1].append(_span_to_feature(span, page_number, page_height, text_snippet_length))
+
+
+def _insert_heading_candidates(
+    features: list[list], remaining_spans_buffer: list[_BufferedLine], text_snippet_length: int
+) -> None:
+    """Phase 2 of feature extraction, shared by sequential and parallel extraction.
+
+    Computes the body font profile from the Phase 1 features, then inserts each buffered
+    line that passes the heading-candidate test, in page order, as a feature block of its
+    own (at most _MAX_HEADING_CANDIDATES_PER_PAGE per page). Uses stricter criteria than
+    Phase 1 to limit false positives from body text, but relaxes them for lines near the
+    bottom of a page, to catch section headings that start late on a page (which otherwise
+    get misattributed to running headers on the next page).
+    """
+    if not remaining_spans_buffer:
+        return
+
+    body_font_name, body_font_size = _compute_body_font_profile(features)
+
+    # Group heading candidates by their insert_index for in-order insertion
+    # Process in reverse order so insert indices remain valid
+    candidates_by_index: dict[int, list[list]] = {}
+    # Track per-page candidate count to enforce cap
+    page_candidate_count: dict[int, int] = {}
+
+    for page_number, page_height, insert_idx, spans in remaining_spans_buffer:
+        if page_candidate_count.get(page_number, 0) >= _MAX_HEADING_CANDIDATES_PER_PAGE:
+            continue
+        span = _merge_line_spans(spans, text_snippet_length)
+        if not span:
+            continue
+        bbox = span.get("bbox", None)
+        y_pos = round(bbox[1] / page_height, _Y_POSITION_DECIMAL_PLACES) if bbox and page_height > 0 else None
+
+        # Use relaxed criteria (Phase 1 ratio) for bottom-of-page spans
+        # to catch section headings that start late on a page
+        if y_pos is not None and y_pos > _BOTTOM_OF_PAGE_Y_THRESHOLD:
+            ratio = _HEADING_FONT_SIZE_RATIO
+        else:
+            ratio = _HEADING_FONT_SIZE_RATIO_PHASE2
+
+        if _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=ratio):
+            feature = _span_to_feature(span, page_number, page_height, text_snippet_length)
+            if insert_idx not in candidates_by_index:
+                candidates_by_index[insert_idx] = []
+            candidates_by_index[insert_idx].append([[feature]])
+            page_candidate_count[page_number] = page_candidate_count.get(page_number, 0) + 1
+
+    # Insert heading candidate blocks at the right positions (reverse order to preserve indices)
+    for idx in sorted(candidates_by_index.keys(), reverse=True):
+        for block in reversed(candidates_by_index[idx]):
+            features.insert(idx, block)
+
+
 def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list]:
     """Worker function to extract features from a range of pages.
 
@@ -856,36 +956,18 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list
     end_page = start_page + pages_per_process if process_idx < total_processes - 1 else page_count
 
     features: list[list] = []
-    remaining_spans_buffer: list[tuple[int, float, int, list[dict]]] = []
+    remaining_spans_buffer: list[_BufferedLine] = []
 
     for page_idx in range(start_page, end_page):
-        page = doc[page_idx]
-        page_number = page_idx + 1  # 1-indexed
-        page_dict = page.get_text("dict")
-        page_height = page_dict.get("height", page.rect.height) if hasattr(page, "rect") else _DEFAULT_PAGE_HEIGHT
-
-        for block_ix, block in enumerate(page_dict["blocks"]):
-            if block_ix >= max_blocks_per_page:
-                # Buffer first span of remaining blocks for heading candidate scanning
-                if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
-                    lines = block.get("lines", [])
-                    if lines:
-                        spans = lines[0].get("spans", [])
-                        if spans:
-                            remaining_spans_buffer.append((page_number, page_height, len(features), spans))
-                continue
-
-            features.append([])
-            if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
-                # text block
-                for line_ix, line in enumerate(block["lines"]):
-                    if line_ix >= max_lines_per_block:
-                        break
-
-                    features[-1].append([])
-
-                    for span in line["spans"]:
-                        features[-1][-1].append(_span_to_feature(span, page_number, page_height, text_snippet_length))
+        _append_page_features(
+            doc[page_idx],
+            page_idx + 1,  # 1-indexed
+            features,
+            remaining_spans_buffer,
+            max_blocks_per_page,
+            max_lines_per_block,
+            text_snippet_length,
+        )
 
     doc.close()
     return start_page, end_page, features, remaining_spans_buffer
@@ -1241,37 +1323,18 @@ class TOCGenerator:
         features: list[list] = []
         page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
 
-        # Buffer for remaining-block spans: list of (page_number, page_height, insert_index, spans)
-        remaining_spans_buffer: list[tuple[int, float, int, list[dict]]] = []
+        remaining_spans_buffer: list[_BufferedLine] = []
 
         def _process_page(page, page_number: int) -> None:
-            page_dict = page.get_text("dict")
-            page_height = page_dict.get("height", page.rect.height) if hasattr(page, "rect") else _DEFAULT_PAGE_HEIGHT
-
-            for block_ix, block in enumerate(page_dict["blocks"]):
-                if block_ix >= max_blocks_per_page:
-                    # Buffer first span of remaining blocks for heading candidate scanning
-                    if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
-                        lines = block.get("lines", [])
-                        if lines:
-                            spans = lines[0].get("spans", [])
-                            if spans:
-                                remaining_spans_buffer.append((page_number, page_height, len(features), spans))
-                    continue
-
-                features.append([])
-                if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
-                    # text block
-                    for line_ix, line in enumerate(block["lines"]):
-                        if line_ix >= max_lines_per_block:
-                            break
-
-                        features[-1].append([])
-
-                        for span in line["spans"]:
-                            features[-1][-1].append(
-                                _span_to_feature(span, page_number, page_height, text_snippet_length)
-                            )
+            _append_page_features(
+                page,
+                page_number,
+                features,
+                remaining_spans_buffer,
+                max_blocks_per_page,
+                max_lines_per_block,
+                text_snippet_length,
+            )
 
         if show_progress:
             console.print(f"Extracting features from {page_count} page(s)...", style="cyan")
@@ -1289,48 +1352,7 @@ class TOCGenerator:
                     break
                 _process_page(page, ix + 1)
 
-        # Phase 2: Compute body font profile and scan remaining blocks for heading candidates
-        # Uses stricter criteria than Phase 1 to limit false positives from body text,
-        # but relaxes criteria for spans near the bottom of pages to catch section headings
-        # that start late on a page (which otherwise get misattributed to running headers
-        # on the next page).
-        if remaining_spans_buffer:
-            body_font_name, body_font_size = _compute_body_font_profile(features)
-
-            # Group heading candidates by their insert_index for in-order insertion
-            # Process in reverse order so insert indices remain valid
-            candidates_by_index: dict[int, list[list]] = {}
-            # Track per-page candidate count to enforce cap
-            page_candidate_count: dict[int, int] = {}
-
-            for page_number, page_height, insert_idx, spans in remaining_spans_buffer:
-                if page_candidate_count.get(page_number, 0) >= _MAX_HEADING_CANDIDATES_PER_PAGE:
-                    continue
-                span = _merge_line_spans(spans, text_snippet_length)
-                if not span:
-                    continue
-                bbox = span.get("bbox", None)
-                y_pos = round(bbox[1] / page_height, _Y_POSITION_DECIMAL_PLACES) if bbox and page_height > 0 else None
-
-                # Use relaxed criteria (Phase 1 ratio) for bottom-of-page spans
-                # to catch section headings that start late on a page
-                if y_pos is not None and y_pos > _BOTTOM_OF_PAGE_Y_THRESHOLD:
-                    ratio = _HEADING_FONT_SIZE_RATIO
-                else:
-                    ratio = _HEADING_FONT_SIZE_RATIO_PHASE2
-
-                if _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=ratio):
-                    feature = _span_to_feature(span, page_number, page_height, text_snippet_length)
-                    if insert_idx not in candidates_by_index:
-                        candidates_by_index[insert_idx] = []
-                    candidates_by_index[insert_idx].append([[feature]])
-                    page_candidate_count[page_number] = page_candidate_count.get(page_number, 0) + 1
-
-            # Insert heading candidate blocks at the right positions (reverse order to preserve indices)
-            for idx in sorted(candidates_by_index.keys(), reverse=True):
-                for block in reversed(candidates_by_index[idx]):
-                    features.insert(idx, block)
-
+        _insert_heading_candidates(features, remaining_spans_buffer, text_snippet_length)
         return features
 
     def _extract_features_parallel(
@@ -1390,7 +1412,7 @@ class TOCGenerator:
             console.print("Merging extracted features...", style="cyan")
 
         all_features: list = []
-        all_remaining_spans: list[tuple[int, float, int, list[dict]]] = []
+        all_remaining_spans: list[_BufferedLine] = []
         feature_offset = 0
 
         for _, _, features, remaining_spans in results:
@@ -1400,41 +1422,7 @@ class TOCGenerator:
                 all_remaining_spans.append((page_number, page_height, insert_idx + feature_offset, spans))
             feature_offset += len(features)
 
-        # Phase 2: Compute body font profile and scan for heading candidates
-        # Uses stricter criteria than Phase 1 to limit false positives,
-        # but relaxes criteria for bottom-of-page spans to catch late-starting sections.
-        if all_remaining_spans:
-            body_font_name, body_font_size = _compute_body_font_profile(all_features)
-
-            candidates_by_index: dict[int, list[list]] = {}
-            page_candidate_count: dict[int, int] = {}
-
-            for page_number, page_height, insert_idx, spans in all_remaining_spans:
-                if page_candidate_count.get(page_number, 0) >= _MAX_HEADING_CANDIDATES_PER_PAGE:
-                    continue
-                span = _merge_line_spans(spans, text_snippet_length)
-                if not span:
-                    continue
-                bbox = span.get("bbox", None)
-                y_pos = round(bbox[1] / page_height, _Y_POSITION_DECIMAL_PLACES) if bbox and page_height > 0 else None
-
-                # Use relaxed criteria (Phase 1 ratio) for bottom-of-page spans
-                if y_pos is not None and y_pos > _BOTTOM_OF_PAGE_Y_THRESHOLD:
-                    ratio = _HEADING_FONT_SIZE_RATIO
-                else:
-                    ratio = _HEADING_FONT_SIZE_RATIO_PHASE2
-
-                if _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=ratio):
-                    feature = _span_to_feature(span, page_number, page_height, text_snippet_length)
-                    if insert_idx not in candidates_by_index:
-                        candidates_by_index[insert_idx] = []
-                    candidates_by_index[insert_idx].append([[feature]])
-                    page_candidate_count[page_number] = page_candidate_count.get(page_number, 0) + 1
-
-            for idx in sorted(candidates_by_index.keys(), reverse=True):
-                for block in reversed(candidates_by_index[idx]):
-                    all_features.insert(idx, block)
-
+        _insert_heading_candidates(all_features, all_remaining_spans, text_snippet_length)
         return all_features
 
     def _extract_toc(
