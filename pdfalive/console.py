@@ -208,10 +208,11 @@ def create_console() -> TerminalConsole:
     return TerminalConsole()
 
 
-def create_progress(console: Console) -> Progress:
+def create_progress(console: Console, *, disable: bool = False) -> Progress:
     """Create pdfalive's progress bar (spinner, description, bar, percentage), drawn on console.
 
-    The description is shown as plain text, never parsed as markup.
+    The description is shown as plain text, never parsed as markup. With disable, the
+    bar draws nothing, so a loop can track its progress whether or not it is shown.
     """
     return Progress(
         SpinnerColumn(),
@@ -219,4 +220,5 @@ def create_progress(console: Console) -> Progress:
         BarColumn(),
         TaskProgressColumn(),
         console=console,
+        disable=disable,
     )

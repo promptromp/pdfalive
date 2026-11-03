@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
+from itertools import islice
 from multiprocessing import Pool, cpu_count
 
 import pymupdf
@@ -843,15 +844,15 @@ def _append_page_features(
     text block for Phase 2 (_insert_heading_candidates).
     """
     page_dict = page.get_text("dict")
-    page_height = page_dict.get("height", page.rect.height) if hasattr(page, "rect") else _DEFAULT_PAGE_HEIGHT
+    page_height = page_dict.get("height", page.rect.height)
 
     for block_ix, block in enumerate(page_dict["blocks"]):
         if block_ix >= max_blocks_per_page:
             # Buffer first span of remaining blocks for heading candidate scanning
             if block["type"] == _PYMUPDF_TEXT_BLOCK_TYPE:
-                lines = block.get("lines", [])
+                lines = block["lines"]
                 if lines:
-                    spans = lines[0].get("spans", [])
+                    spans = lines[0]["spans"]
                     if spans:
                         remaining_spans_buffer.append((page_number, page_height, len(features), spans))
             continue
@@ -921,7 +922,7 @@ def _insert_heading_candidates(
             features.insert(idx, block)
 
 
-def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list]:
+def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list[list], list[_BufferedLine]]:
     """Worker function to extract features from a range of pages.
 
     This function is designed to be called in a separate process.
@@ -933,9 +934,8 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list, list
 
     Returns:
         Tuple of (start_page, end_page, features_list, remaining_spans_buffer)
-        for the processed range. remaining_spans_buffer contains
-        (page_number, page_height, insert_index, spans) tuples for blocks beyond
-        the max_blocks_per_page limit.
+        for the processed range: Phase 1's output for those pages, the buffer's
+        insert indices relative to this range's features_list.
     """
     (
         process_idx,
@@ -1321,36 +1321,23 @@ class TOCGenerator:
             Nested list of TOCFeature objects.
         """
         features: list[list] = []
-        page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
-
         remaining_spans_buffer: list[_BufferedLine] = []
-
-        def _process_page(page, page_number: int) -> None:
-            _append_page_features(
-                page,
-                page_number,
-                features,
-                remaining_spans_buffer,
-                max_blocks_per_page,
-                max_lines_per_block,
-                text_snippet_length,
-            )
+        page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
 
         if show_progress:
             console.print(f"Extracting features from {page_count} page(s)...", style="cyan")
-            with create_progress(console) as progress:
-                task = progress.add_task("Extracting features...", total=page_count)
-
-                for ix, page in enumerate(doc):
-                    if max_pages is not None and ix >= max_pages:
-                        break
-                    _process_page(page, ix + 1)
-                    progress.advance(task)
-        else:
-            for ix, page in enumerate(doc):
-                if max_pages is not None and ix >= max_pages:
-                    break
-                _process_page(page, ix + 1)
+        with create_progress(console, disable=not show_progress) as progress:
+            pages = progress.track(islice(doc, page_count), total=page_count, description="Extracting features...")
+            for page_number, page in enumerate(pages, start=1):
+                _append_page_features(
+                    page,
+                    page_number,
+                    features,
+                    remaining_spans_buffer,
+                    max_blocks_per_page,
+                    max_lines_per_block,
+                    text_snippet_length,
+                )
 
         _insert_heading_candidates(features, remaining_spans_buffer, text_snippet_length)
         return features
