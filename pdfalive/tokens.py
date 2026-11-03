@@ -106,8 +106,3 @@ def estimate_tokens(text: str) -> int:
     English prose and structured/pipe-delimited content.
     """
     return len(get_encoding().encode(text))
-
-
-def estimate_features_tokens(features: list) -> int:
-    """Estimate tokens needed to represent features in the prompt."""
-    return estimate_tokens(str(features))

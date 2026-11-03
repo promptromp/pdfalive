@@ -21,6 +21,7 @@ from pdfalive.processors.toc_generator import (
     _MAX_HEADING_CANDIDATES_PER_PAGE,
     _RUNNING_HEADER_Y_THRESHOLD,
     _SECTION_NUMBER_PATTERN,
+    DEFAULT_MAX_BLOCKS_PER_PAGE,
     TEXT_SNIPPET_LENGTH,
     TOCGenerator,
     _compute_body_font_profile,
@@ -73,6 +74,44 @@ _LARGE_BODY_TEXT = "Body text set large "
 
 # Confidence given to entries built by the test helpers below.
 _HELPER_CONFIDENCE = 0.9
+
+_MOCK_PAGE_HEIGHT = 800.0
+_MOCK_LINE_LEFT = 50.0
+_MOCK_LINE_RIGHT = 500.0
+_MOCK_BODY_SIZE = 12.0
+_MOCK_HEADING_SIZE = 16.0
+_MOCK_BODY_FONT = "Times-Roman"
+_MOCK_HEADING_FONT = "Times-Bold"
+# Line positions (fractions of the page height): a running header, the top of the body, its
+# middle, and the bottom part of a page, where a section that starts late on it begins.
+_RUNNING_HEADER_Y = 0.03
+_BODY_TOP_Y = 0.15
+_BODY_MIDDLE_Y = 0.5
+_PAGE_BOTTOM_Y = 0.82
+
+
+def _mock_line(text: str, y_position: float, size: float = _MOCK_HEADING_SIZE, font: str = _MOCK_HEADING_FONT) -> dict:
+    """A one-span line as page.get_text("dict") reports it, its top at y_position of the page."""
+    top = y_position * _MOCK_PAGE_HEIGHT
+    return {"font": font, "size": size, "text": text, "bbox": (_MOCK_LINE_LEFT, top, _MOCK_LINE_RIGHT, top + size)}
+
+
+def _mock_doc(*pages: list[dict]) -> MagicMock:
+    """A document read in one process (no file name) whose pages hold the given lines, one text block each."""
+    pdf_pages = []
+    for lines in pages:
+        page = MagicMock()
+        page.rect.height = _MOCK_PAGE_HEIGHT
+        page.get_text.return_value = {
+            "height": _MOCK_PAGE_HEIGHT,
+            "blocks": [{"type": 0, "lines": [{"spans": [line]}]} for line in lines],
+        }
+        pdf_pages.append(page)
+    doc = MagicMock()
+    doc.page_count = len(pdf_pages)
+    doc.name = None
+    doc.__iter__ = lambda self: iter(pdf_pages)
+    return doc
 
 
 def make_refined_toc(entries_data: list[tuple[str, int, int]]) -> PostprocessedTOC:
@@ -3657,38 +3696,36 @@ class TestCorrectRunningHeaderPages:
         result = generator._correct_running_header_pages(toc, features)
         assert result.entries[0].page_number == 5
 
-    def test_corrects_a_running_header_longer_than_the_llm_snippet(self, mock_llm):
-        """Extracted features keep a title longer than an LLM snippet whole, so the correction still recognizes it."""
-        page_height = 800.0
+    @pytest.mark.parametrize(
+        ("previous_page_y", "corrected"),
+        [(_PAGE_BOTTOM_Y, True), (_BODY_TOP_Y, False)],
+        ids=["heading-at-the-bottom-of-the-previous-page", "title-at-the-top-of-the-previous-page"],
+    )
+    def test_corrects_a_long_running_header_to_a_heading_at_the_bottom_of_the_previous_page(
+        self, mock_llm, previous_page_y, corrected
+    ):
+        """Features keep a title longer than an LLM snippet whole, and only the previous page's bottom part counts.
 
-        def page_with(*lines: tuple[str, float]) -> MagicMock:
-            page = MagicMock()
-            page.rect.height = page_height
-            spans = [
-                {"font": "Times-Bold", "size": 14, "text": text, "bbox": (50, top, 500, top + 14)}
-                for text, top in lines
-            ]
-            page.get_text.return_value = {
-                "height": page_height,
-                "blocks": [{"type": 0, "lines": [{"spans": [span]}]} for span in spans],
-            }
-            return page
-
-        pages = [
-            page_with(("Body text ends the chapter", 100.0), (_LONG_HEADING, 0.82 * page_height)),
-            page_with((_LONG_HEADING, 0.03 * page_height), ("Body text continues", 0.15 * page_height)),
-        ]
-        doc = MagicMock()
-        doc.page_count = len(pages)
-        doc.name = None
-        doc.__iter__ = lambda self: iter(pages)
+        Text near the top of the previous page that contains the title (prose that mentions it,
+        say) is not the section's start.
+        """
+        doc = _mock_doc(
+            [_mock_line(_LONG_HEADING, previous_page_y)],
+            [_mock_line(_LONG_HEADING, _RUNNING_HEADER_Y), _mock_line("Body text continues", _BODY_TOP_Y)],
+        )
         generator = TOCGenerator(doc, mock_llm)
         features = generator._extract_features_sequential(doc, show_progress=False)
-        toc = TOC(entries=[TOCEntry(title=_LONG_HEADING, page_number=2, level=2, confidence=0.9)])
+        running_header_page = 2
+        toc = TOC(
+            entries=[
+                TOCEntry(title=_LONG_HEADING, page_number=running_header_page, level=2, confidence=_HELPER_CONFIDENCE)
+            ]
+        )
 
-        result = generator._correct_running_header_pages(toc, features)
+        with patch.object(generator, "_page_has_heading_in_bottom", return_value=False):
+            result = generator._correct_running_header_pages(toc, features)
 
-        assert result.entries[0].page_number == 1
+        assert result.entries[0].page_number == (running_header_page - 1 if corrected else running_header_page)
 
     def test_no_correction_when_heading_mid_page(self, mock_doc, mock_llm):
         """Entry with mid-page occurrence should NOT be corrected."""
@@ -4896,12 +4933,10 @@ class TestLlmSnippets:
     (the running header correction), and Phase 2's maximum heading length never applied.
     """
 
-    BODY_SIZE = 12
-    HEADING_SIZE = 16
-    PAGE_HEIGHT = 800.0
-
     def _feature(self, text: str) -> TOCFeature:
-        return TOCFeature(page_number=1, font_name="Times-Bold", font_size=self.HEADING_SIZE, text=text, is_bold=True)
+        return TOCFeature(
+            page_number=1, font_name=_MOCK_HEADING_FONT, font_size=_MOCK_HEADING_SIZE, text=text, is_bold=True
+        )
 
     def test_payload_cuts_text_at_the_snippet_length(self):
         payload = serialize_features_compact([[[self._feature(_LONG_HEADING)]]])
@@ -4918,25 +4953,10 @@ class TestLlmSnippets:
 
     def _phase2_features(self, candidate_text: str) -> list[str]:
         """Texts extracted from a page whose fourth block (scanned by Phase 2) is candidate_text at heading size."""
-        body = {"font": "Times-Roman", "size": self.BODY_SIZE, "text": "Body paragraph", "bbox": (50, 50, 400, 65)}
-        candidate = {
-            "font": "Times-Bold",
-            "size": self.HEADING_SIZE,
-            "text": candidate_text,
-            "bbox": (50, 400, 400, 420),
-        }
-        page = MagicMock()
-        page.rect.height = self.PAGE_HEIGHT
-        page.get_text.return_value = {
-            "height": self.PAGE_HEIGHT,
-            "blocks": [{"type": 0, "lines": [{"spans": [span]}]} for span in [body, body, body, candidate]],
-        }
-        doc = MagicMock()
-        doc.page_count = 1
-        doc.name = None
-        doc.__iter__ = lambda self: iter([page])
+        body = _mock_line("Body paragraph", _BODY_TOP_Y, _MOCK_BODY_SIZE, _MOCK_BODY_FONT)
+        doc = _mock_doc([body] * DEFAULT_MAX_BLOCKS_PER_PAGE + [_mock_line(candidate_text, _BODY_MIDDLE_Y)])
         features = TOCGenerator(doc=doc, llm=MagicMock())._extract_features_sequential(
-            doc, max_blocks_per_page=3, show_progress=False
+            doc, max_blocks_per_page=DEFAULT_MAX_BLOCKS_PER_PAGE, show_progress=False
         )
         return [span.text for block in features for line in block for span in line]
 

@@ -1970,6 +1970,9 @@ number exactly as printed.
         # concatenated text.
         page_header_text: dict[int, str] = {}  # page -> concatenated header zone text
         page_body_text: dict[int, str] = {}  # page -> concatenated body zone text
+        # page -> concatenated text of the body zone's bottom part (y >= _PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD),
+        # where a section continued under the next page's running header starts
+        page_bottom_text: dict[int, str] = {}
         for block in features:
             for line in block:
                 for span in line:
@@ -1983,6 +1986,9 @@ number exactly as printed.
                         else:
                             page_body_text.setdefault(span.page_number, "")
                             page_body_text[span.page_number] += " " + norm
+                        if span.y_position >= _PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD:
+                            page_bottom_text.setdefault(span.page_number, "")
+                            page_bottom_text[span.page_number] += " " + norm
 
         corrected = []
         corrections = 0
@@ -2011,11 +2017,11 @@ number exactly as printed.
                 corrected.append(entry)
                 continue
 
-            # Suspicious entry: check if heading exists on previous page
-            # First try: check body features on page N-1
+            # Suspicious entry: check if heading exists in the bottom part of the previous page
+            # First try: check features in the bottom part of page N-1
             prev_page = page - 1
-            prev_body = page_body_text.get(prev_page, "")
-            found_on_prev = bool(prev_body) and (entry_text in prev_body or prev_body.strip() in entry_text)
+            prev_bottom = page_bottom_text.get(prev_page, "")
+            found_on_prev = bool(prev_bottom) and (entry_text in prev_bottom or prev_bottom.strip() in entry_text)
 
             # Fallback: search the actual PDF for heading in bottom of previous page
             if not found_on_prev:
