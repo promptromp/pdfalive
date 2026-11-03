@@ -23,6 +23,9 @@ import pymupdf
 # reads lines, so the block grouping this can change around images does not matter here.
 _TEXT_ONLY_FLAGS = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
 
+# A page's rotation matrix when it is displayed as stored (no /Rotate).
+_UNROTATED = tuple(pymupdf.Identity)
+
 # Largest |sin| of a text line's tilt still read as horizontal: scans are deskewed to
 # within a few degrees, while watermarks and margin notes are set at steep angles.
 _MAX_HORIZONTAL_TILT = 0.1
@@ -125,7 +128,7 @@ class _FolioLine(NamedTuple):
 
 
 def _folio_lines(page_dict: dict, rotation: pymupdf.Matrix) -> list[_FolioLine]:
-    """Return the page's edge lines that hold a folio candidate (see page_folio_candidates())."""
+    """Return the page's edge lines that hold a folio candidate (see page_folios())."""
     lines = [line for line in _horizontal_text_lines(page_dict, rotation) if _EDGE_LINE_CONTENT.search(line.text)]
     rows = _rows(lines)
     first_bottom_row = max(0, len(rows) - _EDGE_ROWS)
@@ -138,47 +141,46 @@ def _folio_lines(page_dict: dict, rotation: pymupdf.Matrix) -> list[_FolioLine]:
     ]
 
 
-def page_folio_candidates(page_dict: dict, rotation: pymupdf.Matrix = pymupdf.Identity) -> set[int]:
-    """Return the numbers that may be the folio printed on a page.
+class PageFolios(NamedTuple):
+    """The folio candidates read off one page, and those printed in its running header."""
+
+    # The numbers that may be the folio printed on the page (usually zero or one).
+    candidates: set[int]
+    # Candidate printed in the page's running header -> the header's bottom edge, as a
+    # fraction of the page height. Empty for a page displayed rotated (see page_folios()).
+    header_bottoms: dict[int, float]
+
+
+def page_folios(page_dict: dict, rotation: pymupdf.Matrix = pymupdf.Identity) -> PageFolios:
+    """Return the numbers that may be the folio printed on a page, and which sit in its running header.
 
     Folios sit in the running header or footer: in one of the _EDGE_ROWS outermost rows
     of text at the top or bottom, as a line of their own (possibly decorated, "- 12 -")
     beside or instead of a running title. Rows are found relative to the page's own
     text rather than at fixed y-positions, because page margins vary widely between PDFs.
 
+    A candidate is in the running header when its line is among the page's top rows and
+    not also among its bottom rows (a page of few rows has no header to tell apart); the
+    header ends with the bottom edge of the folio's line, as the running title shares the
+    folio's row and the page's text below it starts lower. Header positions are unrotated
+    page coordinates, as the TOC generator reads them, so a page displayed rotated (any
+    ``rotation`` but the identity) reports none.
+
     Args:
         page_dict: The page's ``get_text("dict")`` structure.
         rotation: The page's rotation matrix (``page.rotation_matrix``).
-
-    Returns:
-        The candidate folios (usually zero or one).
     """
-    return {folio_line.folio for folio_line in _folio_lines(page_dict, rotation)}
-
-
-def page_header_folio_bottoms(page_dict: dict) -> dict[int, float]:
-    """Return the folio candidates printed in an unrotated page's running header, with where the header ends.
-
-    A candidate counts when its line is among the page's top rows and not also among its
-    bottom rows (a page of few rows has no header to tell apart). Its value is the bottom
-    edge of the folio's line as a fraction of the page height: the running title shares
-    the folio's row, and the page's text below it starts lower. Positions are unrotated
-    page coordinates, as the TOC generator reads them, so the caller passes only pages
-    without a ``/Rotate`` entry.
-
-    Args:
-        page_dict: The page's ``get_text("dict")`` structure.
-
-    Returns:
-        Folio candidate -> the header's bottom edge, as a fraction of the page height.
-    """
-    return _header_folio_bottoms(_folio_lines(page_dict, pymupdf.Identity), page_dict.get("height", 0))
-
-
-def _header_folio_bottoms(folio_lines: list[_FolioLine], page_height: float) -> dict[int, float]:
-    if page_height <= 0:
-        return {}
-    return {line.folio: line.line.bottom / page_height for line in folio_lines if line.in_header}
+    folio_lines = _folio_lines(page_dict, rotation)
+    page_height = page_dict.get("height", 0)
+    reports_header = tuple(rotation) == _UNROTATED and page_height > 0
+    return PageFolios(
+        candidates={folio_line.folio for folio_line in folio_lines},
+        header_bottoms={
+            folio_line.folio: folio_line.line.bottom / page_height
+            for folio_line in folio_lines
+            if reports_header and folio_line.in_header
+        },
+    )
 
 
 def _confirmed_folios(candidates: list[set[int]]) -> list[tuple[int, int]]:
@@ -282,17 +284,11 @@ class PrintedPageMap:
     @classmethod
     def from_document(cls, doc: pymupdf.Document) -> "PrintedPageMap":
         """Build the map from the folios printed on every page of ``doc``."""
-        candidates = []
-        header_bottoms = []
-        for page_idx in range(doc.page_count):
-            page = doc[page_idx]
-            page_dict = page.get_text("dict", flags=_TEXT_ONLY_FLAGS)
-            folio_lines = _folio_lines(page_dict, page.rotation_matrix)
-            candidates.append({folio_line.folio for folio_line in folio_lines})
-            # Header positions are unrotated page coordinates (see page_header_folio_bottoms()).
-            page_height = page_dict.get("height", 0)
-            header_bottoms.append({} if page.rotation else _header_folio_bottoms(folio_lines, page_height))
-        return cls.from_folio_candidates(candidates, header_bottoms)
+        folios = [
+            page_folios(doc[page_idx].get_text("dict", flags=_TEXT_ONLY_FLAGS), doc[page_idx].rotation_matrix)
+            for page_idx in range(doc.page_count)
+        ]
+        return cls.from_folio_candidates([page.candidates for page in folios], [page.header_bottoms for page in folios])
 
     @classmethod
     def from_folio_candidates(
@@ -312,7 +308,7 @@ class PrintedPageMap:
         Args:
             candidates_by_page: Element i holds the folio candidates of PDF page i + 1.
             header_bottoms_by_page: Element i maps the candidates printed in the running
-                header of PDF page i + 1 to the header's bottom edge (page_header_folio_bottoms()).
+                header of PDF page i + 1 to the header's bottom edge (PageFolios.header_bottoms).
                 Without it, no page's running header is known.
         """
         candidates = [set(folios) for folios in candidates_by_page]
