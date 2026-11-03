@@ -16,9 +16,10 @@ from rich.text import Text
 
 from pdfalive.config import load_config_as_default_map
 from pdfalive.console import TextPart, create_console, safe_text, truncate_visible, visible
+from pdfalive.evaluation.cassette import CassetteMissError
 from pdfalive.evaluation.metrics import SUMMARY_PAGE_TOLERANCE, EvalReport, GoldenEntry
 from pdfalive.evaluation.runner import CaseResult, EvalCase, EvalMode, discover_cases, run_eval_case
-from pdfalive.llm import build_chat_model
+from pdfalive.llm import DEFAULT_MODEL_IDENTIFIER, build_chat_model
 from pdfalive.models.rename import PlannedRename, RejectedRename, RenameBatch, RenameInputs
 from pdfalive.models.toc import TOCEntry
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
@@ -68,16 +69,19 @@ def _check_output_choice(output_file: str | None, inplace: bool) -> None:
 
 
 @contextmanager
-def _llm_failures_reported() -> Iterator[None]:
+def _llm_failures_reported(*also_reported: type[Exception]) -> Iterator[None]:
     """Report an LLM call that failed for good (an LLMCallError) as an Error: line, exiting with _EXIT_FAILURE.
 
     That covers every failure the retry policy gives up on: a non-retryable
     error, attempts run out, an answer that never parsed, a refusal, a
-    truncated answer, a replay miss. Ctrl-C passes through.
+    truncated answer, a replay miss. Ctrl-C passes through. also_reported
+    names further errors to report the same way (eval: a cassette that
+    cannot be replayed at all).
     """
+    reported: tuple[type[Exception], ...] = (LLMCallError, *also_reported)
     try:
         yield
-    except LLMCallError as error:
+    except reported as error:
         console.print(safe_text(("Error:", "bold red"), " ", str(error)))
         raise SystemExit(_EXIT_FAILURE) from error
 
@@ -294,7 +298,7 @@ def cli(ctx: click.Context) -> None:
 @cli.command("generate-toc")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.argument("output_file", type=click.Path(), required=False)
-@click.option("--model-identifier", type=str, default="gpt-5.6", help="LLM model to use.")
+@click.option("--model-identifier", type=str, default=DEFAULT_MODEL_IDENTIFIER, help="LLM model to use.")
 @click.option("--force", is_flag=True, default=False, help="Force overwrite existing TOC if present.")
 @click.option("--show-token-usage/--no-show-token-usage", default=True, help="Display token usage statistics.")
 @click.option(
@@ -555,7 +559,7 @@ def extract_text(
     multiple=True,
     help="Run only the named case(s). May be repeated. Defaults to all cases.",
 )
-@click.option("--model-identifier", type=str, default="gpt-5.6", help="LLM model for record/live modes.")
+@click.option("--model-identifier", type=str, default=DEFAULT_MODEL_IDENTIFIER, help="LLM model for record/live modes.")
 @click.option(
     "--loose-replay",
     is_flag=True,
@@ -621,12 +625,23 @@ def eval_command(
         raise click.UsageError(f"No evaluation cases found under {visible(evals_dir)}/golden/.")
 
     eval_mode = cast(EvalMode, mode)
+    if eval_mode == "record" and (model_identifier, reasoning_effort) != (DEFAULT_MODEL_IDENTIFIER, None):
+        console.print(
+            safe_text(
+                ("Warning:", "bold yellow"),
+                f" recording with {model_identifier}"
+                + (f" at reasoning effort {reasoning_effort}" if reasoning_effort is not None else "")
+                + f"; the repository's cassettes are a baseline for {DEFAULT_MODEL_IDENTIFIER} at the provider's"
+                " default reasoning effort (record them with --model-identifier"
+                f" {DEFAULT_MODEL_IDENTIFIER} and no --reasoning-effort).",
+            )
+        )
     results: list[tuple[EvalCase, CaseResult]] = []
     for case in cases:
         console.print(
             safe_text("Evaluating case ", (case.name, "bold cyan"), " (", (eval_mode, "magenta"), " mode)...")
         )
-        with _llm_failures_reported():
+        with _llm_failures_reported(CassetteMissError):
             result = run_eval_case(
                 case,
                 mode=eval_mode,
@@ -663,6 +678,12 @@ def eval_command(
     if first_pass_reports:
         console.print()
         console.print(_eval_summary_table(first_pass_reports, title=_FIRST_PASS_TABLE_TITLE))
+
+    models = ", ".join(sorted({result.model_identifier for _, result in results}))
+    console.print()
+    console.print(
+        safe_text("Scores are for responses ", "recorded by " if eval_mode == "replay" else "from ", (models, "bold"))
+    )
 
     failures = []
     for case, report in reports:
@@ -730,7 +751,7 @@ def _eval_summary_table(reports: Sequence[tuple[EvalCase, EvalReport]], title: s
     default=None,
     help="Read input file paths from a text file (one path per line). Mutually exclusive with INPUT_FILES argument.",
 )
-@click.option("--model-identifier", type=str, default="gpt-5.6", help="LLM model to use.")
+@click.option("--model-identifier", type=str, default=DEFAULT_MODEL_IDENTIFIER, help="LLM model to use.")
 @click.option(
     "-y",
     "--yes",

@@ -65,6 +65,19 @@ def isolated_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.
     return home
 
 
+@pytest.fixture(autouse=True)
+def isolated_working_directory(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Run every test in an empty temporary working directory, and return it.
+
+    Config discovery searches the working directory first, so a pdfalive.toml
+    in the directory pytest runs from (a developer's gitignored one in the
+    repository root, say) could otherwise change test outcomes.
+    """
+    working_directory = tmp_path_factory.mktemp("cwd")
+    monkeypatch.chdir(working_directory)
+    return working_directory
+
+
 # File names Rich would parse as markup, each a valid single path component on
 # every OS (no "/", "\" or ":"): a bracketed author name starting with a lowercase
 # particle (Rich tags start with a lowercase letter, "#", "/" or "@", so a

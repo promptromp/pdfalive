@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pymupdf
 import pytest
@@ -13,7 +13,7 @@ from langchain.chat_models.base import BaseChatModel
 from pydantic import BaseModel
 
 from pdfalive.cli import _FIRST_PASS_TABLE_TITLE, cli
-from pdfalive.evaluation.cassette import RecordingChatModel
+from pdfalive.evaluation.cassette import Cassette, RecordingChatModel
 from pdfalive.evaluation.runner import EvalCase, discover_cases, run_eval_case
 from pdfalive.models.toc import TOC, PostprocessedTOC
 from pdfalive.processors.toc_generator import TOCGenerator
@@ -26,6 +26,10 @@ BODY_FONT = "helv"
 HEADING_FONT = "hebo"
 BODY_FONT_SIZE = 11
 HEADING_FONT_SIZE = 18
+
+RECORDING_MODEL = "test-model"
+OTHER_MODEL = "other-model"
+REASONING_EFFORT = "high"
 
 # (title, page_number, level) for the synthetic book's golden TOC.
 GOLDEN_SPECS = [
@@ -89,7 +93,7 @@ def mock_llm(make_toc: Callable[..., TOC], make_structured_answer: Callable[...,
 def recorded_evals_dir(evals_dir: Path, synthetic_pdf_path: Path, mock_llm: MagicMock, tmp_path: Path) -> Path:
     """Evals dir with a cassette recorded through the real TOCGenerator pipeline."""
     cassette_path = evals_dir / "cassettes" / f"{CASE_NAME}.json"
-    recorder = RecordingChatModel(llm=mock_llm, cassette_path=cassette_path)
+    recorder = RecordingChatModel(llm=mock_llm, model_identifier=RECORDING_MODEL, cassette_path=cassette_path)
     doc = pymupdf.open(synthetic_pdf_path)
     try:
         generator = TOCGenerator(doc=doc, llm=cast(BaseChatModel, recorder), num_processes=1)
@@ -123,7 +127,9 @@ def postprocess_evals_dir(evals_dir: Path, synthetic_pdf_path: Path, refining_ll
     """Evals dir whose case runs with postprocessing, with a cassette recorded through the real pipeline."""
     golden_path = evals_dir / "golden" / f"{CASE_NAME}.json"
     golden_path.write_text(json.dumps(json.loads(golden_path.read_text()) | {"postprocess": True}))
-    recorder = RecordingChatModel(llm=refining_llm, cassette_path=evals_dir / "cassettes" / f"{CASE_NAME}.json")
+    recorder = RecordingChatModel(
+        llm=refining_llm, model_identifier=RECORDING_MODEL, cassette_path=evals_dir / "cassettes" / f"{CASE_NAME}.json"
+    )
     doc = pymupdf.open(synthetic_pdf_path)
     try:
         TOCGenerator(doc=doc, llm=cast(BaseChatModel, recorder), num_processes=1).generate(
@@ -180,6 +186,30 @@ class TestRunEvalCase:
 
         assert report.recall == pytest.approx(3 / 4)
         assert [entry.title for entry in report.missing] == ["Appendix A: Extra Material"]
+
+    def test_record_mode_names_the_model_and_reasoning_effort_in_the_cassette(
+        self, case: EvalCase, mock_llm: MagicMock
+    ) -> None:
+        with patch("pdfalive.evaluation.runner.build_chat_model", return_value=mock_llm) as build_chat_model:
+            result = run_eval_case(
+                case,
+                mode="record",
+                model_identifier=OTHER_MODEL,
+                reasoning_effort=REASONING_EFFORT,
+                request_delay=0,
+                num_processes=1,
+            )
+
+        build_chat_model.assert_called_once_with(OTHER_MODEL, REASONING_EFFORT)
+        cassette = Cassette.load(case.cassette_path)
+        assert (cassette.model_identifier, cassette.reasoning_effort) == (OTHER_MODEL, REASONING_EFFORT)
+        assert result.model_identifier == OTHER_MODEL
+
+    def test_replay_reports_the_model_that_recorded_the_cassette(self, case: EvalCase) -> None:
+        """The scores are the recorded model's, whatever model the replay is told about."""
+        result = run_eval_case(case, mode="replay", model_identifier=OTHER_MODEL, num_processes=1)
+
+        assert result.model_identifier == RECORDING_MODEL
 
     def test_unknown_mode_raises(self, case: EvalCase) -> None:
         with pytest.raises(ValueError, match="mode"):
@@ -256,6 +286,43 @@ class TestEvalCommand:
         result = runner.invoke(cli, self.eval_args(recorded_evals_dir, "--case", CASE_NAME))
 
         assert result.exit_code == 0, result.output
+
+    def test_output_names_the_model_behind_the_scores(self, runner: CliRunner, recorded_evals_dir: Path) -> None:
+        result = runner.invoke(cli, self.eval_args(recorded_evals_dir))
+
+        assert result.exit_code == 0, result.output
+        assert RECORDING_MODEL in result.output
+
+    def test_a_cassette_that_cannot_be_replayed_is_an_error_line(
+        self, runner: CliRunner, recorded_evals_dir: Path
+    ) -> None:
+        (recorded_evals_dir / "cassettes" / f"{CASE_NAME}.json").write_text('{"entries": []}')
+
+        result = runner.invoke(cli, self.eval_args(recorded_evals_dir))
+
+        assert result.exit_code == 1
+        assert "Error:" in result.output
+        assert "re-record" in result.output
+        assert isinstance(result.exception, SystemExit)  # reported, not a traceback
+
+    @pytest.mark.parametrize(
+        ("extra_args", "warns"),
+        [
+            ((), False),
+            (("--model-identifier", OTHER_MODEL), True),
+            (("--reasoning-effort", REASONING_EFFORT), True),
+        ],
+        ids=["defaults", "another-model", "a-reasoning-effort"],
+    )
+    def test_recording_with_other_settings_than_the_defaults_warns(
+        self, runner: CliRunner, evals_dir: Path, mock_llm: MagicMock, extra_args: tuple[str, ...], warns: bool
+    ) -> None:
+        args = ["eval", "--evals-dir", str(evals_dir), "--mode", "record", "--num-processes", "1", *extra_args]
+        with patch("pdfalive.evaluation.runner.build_chat_model", return_value=mock_llm):
+            result = runner.invoke(cli, [*args, "--request-delay", "0"])
+
+        assert result.exit_code == 0, result.output
+        assert ("Warning:" in result.output) == warns
 
     def test_unknown_case_name_errors(self, runner: CliRunner, recorded_evals_dir: Path) -> None:
         result = runner.invoke(cli, self.eval_args(recorded_evals_dir, "--case", "nonexistent"))
