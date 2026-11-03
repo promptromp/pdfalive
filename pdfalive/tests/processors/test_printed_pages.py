@@ -210,6 +210,17 @@ class TestPageHeaderFolios:
                 id="folio-under-a-stamp-line",
             ),
             pytest.param(
+                _page_dict(
+                    _line(HEADER_Y, str(FOLIO)),
+                    _line(HEADER_Y, "8 Running Title", x=RIGHT_X),
+                    _line(HEADER_Y + LINE_SPACING, LETTER_SPACED_FOLIO),
+                    *_body_with("Body"),
+                    _line(FOOTER_Y, "Last line"),
+                ),
+                {FOLIO: HEADER_BOTTOM},
+                id="the-folio-repeated-in-the-next-row-does-not-extend-the-header",
+            ),
+            pytest.param(
                 _page_dict(_line(HEADER_Y, "Running title"), *_body_with("Body"), _line(FOOTER_Y, str(FOLIO))),
                 {},
                 id="folio-in-the-footer",

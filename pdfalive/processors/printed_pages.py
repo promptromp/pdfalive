@@ -173,8 +173,9 @@ def page_folios(page_dict: dict, rotation: pymupdf.Matrix = pymupdf.Identity) ->
 
     A candidate is in the running header when its line is among the page's top rows and
     not also among its bottom rows (a page of few rows has no header to tell apart); the
-    header ends with the bottom edge of the folio's line, as the running title shares the
-    folio's row and the page's text below it starts lower. Header positions are unrotated
+    header ends with the bottom edge of the folio's line (the topmost, should the number
+    recur among those rows), as the running title shares the folio's row and the page's
+    text below it starts lower. Header positions are unrotated
     page coordinates, as the TOC generator reads them, so a page displayed rotated (any
     ``rotation`` but the identity) reports none.
 
@@ -184,15 +185,15 @@ def page_folios(page_dict: dict, rotation: pymupdf.Matrix = pymupdf.Identity) ->
     """
     folio_lines = _folio_lines(page_dict, rotation)
     page_height = page_dict.get("height", 0)
-    reports_header = tuple(rotation) == _UNROTATED and page_height > 0
-    return PageFolios(
-        candidates={folio_line.folio for folio_line in folio_lines},
-        header_bottoms={
-            folio_line.folio: folio_line.line.bottom / page_height
-            for folio_line in folio_lines
-            if reports_header and folio_line.in_header
-        },
-    )
+    header_bottoms: dict[int, float] = {}
+    if tuple(rotation) == _UNROTATED and page_height > 0:
+        for folio_line in folio_lines:
+            if folio_line.in_header:
+                bottom = folio_line.line.bottom / page_height
+                # The header ends at the topmost line showing the folio; the same number
+                # lower down (a figure's axis label) is page content.
+                header_bottoms[folio_line.folio] = min(bottom, header_bottoms.get(folio_line.folio, bottom))
+    return PageFolios(candidates={folio_line.folio for folio_line in folio_lines}, header_bottoms=header_bottoms)
 
 
 def _confirmed_folios(candidates: list[set[int]]) -> list[tuple[int, int]]:
