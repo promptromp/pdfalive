@@ -3,7 +3,7 @@
   "source_pdf": "data/ocr/mitrinovic.pdf",
   "book_title": "Analytic Inequalities by D.S. Mitrinovic",
   "postprocess": true,
-  "description": "Golden seeded from pre-existing bookmarks, which the pipeline reproduces exactly. Scanned book: pipeline runs against a locally pre-OCRed copy (recreate via: pdfalive extract-text data/mitrinovic.pdf data/ocr/mitrinovic.pdf).",
+  "description": "Golden seeded from pre-existing bookmarks and checked against the page text: every entry's heading line is on its page. One bookmark, which pointed at the running header on the page after its heading, was corrected. Scanned book: pipeline runs against a locally pre-OCRed copy (recreate via: pdfalive extract-text data/mitrinovic.pdf data/ocr/mitrinovic.pdf).",
   "entries": [
     {
       "level": 1,
@@ -158,7 +158,7 @@
     {
       "level": 2,
       "title": "2.8 Hölder’s Inequality",
-      "page_number": 62
+      "page_number": 61
     },
     {
       "level": 2,
