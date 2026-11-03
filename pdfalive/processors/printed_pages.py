@@ -42,6 +42,11 @@ _EDGE_ROWS = 2
 # An Arabic page number; printed numbering starts at 1.
 _FOLIO_NUMBER = r"[1-9]\d{0,3}"
 
+# A span holding only digits separated by single spaces: one letter-spaced number, as
+# some OCR text layers write a folio ("4 4 5" for 445). Digits in separate spans stay
+# separate numbers.
+_LETTER_SPACED_NUMBER = re.compile(r"\d(?: \d)+")
+
 # An edge line that is a folio and nothing else, possibly decorated: "12", "- 12 -",
 # "— 12 —", "[12]", "Page 12". (Numbers sharing a line with a running title are not
 # read: there they are mostly chapter or section numbers.)
@@ -79,6 +84,12 @@ class _TextLine(NamedTuple):
     text: str
 
 
+def _unspaced_number(span_text: str) -> str:
+    """Return a span's text, with a letter-spaced number's digits joined ("4 4 5" -> "445")."""
+    stripped = span_text.strip()
+    return stripped.replace(" ", "") if _LETTER_SPACED_NUMBER.fullmatch(stripped) else span_text
+
+
 def _horizontal_text_lines(page_dict: dict, rotation: pymupdf.Matrix) -> list[_TextLine]:
     """Return the page's non-empty text lines that read horizontally as displayed.
 
@@ -86,7 +97,8 @@ def _horizontal_text_lines(page_dict: dict, rotation: pymupdf.Matrix) -> list[_T
     page with a ``/Rotate`` entry is judged as it is displayed. Tilted lines (e.g. a
     vertical or diagonal watermark) are skipped: their extent spans much of the page and
     says nothing about where a folio sits. Spans are joined with spaces, as OCR text
-    layers put each word in its own span.
+    layers put each word in its own span; a span that is one letter-spaced number
+    loses its inner spaces.
     """
     linear = pymupdf.Matrix(rotation.a, rotation.b, rotation.c, rotation.d, 0, 0)
     lines = []
@@ -96,7 +108,7 @@ def _horizontal_text_lines(page_dict: dict, rotation: pymupdf.Matrix) -> list[_T
             if direction.x <= 0 or abs(direction.y) > _MAX_HORIZONTAL_TILT * abs(direction):
                 continue
             spans = [span for span in line.get("spans", []) if span.get("bbox")]
-            text = " ".join(span.get("text", "") for span in spans).strip()
+            text = " ".join(_unspaced_number(span.get("text", "")) for span in spans).strip()
             if text:
                 rects = [pymupdf.Rect(span["bbox"]) * rotation for span in spans]
                 lines.append(_TextLine(top=min(r.y0 for r in rects), bottom=max(r.y1 for r in rects), text=text))
