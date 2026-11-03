@@ -19,9 +19,11 @@ from pdfalive.processors.toc_generator import (
     _MAX_DROPPED_ENTRIES_SHOWN,
     _MAX_FOLIO_MATCH_DISTANCE,
     _MAX_HEADING_CANDIDATES_PER_PAGE,
+    _OCR_TEXT_LAYER_FONT,
     _RUNNING_HEADER_Y_THRESHOLD,
     _SECTION_NUMBER_PATTERN,
     DEFAULT_MAX_BLOCKS_PER_PAGE,
+    DEFAULT_MAX_LINES_PER_BLOCK,
     TEXT_SNIPPET_LENGTH,
     TOCGenerator,
     _compute_body_font_profile,
@@ -30,8 +32,10 @@ from pdfalive.processors.toc_generator import (
     _HeadingTitle,
     _is_bold_font,
     _is_heading_candidate,
+    _line_spans,
     _snippet_key,
     _strip_subset_prefix,
+    _weighted_median,
     filter_features_for_llm,
     serialize_features_compact,
 )
@@ -4972,3 +4976,272 @@ class TestLlmSnippets:
         found = [text for text in self._phase2_features(candidate_text) if text.startswith(candidate_text[:10])]
 
         assert found == ([candidate_text.strip()] if is_candidate else [])
+
+
+_OCR_PAGE_HEIGHT = 800.0
+_OCR_BODY_SIZE = 34.0
+_OCR_HEADING_TOP = 80.0
+_OCR_BODY_TOP = 320.0
+_OCR_LINE_LEFT = 50.0
+_OCR_WORD_WIDTH = 60.0
+_OCR_SPACE_WIDTH = 8.0
+_OCR_FIRST_WORD_DROP = 4.0  # how far a short first word's glyph top sits below the line's top
+# An invented heading as an OCR text layer stores it: one span per word, sizes jittering
+# around ~1.4x body, with "on" and "of" too short to count as heading-like on their own.
+_OCR_HEADING_WORDS = [("Notes", 48.9), ("on", 47.2), ("the", 48.0), ("tides", 51.3), ("of", 47.8), ("harbors", 49.0)]
+_OCR_HEADING = " ".join(word for word, _ in _OCR_HEADING_WORDS)
+_OCR_BODY_WORDS = [(word, _OCR_BODY_SIZE) for word in ("The", "ferry", "left", "early")]
+_OCR_BODY_LINE = " ".join(word for word, _ in _OCR_BODY_WORDS)
+_OCR_BODY_LINES = 6  # enough body lines that the body size is the most common one
+_BORN_DIGITAL_FONT_SIZE = 10.0
+_WORKER_ARGS_PREFIX = (0, 1, "/fake/path.pdf")  # process index, process count, input path
+
+
+def _ocr_word_spans(
+    words: list[tuple[str, float]], top: float, folded_spaces: bool = False, font: str = _OCR_TEXT_LAYER_FONT
+) -> list[dict]:
+    """One line of an OCR text layer as PyMuPDF reads it: a span per word, at the word's own size.
+
+    Tesseract writes the space between two words either as a span of its own or folded
+    into the next word (" the"); folded_spaces selects the second form.
+    """
+    spans = []
+    left = _OCR_LINE_LEFT
+    for ix, (word, size) in enumerate(words):
+        if ix and not folded_spaces:
+            spans.append(_raw_span(" ", size, (left, top, left + _OCR_SPACE_WIDTH, top + size), font))
+            left += _OCR_SPACE_WIDTH
+        text = f" {word}" if ix and folded_spaces else word
+        spans.append(_raw_span(text, size, (left, top, left + _OCR_WORD_WIDTH, top + size), font))
+        left += _OCR_WORD_WIDTH
+    return spans
+
+
+def _raw_span(text: str, size: float, bbox: tuple, font: str, flags: int = 0) -> dict:
+    return {"font": font, "size": size, "text": text, "bbox": bbox, "flags": flags}
+
+
+def _page_dict(*blocks: list[list[dict]]) -> dict:
+    """A page as page.get_text("dict") returns it; each block is a list of lines, each line a list of spans."""
+    return {
+        "height": _OCR_PAGE_HEIGHT,
+        "blocks": [{"type": 0, "lines": [{"spans": spans} for spans in block]} for block in blocks],
+    }
+
+
+def _ocr_page(heading_words: list[tuple[str, float]] = _OCR_HEADING_WORDS, folded_spaces: bool = False) -> dict:
+    """A page of an OCR text layer: a heading line, then a block of body lines."""
+    heading = _ocr_word_spans(heading_words, _OCR_HEADING_TOP, folded_spaces)
+    body = [_ocr_word_spans(_OCR_BODY_WORDS, _OCR_BODY_TOP, folded_spaces) for _ in range(_OCR_BODY_LINES)]
+    return _page_dict([heading], body)
+
+
+def _extract_sequentially(page: dict, **options) -> list:
+    """The features of a one-page document, extracted in this process (both phases)."""
+    pdf_page = MagicMock()
+    pdf_page.rect.height = _OCR_PAGE_HEIGHT
+    pdf_page.get_text.return_value = page
+    doc = MagicMock()
+    doc.page_count = 1
+    doc.name = None
+    doc.__iter__ = lambda self: iter([pdf_page])
+    generator = TOCGenerator(doc=doc, llm=MagicMock())
+    return generator._extract_features_sequential(doc, show_progress=False, **options)
+
+
+def _extract_in_worker(
+    page: dict,
+    max_blocks_per_page: int = DEFAULT_MAX_BLOCKS_PER_PAGE,
+    max_lines_per_block: int = DEFAULT_MAX_LINES_PER_BLOCK,
+) -> tuple[list, list]:
+    """Phase 1 of a one-page document in a parallel-extraction worker: its features and Phase 2 buffer."""
+    pdf_page = MagicMock()
+    pdf_page.get_text.return_value = page
+    doc = MagicMock()
+    doc.page_count = 1
+    doc.__getitem__ = lambda self, ix: pdf_page
+    with patch("pdfalive.processors.toc_generator.pymupdf") as mock_pymupdf:
+        mock_pymupdf.open.return_value = doc
+        args = (*_WORKER_ARGS_PREFIX, max_blocks_per_page, max_lines_per_block)
+        _, _, features, buffer = _extract_features_from_page_range(args)
+    return features, buffer
+
+
+def _extract_phase1(extraction: str, page: dict, **options) -> list:
+    if extraction == "sequential":
+        return _extract_sequentially(page, **options)
+    features, _ = _extract_in_worker(page, **options)
+    return features
+
+
+def _lines(features: list) -> list[list[TOCFeature]]:
+    return [line for block in features for line in block]
+
+
+def _texts(features: list) -> list[str]:
+    return [span.text for line in _lines(features) for span in line]
+
+
+def _payload_texts(features: list) -> list[str]:
+    return _texts(filter_features_for_llm(features))
+
+
+class TestOcrTextLayerLines:
+    """A line of an OCR text layer is one feature, and reaches the LLM whole.
+
+    Regression: OCR text layers store each word as a span with its own jittered size;
+    extracted and filtered span by span, a heading reached the LLM with its short or
+    under-threshold words missing from the middle of the title.
+    """
+
+    @pytest.mark.parametrize(
+        ("values_with_weights", "expected"),
+        [
+            ([(10.0, 1)], 10.0),
+            ([(30.0, 5), (44.0, 6), (43.0, 2), (45.0, 3)], 44.0),
+            ([(49.3, 1), (36.9, 11)], 36.9),  # one heavy outlier does not move the median
+            ([(10.0, 1), (12.0, 1)], 10.0),  # the lower median on a tie
+        ],
+    )
+    def test_weighted_median(self, values_with_weights, expected):
+        assert _weighted_median(values_with_weights) == expected
+
+    @pytest.mark.parametrize("folded_spaces", [False, True])
+    def test_an_ocr_line_is_one_span(self, folded_spaces):
+        words = _ocr_word_spans(_OCR_HEADING_WORDS, _OCR_HEADING_TOP, folded_spaces)
+
+        (line,) = _line_spans(words)
+
+        assert line["text"] == _OCR_HEADING
+        assert line["font"] == _OCR_TEXT_LAYER_FONT
+        assert line["is_ocr_line"]
+
+    def test_line_box_covers_all_its_words(self):
+        """A short first word's glyph top sits below the line's top, so the line takes the box of all its words."""
+        words = _ocr_word_spans(_OCR_HEADING_WORDS, _OCR_HEADING_TOP)
+        x0, y0, x1, y1 = words[0]["bbox"]
+        words[0]["bbox"] = (x0, y0 + _OCR_FIRST_WORD_DROP, x1, y1)
+
+        (line,) = _line_spans(words)
+
+        boxes = [word["bbox"] for word in words]
+        assert line["bbox"] == (
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        )
+        assert line["bbox"][1] == _OCR_HEADING_TOP
+
+    def test_line_size_is_the_character_weighted_median_of_its_words(self):
+        """Neither the first word's jittered size nor a space span's size decides the line's size."""
+        line_size = _OCR_BODY_SIZE
+        words = [("A", 2 * line_size), ("Lighthouse", line_size), ("stands", line_size)]
+
+        (line,) = _line_spans(_ocr_word_spans(words, _OCR_BODY_TOP))
+
+        assert line["size"] == line_size
+
+    @pytest.mark.parametrize(
+        "spans",
+        [
+            # A born-digital line: its spans are runs of one style.
+            [
+                _raw_span("4.1", _BORN_DIGITAL_FONT_SIZE, (50, 80, 70, 92), "Serif-Bold", flags=16),
+                _raw_span(" Harbor Lights", _BORN_DIGITAL_FONT_SIZE, (70, 80, 160, 92), "Serif-Regular"),
+            ],
+            # OCR words beside another font's span.
+            [
+                _raw_span("4.1", _BORN_DIGITAL_FONT_SIZE, (50, 80, 70, 92), "Serif-Bold", flags=16),
+                *_ocr_word_spans(_OCR_BODY_WORDS, _OCR_HEADING_TOP),
+            ],
+            # No visible text, in another font.
+            [_raw_span(" ", _BORN_DIGITAL_FONT_SIZE, (50, 80, 58, 92), "Serif-Regular")],
+        ],
+        ids=["born-digital", "mixed", "blank"],
+    )
+    def test_other_lines_keep_their_spans(self, spans):
+        assert _line_spans(spans) == spans
+
+    def test_an_ocr_line_of_spaces_contributes_no_spans(self):
+        spaces = [_raw_span(" ", _OCR_BODY_SIZE, (50, 80, 58, 114), _OCR_TEXT_LAYER_FONT)] * 2
+
+        assert _line_spans(spaces) == []
+
+    def test_subset_prefixed_ocr_font_is_recognized(self):
+        words = _ocr_word_spans(_OCR_BODY_WORDS, _OCR_BODY_TOP, font=f"ABCDEF+{_OCR_TEXT_LAYER_FONT}")
+
+        assert len(_line_spans(words)) == 1
+
+    @pytest.mark.parametrize("extraction", ["sequential", "worker"])
+    def test_extracted_ocr_lines_are_single_features(self, extraction):
+        features = _extract_phase1(extraction, _ocr_page())
+
+        assert [[span.text for span in line] for line in _lines(features)] == [
+            [_OCR_HEADING],
+            *[[_OCR_BODY_LINE]] * DEFAULT_MAX_LINES_PER_BLOCK,
+        ]
+        assert all(span.is_ocr_line for line in _lines(features) for span in line)
+
+    @pytest.mark.parametrize("extraction", ["sequential", "worker"])
+    def test_a_long_ocr_line_keeps_its_whole_text_and_the_payload_cuts_it(self, extraction):
+        """Like any feature: the deterministic steps match the whole line, the LLM sees TEXT_SNIPPET_LENGTH of it."""
+        heading_size = _OCR_HEADING_WORDS[0][1]
+        features = _extract_phase1(extraction, _ocr_page([(word, heading_size) for word in _LONG_HEADING.split()]))
+
+        assert _lines(features)[0][0].text == _LONG_HEADING
+        payload = serialize_features_compact(filter_features_for_llm(features))
+        assert _LONG_HEADING[:TEXT_SNIPPET_LENGTH] in payload
+        assert _LONG_HEADING not in payload
+
+    def test_phase2_judges_an_ocr_line_by_its_size(self):
+        """A heading past the first blocks is found though its first word is at body size."""
+        heading_words = [("A", _OCR_BODY_SIZE), *_OCR_HEADING_WORDS]
+        body_blocks = [[_ocr_word_spans(_OCR_BODY_WORDS, _OCR_BODY_TOP)] for _ in range(DEFAULT_MAX_BLOCKS_PER_PAGE)]
+        page = _page_dict(*body_blocks, [_ocr_word_spans(heading_words, _OCR_BODY_TOP)])
+        heading = " ".join(word for word, _ in heading_words)
+
+        (candidate,) = [span for line in _lines(_extract_sequentially(page)) for span in line if span.text == heading]
+        assert candidate.is_ocr_line
+
+    def test_worker_buffers_ocr_lines_whole_for_phase2(self):
+        body_blocks = [[_ocr_word_spans(_OCR_BODY_WORDS, _OCR_BODY_TOP)] for _ in range(DEFAULT_MAX_BLOCKS_PER_PAGE)]
+        page = _page_dict(*body_blocks, [_ocr_word_spans(_OCR_HEADING_WORDS, _OCR_BODY_TOP)])
+
+        _, buffer = _extract_in_worker(page)
+
+        ((_, _, _, spans),) = buffer
+        assert [span["text"] for span in spans] == [_OCR_HEADING]
+
+    @pytest.mark.parametrize(
+        "heading_words",
+        [
+            _OCR_HEADING_WORDS,
+            [(word, _OCR_BODY_SIZE) for word, _ in _OCR_HEADING_WORDS],  # set at body size
+        ],
+        ids=["larger", "body-size"],
+    )
+    def test_every_ocr_line_reaches_the_llm(self, heading_words):
+        """Sizes on an OCR text layer do not tell headings from body text, so no OCR line is filtered out."""
+        payload = _payload_texts(_extract_sequentially(_ocr_page(heading_words)))
+
+        assert payload == [" ".join(word for word, _ in heading_words), *[_OCR_BODY_LINE] * DEFAULT_MAX_LINES_PER_BLOCK]
+
+    def test_ocr_words_beside_another_font_are_judged_by_size(self):
+        """Only whole OCR lines skip the size test: a line mixing fonts is not one, so its spans keep the body cap."""
+        native = _raw_span("Plain body text", _OCR_BODY_SIZE, (50, 80, 300, 114), "Serif-Regular")
+        mixed_line = [native, *_ocr_word_spans(_OCR_BODY_WORDS, _OCR_HEADING_TOP)]
+        body = [_ocr_word_spans(_OCR_BODY_WORDS, _OCR_BODY_TOP) for _ in range(_OCR_BODY_LINES)]
+        page = _page_dict([mixed_line], body)
+
+        payload = _payload_texts(_extract_sequentially(page))
+
+        assert payload == [native["text"], *[_OCR_BODY_LINE] * DEFAULT_MAX_LINES_PER_BLOCK]
+
+    def test_born_digital_lines_beside_ocr_lines_keep_the_body_cap(self):
+        body_span = _raw_span("Plain body text", _BORN_DIGITAL_FONT_SIZE, (50, 320, 300, 332), "Serif-Regular")
+        page = _page_dict([_ocr_word_spans(_OCR_BODY_WORDS, _OCR_HEADING_TOP)], [[body_span]] * _OCR_BODY_LINES)
+
+        payload = _payload_texts(_extract_sequentially(page))
+
+        assert payload == [_OCR_BODY_LINE, body_span["text"]]

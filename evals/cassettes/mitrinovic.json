@@ -3,7 +3,7 @@
   "reasoning_effort": null,
   "entries": [
     {
-      "request_hash": "9a41811ee72c6c88f5018404c164eebf91723655c76b81cf2319e8aef1140d41",
+      "request_hash": "271efc9d34b16a50e73738d392400047c285cb8d522068601c537e00eb12ea2c",
       "schema_name": "TOC",
       "response": {
         "entries": [
@@ -26,10 +26,10 @@
             "confidence": 0.99
           },
           {
-            "title": "Notations and Definitions",
+            "title": "On Notations and Definitions",
             "page_number": 11,
             "level": 1,
-            "confidence": 0.98
+            "confidence": 0.99
           },
           {
             "title": "1. Introduction",
@@ -41,25 +41,25 @@
             "title": "1.1 Real Number System",
             "page_number": 12,
             "level": 2,
-            "confidence": 0.98
+            "confidence": 0.99
           },
           {
             "title": "1.2 Complex Number System",
             "page_number": 16,
             "level": 2,
-            "confidence": 0.76
+            "confidence": 0.91
           },
           {
             "title": "1.3 Monotone Functions",
             "page_number": 19,
             "level": 2,
-            "confidence": 0.72
+            "confidence": 0.91
           },
           {
             "title": "1.4 Convex Functions",
-            "page_number": 22,
+            "page_number": 21,
             "level": 2,
-            "confidence": 0.82
+            "confidence": 0.92
           },
           {
             "title": "2. General Inequalities",
@@ -71,25 +71,37 @@
             "title": "2.1 Fundamental Inequalities",
             "page_number": 38,
             "level": 2,
-            "confidence": 0.98
-          },
-          {
-            "title": "2.4 Bernoulli’s Inequality and Generalizations",
-            "page_number": 45,
-            "level": 2,
             "confidence": 0.99
           },
           {
-            "title": "2.5 Cebyšev’s and Related Inequalities",
+            "title": "2.2 Cauchy’s Inequality",
+            "page_number": 41,
+            "level": 2,
+            "confidence": 0.67
+          },
+          {
+            "title": "2.3 Jordan’s Inequality",
+            "page_number": 44,
+            "level": 2,
+            "confidence": 0.97
+          },
+          {
+            "title": "2.4 Bernoulli’s Inequality and its Generalizations",
+            "page_number": 45,
+            "level": 2,
+            "confidence": 0.98
+          },
+          {
+            "title": "2.5 Čebyšev’s and Related Inequalities",
             "page_number": 47,
             "level": 2,
             "confidence": 0.98
           },
           {
-            "title": "2.6 Some Refinements and Extensions of Cauchy’s Inequality",
+            "title": "2.6 Cauchy’s and Related Inequalities",
             "page_number": 52,
             "level": 2,
-            "confidence": 0.78
+            "confidence": 0.99
           },
           {
             "title": "2.7 Young’s Inequality",
@@ -99,15 +111,27 @@
           },
           {
             "title": "2.8 Hölder’s Inequality",
-            "page_number": 62,
+            "page_number": 61,
             "level": 2,
-            "confidence": 0.77
+            "confidence": 0.98
           },
           {
             "title": "2.9 Minkowski’s and Related Inequalities",
             "page_number": 66,
             "level": 2,
-            "confidence": 0.99
+            "confidence": 0.98
+          },
+          {
+            "title": "2.10 Inequalities of Aczél, Popoviciu, Kurepa and Related Types",
+            "page_number": 68,
+            "level": 2,
+            "confidence": 0.87
+          },
+          {
+            "title": "2.11 Schweitzer’s, Diaz-Metcalf’s, Rennie’s and Related Inequalities",
+            "page_number": 70,
+            "level": 2,
+            "confidence": 0.91
           },
           {
             "title": "2.12 An Inequality of Fan and Todd",
@@ -119,7 +143,7 @@
             "title": "2.13 Grüss’ Inequality",
             "page_number": 81,
             "level": 2,
-            "confidence": 0.78
+            "confidence": 0.94
           },
           {
             "title": "2.14 Means",
@@ -131,13 +155,19 @@
             "title": "2.15 Symmetric Means and Functions",
             "page_number": 106,
             "level": 2,
-            "confidence": 0.88
+            "confidence": 0.98
           },
           {
-            "title": "2.16 Steffensen’s Inequalities",
+            "title": "2.16 Steffensen’s and Related Inequalities",
             "page_number": 118,
             "level": 2,
-            "confidence": 0.82
+            "confidence": 0.98
+          },
+          {
+            "title": "2.17 Schur’s Inequality",
+            "page_number": 130,
+            "level": 2,
+            "confidence": 0.98
           },
           {
             "title": "2.18 Turán’s Inequalities",
@@ -149,7 +179,7 @@
             "title": "2.19 Benson’s Method",
             "page_number": 137,
             "level": 2,
-            "confidence": 0.88
+            "confidence": 0.99
           },
           {
             "title": "2.20 Recurrent Inequalities of Redheffer",
@@ -176,22 +206,28 @@
             "confidence": 0.99
           },
           {
-            "title": "2.24 Connected Inequalities",
+            "title": "2.24 Inequalities Connected with Majorization of Vectors",
             "page_number": 174,
             "level": 2,
-            "confidence": 0.87
+            "confidence": 0.96
           },
           {
-            "title": "2.25 Norms",
+            "title": "2.25 Inequalities for Vector Norms",
             "page_number": 181,
             "level": 2,
-            "confidence": 0.86
+            "confidence": 0.94
+          },
+          {
+            "title": "2.26 Mills’ Ratio and Some Related Results",
+            "page_number": 188,
+            "level": 2,
+            "confidence": 0.98
           },
           {
             "title": "2.27 Stirling’s Formula",
             "page_number": 192,
             "level": 2,
-            "confidence": 0.95
+            "confidence": 0.99
           },
           {
             "title": "3. Particular Inequalities",
@@ -200,10 +236,10 @@
             "confidence": 0.99
           },
           {
-            "title": "3.1 Inequalities Involving Natural Numbers",
+            "title": "3.1 Inequalities Involving Functions of Discrete Variables",
             "page_number": 198,
             "level": 2,
-            "confidence": 0.74
+            "confidence": 0.98
           },
           {
             "title": "3.2 Inequalities Involving Algebraic Functions",
@@ -221,13 +257,13 @@
             "title": "3.4 Inequalities Involving Trigonometric Functions",
             "page_number": 246,
             "level": 2,
-            "confidence": 0.72
+            "confidence": 0.95
           },
           {
-            "title": "3.5 Inequalities Involving Trigonometric Sums",
+            "title": "3.5 Inequalities Involving Trigonometric Polynomials",
             "page_number": 258,
             "level": 2,
-            "confidence": 0.7
+            "confidence": 0.98
           },
           {
             "title": "3.6 Inequalities Involving Exponential, Logarithmic and Gamma Functions",
@@ -236,16 +272,22 @@
             "confidence": 0.99
           },
           {
+            "title": "3.7 Integral Inequalities",
+            "page_number": 300,
+            "level": 2,
+            "confidence": 0.95
+          },
+          {
             "title": "3.8 Inequalities in the Complex Domain",
             "page_number": 321,
             "level": 2,
-            "confidence": 0.98
+            "confidence": 0.99
           },
           {
             "title": "3.9 Miscellaneous Inequalities",
-            "page_number": 347,
+            "page_number": 348,
             "level": 2,
-            "confidence": 0.99
+            "confidence": 0.97
           },
           {
             "title": "Name Index",
@@ -262,22 +304,22 @@
         ]
       },
       "usage_metadata": {
-        "input_tokens": 64521,
-        "output_tokens": 3132,
-        "total_tokens": 67653,
+        "input_tokens": 62972,
+        "output_tokens": 3588,
+        "total_tokens": 66560,
         "input_token_details": {
           "audio": 0,
           "cache_read": 1254,
-          "cache_creation": 63264
+          "cache_creation": 61715
         },
         "output_token_details": {
           "audio": 0,
-          "reasoning": 2027
+          "reasoning": 2256
         }
       }
     },
     {
-      "request_hash": "e9f45666e3432bfcc38f0e482a06941a5f9dde2a9ce59ad28f0e81845f4cc3d7",
+      "request_hash": "0bdd543bd35cdcefb4e9e669b83155e21bd921c1c930edee759faacb358a6846",
       "schema_name": "PostprocessedTOC",
       "response": {
         "entries": [
@@ -292,7 +334,7 @@
             "title": "Organization of the Book",
             "page_number": 8,
             "level": 1,
-            "confidence": 0.99,
+            "confidence": 0.98,
             "printed_page": null
           },
           {
@@ -369,14 +411,14 @@
             "title": "1.4.2 Continuity of Jensen Convex Functions",
             "page_number": 22,
             "level": 3,
-            "confidence": 0.96,
+            "confidence": 0.97,
             "printed_page": 11
           },
           {
             "title": "1.4.3 Convex Functions",
             "page_number": 26,
             "level": 3,
-            "confidence": 0.98,
+            "confidence": 0.96,
             "printed_page": 15
           },
           {
@@ -404,7 +446,7 @@
             "title": "1.4.7 Hierarchy of Convexity",
             "page_number": 33,
             "level": 3,
-            "confidence": 0.98,
+            "confidence": 0.99,
             "printed_page": 22
           },
           {
@@ -432,7 +474,7 @@
             "title": "2.1.2 Cauchy’s Inequality",
             "page_number": 41,
             "level": 3,
-            "confidence": 0.96,
+            "confidence": 0.99,
             "printed_page": 30
           },
           {
@@ -446,11 +488,11 @@
             "title": "2.3 Jordan’s Inequality",
             "page_number": 44,
             "level": 2,
-            "confidence": 0.98,
+            "confidence": 0.99,
             "printed_page": 33
           },
           {
-            "title": "2.4 Bernoulli’s Inequality and Its Generalizations",
+            "title": "2.4 Bernoulli’s Inequality and its Generalizations",
             "page_number": 45,
             "level": 2,
             "confidence": 0.99,
@@ -493,10 +535,10 @@
           },
           {
             "title": "2.8 Hölder’s Inequality",
-            "page_number": 62,
+            "page_number": 61,
             "level": 2,
             "confidence": 0.99,
-            "printed_page": 51
+            "printed_page": 50
           },
           {
             "title": "2.9 Minkowski’s and Related Inequalities",
@@ -509,14 +551,14 @@
             "title": "2.10 Inequalities of Aczél, Popoviciu, Kurepa and Bellman",
             "page_number": 68,
             "level": 2,
-            "confidence": 0.98,
+            "confidence": 0.99,
             "printed_page": 57
           },
           {
             "title": "2.11 Schweitzer’s, Diaz-Metcalf’s, Rennie’s and Related Inequalities",
             "page_number": 70,
             "level": 2,
-            "confidence": 0.98,
+            "confidence": 0.99,
             "printed_page": 59
           },
           {
@@ -579,7 +621,7 @@
             "title": "2.14.6 The A-Method of Mitrinović and Vasić",
             "page_number": 101,
             "level": 3,
-            "confidence": 0.97,
+            "confidence": 0.98,
             "printed_page": 90
           },
           {
@@ -593,7 +635,7 @@
             "title": "2.15.1 Definitions and Main Relations between Symmetric Means",
             "page_number": 106,
             "level": 3,
-            "confidence": 0.98,
+            "confidence": 0.99,
             "printed_page": 95
           },
           {
@@ -621,7 +663,7 @@
             "title": "2.17 Schur’s Inequality",
             "page_number": 130,
             "level": 2,
-            "confidence": 0.95,
+            "confidence": 0.98,
             "printed_page": 119
           },
           {
@@ -670,7 +712,7 @@
             "title": "2.23.1 An Inequality Ascribed to Wirtinger",
             "page_number": 152,
             "level": 3,
-            "confidence": 0.98,
+            "confidence": 0.99,
             "printed_page": 141
           },
           {
@@ -682,7 +724,7 @@
           },
           {
             "title": "2.24 Inequalities Connected with Majorization of Vectors",
-            "page_number": 174,
+            "page_number": 173,
             "level": 2,
             "confidence": 0.99,
             "printed_page": 162
@@ -698,7 +740,7 @@
             "title": "2.25.1 Triangle Inequality",
             "page_number": 181,
             "level": 3,
-            "confidence": 0.98,
+            "confidence": 0.99,
             "printed_page": 170
           },
           {
@@ -719,7 +761,7 @@
             "title": "2.25.4 Generalizations of Hlawka’s Inequality",
             "page_number": 184,
             "level": 3,
-            "confidence": 0.95,
+            "confidence": 0.97,
             "printed_page": 173
           },
           {
@@ -733,14 +775,14 @@
             "title": "2.26 Mills’ Ratio and Some Related Results",
             "page_number": 188,
             "level": 2,
-            "confidence": 0.98,
+            "confidence": 0.99,
             "printed_page": 177
           },
           {
             "title": "2.27 Stirling’s Formula",
             "page_number": 192,
             "level": 2,
-            "confidence": 0.98,
+            "confidence": 0.99,
             "printed_page": 181
           },
           {
@@ -796,7 +838,7 @@
             "title": "3.7 Integral Inequalities",
             "page_number": 300,
             "level": 2,
-            "confidence": 0.98,
+            "confidence": 0.99,
             "printed_page": 289
           },
           {
@@ -830,17 +872,17 @@
         ]
       },
       "usage_metadata": {
-        "input_tokens": 14949,
-        "output_tokens": 4002,
-        "total_tokens": 18951,
+        "input_tokens": 15753,
+        "output_tokens": 3531,
+        "total_tokens": 19284,
         "input_token_details": {
           "audio": 0,
           "cache_read": 1341,
-          "cache_creation": 13605
+          "cache_creation": 14409
         },
         "output_token_details": {
           "audio": 0,
-          "reasoning": 1416
+          "reasoning": 950
         }
       }
     }

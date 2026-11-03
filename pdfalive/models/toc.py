@@ -231,6 +231,7 @@ class TOCFeature(BaseModel):
     text: str = Field(description="Whole text of the span, or of a line merged from its spans")
     y_position: float | None = Field(default=None, description="Normalized vertical position (0.0=top, 1.0=bottom)")
     is_bold: bool | None = Field(default=None, description="Whether the span uses a bold font")
+    is_ocr_line: bool = Field(default=False, description="Whether the feature is a whole line of an OCR text layer")
 
     def __str__(self) -> str:
         # A compact form for debugging and test output; the LLM prompt uses
