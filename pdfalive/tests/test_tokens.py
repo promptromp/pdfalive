@@ -6,7 +6,6 @@ import pdfalive.tokens as tokens_module
 from pdfalive.tokens import (
     DEFAULT_ENCODING,
     TokenUsage,
-    estimate_features_tokens,
     estimate_tokens,
     get_encoding,
 )
@@ -49,21 +48,6 @@ class TestEstimateTokens:
         # 100 lines should be roughly 100x one line (within tokenizer rounding)
         tokens_100 = estimate_tokens(compact_line * 100)
         assert 90 * tokens <= tokens_100 <= 110 * tokens
-
-
-class TestEstimateFeaturesTokens:
-    """Tests for feature-based token estimation."""
-
-    def test_estimate_empty_features(self):
-        """Test estimation with empty features."""
-        result = estimate_features_tokens([])
-        assert result >= 0
-
-    def test_estimate_features_increases_with_content(self):
-        """Test that more features means more tokens."""
-        small = estimate_features_tokens([[["feature1"]]])
-        large = estimate_features_tokens([[["feature1"]], [["feature2"]], [["feature3"]]])
-        assert large > small
 
 
 class TestTokenUsage:

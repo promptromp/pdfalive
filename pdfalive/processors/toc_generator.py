@@ -117,8 +117,10 @@ _HEADING_FONT_SIZE_RATIO_PHASE2 = 1.2
 # Maximum number of heading candidates to add per page from Phase 2 scanning
 _MAX_HEADING_CANDIDATES_PER_PAGE = 3
 
-# Default maximum characters to preserve from each PDF text span.
-DEFAULT_TEXT_SNIPPET_LENGTH = 50
+# Characters of each feature's text that reach the LLM (the feature rows of the first-pass
+# prompt, the batch token estimates, the postprocess features summary). Features keep their
+# whole text, which the deterministic steps match against.
+TEXT_SNIPPET_LENGTH = 50
 
 # Default feature extraction limits per page/block.
 DEFAULT_MAX_BLOCKS_PER_PAGE = 3
@@ -509,6 +511,11 @@ def _strip_subset_prefix(font_name: str) -> str:
     return _FONT_SUBSET_PREFIX_PATTERN.sub("", font_name)
 
 
+def _snippet(feature: TOCFeature) -> str:
+    """The part of a feature's text the LLM sees (TEXT_SNIPPET_LENGTH characters)."""
+    return feature.text[:TEXT_SNIPPET_LENGTH]
+
+
 def serialize_features_compact(features: list) -> str:
     """Serialize features into a compact text format with a font table.
 
@@ -555,7 +562,7 @@ def serialize_features_compact(features: list) -> str:
                     size = span.font_size
                     size_str = str(int(size)) if size == int(size) else str(round(size, _FONT_SIZE_DECIMAL_PLACES))
 
-                    parts = [font_id, size_str, span.text_snippet]
+                    parts = [font_id, size_str, _snippet(span)]
 
                     # Only emit y_position and bold for heading-like spans
                     # (non-body spans: bold, larger size, or section-numbered)
@@ -603,8 +610,7 @@ def _is_heading_like_feature(span: TOCFeature, body_font_size: float) -> bool:
     TOCFeature objects (post-extraction) rather than raw PyMuPDF span dicts.
     """
     return _passes_heading_criteria(
-        text=span.text_snippet.strip(),
-        full_text_length=span.text_length,
+        text=span.text.strip(),
         font_size=span.font_size,
         is_bold=bool(span.is_bold),
         body_font_size=body_font_size,
@@ -674,7 +680,7 @@ def _estimate_block_tokens(block: list) -> int:
     for line in block:
         for span in line:
             if isinstance(span, TOCFeature):
-                parts.append(f"F0|12|{span.text_snippet}|.12|B")
+                parts.append(f"F0|12|{_snippet(span)}|.12|B")
     return max(_MIN_ESTIMATED_BLOCK_TOKENS, estimate_tokens("\n".join(parts)))
 
 
@@ -721,7 +727,6 @@ def _compute_body_font_profile(features: list) -> tuple[str, float]:
 
 def _passes_heading_criteria(
     text: str,
-    full_text_length: int,
     font_size: float,
     is_bold: bool,
     body_font_size: float,
@@ -738,7 +743,7 @@ def _passes_heading_criteria(
     The bold-based check always uses the true body_font_size; only the
     size-based check uses font_size_ratio.
     """
-    if len(text) < _HEADING_MIN_LENGTH or full_text_length > _HEADING_MAX_LENGTH:
+    if not _HEADING_MIN_LENGTH <= len(text) <= _HEADING_MAX_LENGTH:
         return False
 
     if body_font_size > 0 and font_size >= body_font_size * font_size_ratio:
@@ -772,7 +777,6 @@ def _is_heading_candidate(
     text = span.get("text", "").strip()
     return _passes_heading_criteria(
         text=text,
-        full_text_length=len(text),
         font_size=span.get("size", 0.0),
         is_bold=_is_bold_font(span),
         body_font_size=body_font_size,
@@ -780,7 +784,7 @@ def _is_heading_candidate(
     )
 
 
-def _merge_line_spans(spans: list[dict], text_snippet_length: int) -> dict:
+def _merge_line_spans(spans: list[dict]) -> dict:
     """Merge spans from one PDF line into a single synthetic span.
 
     PyMuPDF often splits one visual heading into multiple spans because of
@@ -798,25 +802,22 @@ def _merge_line_spans(spans: list[dict], text_snippet_length: int) -> dict:
     return {
         "font": first.get("font", ""),
         "size": first.get("size", 0.0),
-        "text": text[:text_snippet_length],
-        "full_text_length": len(text),
+        "text": text,
         "bbox": first_bbox,
         "flags": first.get("flags", 0),
         "is_bold": any(_is_bold_font(span) for span in spans),
     }
 
 
-def _span_to_feature(span: dict, page_number: int, page_height: float, text_snippet_length: int) -> TOCFeature:
+def _span_to_feature(span: dict, page_number: int, page_height: float) -> TOCFeature:
     """Convert a raw or synthetic PyMuPDF span to a TOCFeature."""
     bbox = span.get("bbox")
     y_pos = round(bbox[1] / page_height, _Y_POSITION_DECIMAL_PLACES) if bbox and page_height > 0 else None
-    text = span.get("text", "")
     return TOCFeature(
         page_number=page_number,
         font_name=span.get("font", ""),
         font_size=span.get("size", 0.0),
-        text_length=span.get("full_text_length", len(text)),
-        text_snippet=text[:text_snippet_length],
+        text=span.get("text", ""),
         y_position=y_pos,
         is_bold=span.get("is_bold", _is_bold_font(span)),
     )
@@ -835,7 +836,6 @@ def _append_page_features(
     remaining_spans_buffer: list[_BufferedLine],
     max_blocks_per_page: int,
     max_lines_per_block: int,
-    text_snippet_length: int,
 ) -> None:
     """Phase 1 of feature extraction for one page, shared by sequential and parallel extraction.
 
@@ -867,12 +867,10 @@ def _append_page_features(
                 features[-1].append([])
 
                 for span in line["spans"]:
-                    features[-1][-1].append(_span_to_feature(span, page_number, page_height, text_snippet_length))
+                    features[-1][-1].append(_span_to_feature(span, page_number, page_height))
 
 
-def _insert_heading_candidates(
-    features: list[list], remaining_spans_buffer: list[_BufferedLine], text_snippet_length: int
-) -> None:
+def _insert_heading_candidates(features: list[list], remaining_spans_buffer: list[_BufferedLine]) -> None:
     """Phase 2 of feature extraction, shared by sequential and parallel extraction.
 
     Computes the body font profile from the Phase 1 features, then inserts each buffered
@@ -896,7 +894,7 @@ def _insert_heading_candidates(
     for page_number, page_height, insert_idx, spans in remaining_spans_buffer:
         if page_candidate_count.get(page_number, 0) >= _MAX_HEADING_CANDIDATES_PER_PAGE:
             continue
-        span = _merge_line_spans(spans, text_snippet_length)
+        span = _merge_line_spans(spans)
         if not span:
             continue
         bbox = span.get("bbox", None)
@@ -910,7 +908,7 @@ def _insert_heading_candidates(
             ratio = _HEADING_FONT_SIZE_RATIO_PHASE2
 
         if _is_heading_candidate(span, body_font_name, body_font_size, font_size_ratio=ratio):
-            feature = _span_to_feature(span, page_number, page_height, text_snippet_length)
+            feature = _span_to_feature(span, page_number, page_height)
             if insert_idx not in candidates_by_index:
                 candidates_by_index[insert_idx] = []
             candidates_by_index[insert_idx].append([[feature]])
@@ -930,7 +928,7 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list[list]
 
     Args:
         args: Tuple of (process_index, total_processes, input_path,
-                       max_blocks_per_page, max_lines_per_block, text_snippet_length)
+                       max_blocks_per_page, max_lines_per_block[, page_count])
 
     Returns:
         Tuple of (start_page, end_page, features_list, remaining_spans_buffer)
@@ -943,7 +941,6 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list[list]
         input_path,
         max_blocks_per_page,
         max_lines_per_block,
-        text_snippet_length,
         *optional_page_count,
     ) = args
 
@@ -966,7 +963,6 @@ def _extract_features_from_page_range(args: tuple) -> tuple[int, int, list[list]
             remaining_spans_buffer,
             max_blocks_per_page,
             max_lines_per_block,
-            text_snippet_length,
         )
 
     doc.close()
@@ -1248,13 +1244,12 @@ class TOCGenerator:
         max_pages: int | None = None,
         max_blocks_per_page: int = DEFAULT_MAX_BLOCKS_PER_PAGE,
         max_lines_per_block: int = DEFAULT_MAX_LINES_PER_BLOCK,
-        text_snippet_length: int = DEFAULT_TEXT_SNIPPET_LENGTH,
         show_progress: bool = True,
     ) -> list:
         """Extract features from the document to generate TOC entries.
 
         Features are indexed by page, block, line, and span.
-        They include attributes such as: font name, size, text length, and a text snippet.
+        They include attributes such as: font name, size and the text.
 
         Uses multiprocessing for large documents to speed up extraction.
 
@@ -1263,7 +1258,6 @@ class TOCGenerator:
             max_pages: Maximum number of pages to process (None for all).
             max_blocks_per_page: Maximum blocks to extract per page.
             max_lines_per_block: Maximum lines to extract per block.
-            text_snippet_length: Maximum characters for text snippets.
             show_progress: Whether to show progress indicator.
 
         Returns:
@@ -1272,7 +1266,7 @@ class TOCGenerator:
         # For documents opened in memory (not from file), use sequential processing
         if not doc.name:
             return self._extract_features_sequential(
-                doc, max_pages, max_blocks_per_page, max_lines_per_block, text_snippet_length, show_progress
+                doc, max_pages, max_blocks_per_page, max_lines_per_block, show_progress
             )
 
         page_count = doc.page_count if max_pages is None else min(max_pages, doc.page_count)
@@ -1280,7 +1274,7 @@ class TOCGenerator:
 
         if num_processes <= _MIN_PROCESS_COUNT:
             return self._extract_features_sequential(
-                doc, max_pages, max_blocks_per_page, max_lines_per_block, text_snippet_length, show_progress
+                doc, max_pages, max_blocks_per_page, max_lines_per_block, show_progress
             )
 
         return self._extract_features_parallel(
@@ -1289,7 +1283,6 @@ class TOCGenerator:
             num_processes,
             max_blocks_per_page,
             max_lines_per_block,
-            text_snippet_length,
             show_progress,
         )
 
@@ -1299,7 +1292,6 @@ class TOCGenerator:
         max_pages: int | None = None,
         max_blocks_per_page: int = DEFAULT_MAX_BLOCKS_PER_PAGE,
         max_lines_per_block: int = DEFAULT_MAX_LINES_PER_BLOCK,
-        text_snippet_length: int = DEFAULT_TEXT_SNIPPET_LENGTH,
         show_progress: bool = True,
     ) -> list:
         """Extract features sequentially (single process) using a two-phase approach.
@@ -1314,7 +1306,6 @@ class TOCGenerator:
             max_pages: Maximum number of pages to process.
             max_blocks_per_page: Maximum blocks per page.
             max_lines_per_block: Maximum lines per block.
-            text_snippet_length: Maximum characters for snippets.
             show_progress: Whether to show progress indicator.
 
         Returns:
@@ -1336,10 +1327,9 @@ class TOCGenerator:
                     remaining_spans_buffer,
                     max_blocks_per_page,
                     max_lines_per_block,
-                    text_snippet_length,
                 )
 
-        _insert_heading_candidates(features, remaining_spans_buffer, text_snippet_length)
+        _insert_heading_candidates(features, remaining_spans_buffer)
         return features
 
     def _extract_features_parallel(
@@ -1349,7 +1339,6 @@ class TOCGenerator:
         num_processes: int,
         max_blocks_per_page: int = DEFAULT_MAX_BLOCKS_PER_PAGE,
         max_lines_per_block: int = DEFAULT_MAX_LINES_PER_BLOCK,
-        text_snippet_length: int = DEFAULT_TEXT_SNIPPET_LENGTH,
         show_progress: bool = True,
     ) -> list:
         """Extract features in parallel using multiprocessing.
@@ -1360,7 +1349,6 @@ class TOCGenerator:
             num_processes: Number of parallel processes.
             max_blocks_per_page: Maximum blocks per page.
             max_lines_per_block: Maximum lines per block.
-            text_snippet_length: Maximum characters for snippets.
             show_progress: Whether to show progress indicator.
 
         Returns:
@@ -1374,7 +1362,7 @@ class TOCGenerator:
 
         # Prepare arguments for worker processes
         args_list = [
-            (i, num_processes, input_path, max_blocks_per_page, max_lines_per_block, text_snippet_length, page_count)
+            (i, num_processes, input_path, max_blocks_per_page, max_lines_per_block, page_count)
             for i in range(num_processes)
         ]
 
@@ -1409,7 +1397,7 @@ class TOCGenerator:
                 all_remaining_spans.append((page_number, page_height, insert_idx + feature_offset, spans))
             feature_offset += len(features)
 
-        _insert_heading_candidates(all_features, all_remaining_spans, text_snippet_length)
+        _insert_heading_candidates(all_features, all_remaining_spans)
         return all_features
 
     def _extract_toc(
@@ -1982,11 +1970,14 @@ number exactly as printed.
         # concatenated text.
         page_header_text: dict[int, str] = {}  # page -> concatenated header zone text
         page_body_text: dict[int, str] = {}  # page -> concatenated body zone text
+        # page -> concatenated text of the body zone's bottom part (y >= _PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD),
+        # where a section continued under the next page's running header starts
+        page_bottom_text: dict[int, str] = {}
         for block in features:
             for line in block:
                 for span in line:
                     if isinstance(span, TOCFeature) and span.y_position is not None:
-                        norm = _snippet_key(matching_form(span.text_snippet))
+                        norm = _snippet_key(matching_form(span.text))
                         if not norm:
                             continue
                         if span.y_position < _RUNNING_HEADER_Y_THRESHOLD:
@@ -1995,6 +1986,9 @@ number exactly as printed.
                         else:
                             page_body_text.setdefault(span.page_number, "")
                             page_body_text[span.page_number] += " " + norm
+                        if span.y_position >= _PREVIOUS_PAGE_BOTTOM_HEADING_Y_THRESHOLD:
+                            page_bottom_text.setdefault(span.page_number, "")
+                            page_bottom_text[span.page_number] += " " + norm
 
         corrected = []
         corrections = 0
@@ -2023,11 +2017,11 @@ number exactly as printed.
                 corrected.append(entry)
                 continue
 
-            # Suspicious entry: check if heading exists on previous page
-            # First try: check body features on page N-1
+            # Suspicious entry: check if heading exists in the bottom part of the previous page
+            # First try: check features in the bottom part of page N-1
             prev_page = page - 1
-            prev_body = page_body_text.get(prev_page, "")
-            found_on_prev = bool(prev_body) and (entry_text in prev_body or prev_body.strip() in entry_text)
+            prev_bottom = page_bottom_text.get(prev_page, "")
+            found_on_prev = bool(prev_bottom) and (entry_text in prev_bottom or prev_bottom.strip() in entry_text)
 
             # Fallback: search the actual PDF for heading in bottom of previous page
             if not found_on_prev:
@@ -2217,7 +2211,7 @@ number exactly as printed.
                                 body_font_size > 0
                                 and span.font_size > body_font_size * _POSTPROCESS_HEADING_FONT_SIZE_RATIO
                             )
-                            or bool(_SECTION_NUMBER_PATTERN.match(span.text_snippet.strip()))
+                            or bool(_SECTION_NUMBER_PATTERN.match(span.text.strip()))
                         )
                         if is_heading:
                             heading_spans.append(span)
@@ -2257,7 +2251,7 @@ number exactly as printed.
             parts.append(f"{font} {size}")
             if span.is_bold:
                 parts.append("B")
-            parts.append(f'"{span.text_snippet}"')
+            parts.append(f'"{_snippet(span)}"')
             summary_lines.append(" ".join(parts))
 
         return "\n".join(summary_lines)
