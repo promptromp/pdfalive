@@ -116,6 +116,28 @@ def _rows(lines: list[_TextLine]) -> list[list[_TextLine]]:
     return rows
 
 
+class _FolioLine(NamedTuple):
+    folio: int
+    line: _TextLine
+    # Whether the line is among the page's top rows and not also among its bottom rows:
+    # a folio there is part of the running header.
+    in_header: bool
+
+
+def _folio_lines(page_dict: dict, rotation: pymupdf.Matrix) -> list[_FolioLine]:
+    """Return the page's edge lines that hold a folio candidate (see page_folio_candidates())."""
+    lines = [line for line in _horizontal_text_lines(page_dict, rotation) if _EDGE_LINE_CONTENT.search(line.text)]
+    rows = _rows(lines)
+    first_bottom_row = max(0, len(rows) - _EDGE_ROWS)
+    edge_rows = sorted({*range(min(_EDGE_ROWS, len(rows))), *range(first_bottom_row, len(rows))})
+    return [
+        _FolioLine(int(match.group(1)), line, in_header=row_index < min(_EDGE_ROWS, first_bottom_row))
+        for row_index in edge_rows
+        for line in rows[row_index]
+        if (match := _FOLIO_LINE_PATTERN.fullmatch(line.text))
+    ]
+
+
 def page_folio_candidates(page_dict: dict, rotation: pymupdf.Matrix = pymupdf.Identity) -> set[int]:
     """Return the numbers that may be the folio printed on a page.
 
@@ -131,10 +153,32 @@ def page_folio_candidates(page_dict: dict, rotation: pymupdf.Matrix = pymupdf.Id
     Returns:
         The candidate folios (usually zero or one).
     """
-    lines = [line for line in _horizontal_text_lines(page_dict, rotation) if _EDGE_LINE_CONTENT.search(line.text)]
-    rows = _rows(lines)
-    edge_lines = [line for row in rows[:_EDGE_ROWS] + rows[-_EDGE_ROWS:] for line in row]
-    return {int(match.group(1)) for line in edge_lines if (match := _FOLIO_LINE_PATTERN.fullmatch(line.text))}
+    return {folio_line.folio for folio_line in _folio_lines(page_dict, rotation)}
+
+
+def page_header_folio_bottoms(page_dict: dict) -> dict[int, float]:
+    """Return the folio candidates printed in an unrotated page's running header, with where the header ends.
+
+    A candidate counts when its line is among the page's top rows and not also among its
+    bottom rows (a page of few rows has no header to tell apart). Its value is the bottom
+    edge of the folio's line as a fraction of the page height: the running title shares
+    the folio's row, and the page's text below it starts lower. Positions are unrotated
+    page coordinates, as the TOC generator reads them, so the caller passes only pages
+    without a ``/Rotate`` entry.
+
+    Args:
+        page_dict: The page's ``get_text("dict")`` structure.
+
+    Returns:
+        Folio candidate -> the header's bottom edge, as a fraction of the page height.
+    """
+    return _header_folio_bottoms(_folio_lines(page_dict, pymupdf.Identity), page_dict.get("height", 0))
+
+
+def _header_folio_bottoms(folio_lines: list[_FolioLine], page_height: float) -> dict[int, float]:
+    if page_height <= 0:
+        return {}
+    return {line.folio: line.line.bottom / page_height for line in folio_lines if line.in_header}
 
 
 def _confirmed_folios(candidates: list[set[int]]) -> list[tuple[int, int]]:
@@ -205,13 +249,19 @@ def _alternate_sequence_ranges(folio_pages: Iterable[tuple[int, int]]) -> list[t
 
 
 class PrintedPageMap:
-    """Maps printed page numbers to the 1-indexed PDF pages that carry them. Immutable."""
+    """Maps printed page numbers to the 1-indexed PDF pages that carry them. Immutable.
+
+    It also knows where the running header ends on each page whose folio of the book's
+    numbering sequence is printed in it: a page's running header is found from its own
+    folio, wherever the page's top margin puts it.
+    """
 
     def __init__(
         self,
         pdf_page_by_printed: Mapping[int, int],
         page_count: int,
         ambiguous_printed_ranges: Iterable[tuple[int, int]] = (),
+        header_bottom_by_pdf_page: Mapping[int, float] = MappingProxyType({}),
     ) -> None:
         """Create a map.
 
@@ -220,35 +270,50 @@ class PrintedPageMap:
             page_count: Number of pages in the document; lookups never leave 1..page_count.
             ambiguous_printed_ranges: Inclusive printed-page spans also used by another
                 numbering sequence (e.g. a separately numbered appendix); never resolved.
+            header_bottom_by_pdf_page: PDF page -> bottom edge of its running header (as a
+                fraction of the page height), for pages whose detected folio is printed there.
         """
         self._pdf_page_by_printed = dict(pdf_page_by_printed)
         self._sorted_folios = sorted(self._pdf_page_by_printed)
         self._page_count = page_count
         self._ambiguous_printed_ranges = tuple(ambiguous_printed_ranges)
+        self._header_bottom_by_pdf_page = dict(header_bottom_by_pdf_page)
 
     @classmethod
     def from_document(cls, doc: pymupdf.Document) -> "PrintedPageMap":
         """Build the map from the folios printed on every page of ``doc``."""
         candidates = []
+        header_bottoms = []
         for page_idx in range(doc.page_count):
             page = doc[page_idx]
-            candidates.append(
-                page_folio_candidates(page.get_text("dict", flags=_TEXT_ONLY_FLAGS), page.rotation_matrix)
-            )
-        return cls.from_folio_candidates(candidates)
+            page_dict = page.get_text("dict", flags=_TEXT_ONLY_FLAGS)
+            folio_lines = _folio_lines(page_dict, page.rotation_matrix)
+            candidates.append({folio_line.folio for folio_line in folio_lines})
+            # Header positions are unrotated page coordinates (see page_header_folio_bottoms()).
+            page_height = page_dict.get("height", 0)
+            header_bottoms.append({} if page.rotation else _header_folio_bottoms(folio_lines, page_height))
+        return cls.from_folio_candidates(candidates, header_bottoms)
 
     @classmethod
-    def from_folio_candidates(cls, candidates_by_page: Iterable[Collection[int]]) -> "PrintedPageMap":
+    def from_folio_candidates(
+        cls,
+        candidates_by_page: Iterable[Collection[int]],
+        header_bottoms_by_page: Iterable[Mapping[int, float]] = (),
+    ) -> "PrintedPageMap":
         """Build the map from per-page folio candidates, in PDF page order.
 
         Keeps candidates confirmed by a nearby page implying the same offset, then the
         longest run of them increasing in both PDF page and folio: the book's numbering
         sequence. Confirmed detections off that run that form another numbering sequence
         make the printed pages it spans ambiguous; shorter off-run detections are noise. If the sequence covers
-        less than MIN_FOLIO_PAGE_COVERAGE of the pages, the map is left empty.
+        less than MIN_FOLIO_PAGE_COVERAGE of the pages, the map is left empty. A page's
+        running header is known when its folio of that sequence is printed in it.
 
         Args:
             candidates_by_page: Element i holds the folio candidates of PDF page i + 1.
+            header_bottoms_by_page: Element i maps the candidates printed in the running
+                header of PDF page i + 1 to the header's bottom edge (page_header_folio_bottoms()).
+                Without it, no page's running header is known.
         """
         candidates = [set(folios) for folios in candidates_by_page]
         page_count = len(candidates)
@@ -257,11 +322,25 @@ class PrintedPageMap:
         if len(chain) < MIN_FOLIO_PAGE_COVERAGE * page_count:
             return cls({}, page_count)
         off_chain = set(confirmed) - set(chain)
+        header_bottoms = dict(enumerate(header_bottoms_by_page, start=_FIRST_PDF_PAGE))
         return cls(
             {folio: pdf_page for pdf_page, folio in chain},
             page_count,
             _alternate_sequence_ranges(off_chain),
+            {
+                pdf_page: header_bottoms[pdf_page][folio]
+                for pdf_page, folio in chain
+                if folio in header_bottoms.get(pdf_page, {})
+            },
         )
+
+    def running_header_bottom(self, pdf_page: int) -> float | None:
+        """Return where ``pdf_page``'s running header ends, as a fraction of the page height, if known.
+
+        Known for a page whose folio of the book's numbering sequence is printed in its
+        running header; None for other pages (a folio in the footer, an unnumbered page).
+        """
+        return self._header_bottom_by_pdf_page.get(pdf_page)
 
     @property
     def pdf_page_by_printed(self) -> Mapping[int, int]:

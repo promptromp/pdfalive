@@ -12,6 +12,7 @@ from pdfalive.processors.printed_pages import (
     MIN_FOLIO_PAGE_COVERAGE,
     PrintedPageMap,
     page_folio_candidates,
+    page_header_folio_bottoms,
 )
 
 
@@ -162,6 +163,53 @@ class TestPageFolioCandidates:
         assert page_folio_candidates(page_dict) == set()
 
 
+# Where a running header whose top is at HEADER_Y ends: the bottom of its folio's line.
+HEADER_BOTTOM = (HEADER_Y + LINE_HEIGHT) / PAGE_HEIGHT
+
+
+class TestPageHeaderFolioBottoms:
+    """Tests for page_header_folio_bottoms()."""
+
+    @pytest.mark.parametrize(
+        "page_dict,expected",
+        [
+            pytest.param(
+                _page_dict(
+                    _line(HEADER_Y, str(FOLIO)),
+                    _line(HEADER_Y, "8 Running Title", x=RIGHT_X),
+                    *_body_with("Body"),
+                    _line(FOOTER_Y, "Last line"),
+                ),
+                {FOLIO: HEADER_BOTTOM},
+                id="folio-beside-running-title",
+            ),
+            pytest.param(
+                _page_dict(
+                    _line(HEADER_Y - LINE_SPACING, "Downloaded from repository on 1 January"),
+                    _line(HEADER_Y, str(FOLIO)),
+                    *_body_with("Body"),
+                    _line(FOOTER_Y, "Last line"),
+                ),
+                {FOLIO: HEADER_BOTTOM},
+                id="folio-under-a-stamp-line",
+            ),
+            pytest.param(
+                _page_dict(_line(HEADER_Y, "Running title"), *_body_with("Body"), _line(FOOTER_Y, str(FOLIO))),
+                {},
+                id="folio-in-the-footer",
+            ),
+            pytest.param(
+                _page_dict(_line(HEADER_Y, str(FOLIO)), _line(BODY_Y, "Body")),
+                {},
+                id="page-too-short-to-tell-its-header-from-its-footer",
+            ),
+            pytest.param({"blocks": []}, {}, id="no-page-height"),
+        ],
+    )
+    def test_reports_folios_printed_in_the_running_header(self, page_dict, expected):
+        assert page_header_folio_bottoms(page_dict) == pytest.approx(expected)
+
+
 def _consecutive_folios(first_folio: int, count: int) -> list[set[int]]:
     """Candidates for ``count`` consecutive pages numbered from ``first_folio``."""
     return [{first_folio + i} for i in range(count)]
@@ -240,7 +288,35 @@ class TestPrintedPageMapConstruction:
         page_count = int(stray_pages / MIN_FOLIO_PAGE_COVERAGE) + 1
         candidates = _consecutive_folios(1, stray_pages) + [set()] * (page_count - stray_pages)
 
-        assert len(PrintedPageMap.from_folio_candidates(candidates)) == 0
+        header_bottoms = [{folio: HEADER_BOTTOM} for folio in range(1, stray_pages + 1)]
+
+        page_map = PrintedPageMap.from_folio_candidates(candidates, header_bottoms)
+
+        assert len(page_map) == 0
+        assert page_map.running_header_bottom(1) is None
+
+    def test_knows_the_running_header_of_pages_whose_folio_is_printed_in_it(self):
+        """Only folios of the book's numbering sequence mark a running header; footer folios mark none."""
+        first_numbered_page = self.FRONT_MATTER_PAGES + 1
+        footer_folio_page = first_numbered_page + 1
+        stray_header_number = 99  # a chapter number above a page whose folio is in its footer
+        candidates = [set()] * self.FRONT_MATTER_PAGES + _consecutive_folios(1, self.RUN_LENGTH)
+        candidates[footer_folio_page - 1] = candidates[footer_folio_page - 1] | {stray_header_number}
+        header_bottoms: list[dict[int, float]] = [{}] * self.FRONT_MATTER_PAGES + [
+            {folio: HEADER_BOTTOM} for folio in range(1, self.RUN_LENGTH + 1)
+        ]
+        header_bottoms[footer_folio_page - 1] = {stray_header_number: HEADER_BOTTOM}
+
+        page_map = PrintedPageMap.from_folio_candidates(candidates, header_bottoms)
+
+        assert page_map.running_header_bottom(first_numbered_page) == HEADER_BOTTOM
+        assert page_map.running_header_bottom(footer_folio_page) is None
+        assert page_map.running_header_bottom(1) is None
+
+    def test_no_running_headers_without_their_positions(self):
+        page_map = PrintedPageMap.from_folio_candidates(_consecutive_folios(1, self.RUN_LENGTH))
+
+        assert page_map.running_header_bottom(1) is None
 
     def test_keeps_one_folio_per_page(self):
         candidates = [{1}, {2, 3}, {3}, {4}]
@@ -394,3 +470,34 @@ class TestPrintedPageMapFromDocument:
         assert page_map.pdf_page_by_printed == {
             folio: folio + self.FRONT_MATTER_PAGES for folio in range(1, self.NUMBERED_PAGES + 1)
         }
+
+    BODY_LINES = 3
+    ROTATED_FOLIO = 2
+
+    @pytest.fixture
+    def book_with_running_headers(self):
+        """Numbered pages with the folio in a running header above several body lines; one page has /Rotate."""
+        doc = pymupdf.open()
+        for folio in range(1, self.NUMBERED_PAGES + 1):
+            page = doc.new_page()
+            page.insert_text((LEFT_X, HEADER_Y), str(folio))
+            page.insert_text((RIGHT_X - LEFT_X, HEADER_Y), "Running Title")
+            for line in range(self.BODY_LINES):
+                page.insert_text((LEFT_X, BODY_Y + line * LINE_SPACING), "Body text of the page")
+        doc[self.ROTATED_FOLIO - 1].set_rotation(180)
+        yield doc
+        doc.close()
+
+    def test_knows_where_each_running_header_ends(self, book_with_running_headers):
+        """The header ends between the folio's baseline and the first body line, in unrotated page coordinates."""
+        page_map = PrintedPageMap.from_document(book_with_running_headers)
+        page_height = book_with_running_headers[0].rect.height
+        first_body_line_top = (BODY_Y - LINE_HEIGHT) / page_height
+
+        for pdf_page in range(1, self.NUMBERED_PAGES + 1):
+            header_bottom = page_map.running_header_bottom(pdf_page)
+            if pdf_page == self.ROTATED_FOLIO:
+                assert header_bottom is None
+            else:
+                assert header_bottom is not None
+                assert HEADER_Y / page_height <= header_bottom < first_body_line_top
