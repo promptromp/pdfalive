@@ -29,6 +29,8 @@ FOOTER_FOLIO = 7
 HORIZONTAL = (1.0, 0.0)
 VERTICAL = (0.0, -1.0)
 FOLIO = 210
+# FOLIO as some OCR text layers write it: its digits separated by single spaces, in one span.
+LETTER_SPACED_FOLIO = " ".join(str(FOLIO))
 
 
 def _line(y: float, *texts: str, x: float = LEFT_X, direction: tuple[float, float] = HORIZONTAL) -> dict:
@@ -95,6 +97,21 @@ class TestPageFolioCandidates:
                 _page_dict(_line(HEADER_Y, "1", "2"), _line(BODY_Y, "Body")),
                 set(),
                 id="separate-number-spans-are-not-one-number",
+            ),
+            pytest.param(
+                _page_dict(_line(HEADER_Y, LETTER_SPACED_FOLIO), _line(HEADER_Y, "8 Running Title", x=RIGHT_X)),
+                {FOLIO},
+                id="letter-spaced-folio-in-one-span",
+            ),
+            pytest.param(
+                _page_dict(_line(HEADER_Y, f"{LETTER_SPACED_FOLIO} "), _line(BODY_Y, "Body")),
+                {FOLIO},
+                id="letter-spaced-folio-with-trailing-space",
+            ),
+            pytest.param(
+                _page_dict(_line(HEADER_Y, "21 0"), _line(BODY_Y, "Body")),
+                set(),
+                id="numbers-in-one-span-that-are-not-letter-spaced-digits",
             ),
             pytest.param(_page_dict(_line(HEADER_Y, "0"), _line(BODY_Y, "Body")), set(), id="zero-is-not-a-folio"),
             pytest.param(_page_dict(), set(), id="empty-page"),
@@ -191,6 +208,28 @@ class TestPageHeaderFolios:
                 ),
                 {FOLIO: HEADER_BOTTOM},
                 id="folio-under-a-stamp-line",
+            ),
+            pytest.param(
+                _page_dict(
+                    _line(HEADER_Y, str(FOLIO)),
+                    _line(HEADER_Y, "8 Running Title", x=RIGHT_X),
+                    _line(HEADER_Y + LINE_SPACING, LETTER_SPACED_FOLIO),
+                    *_body_with("Body"),
+                    _line(FOOTER_Y, "Last line"),
+                ),
+                {FOLIO: HEADER_BOTTOM},
+                id="the-folio-repeated-in-the-next-row-does-not-extend-the-header",
+            ),
+            pytest.param(
+                _page_dict(
+                    _line(HEADER_Y, str(FOLIO)),
+                    _line(HEADER_Y, "8 Running Title", x=RIGHT_X),
+                    _line(HEADER_Y + LINE_SPACING, str(FOLIO)),
+                    *_body_with("Body"),
+                    _line(FOOTER_Y, "Last line"),
+                ),
+                {FOLIO: HEADER_BOTTOM},
+                id="a-plain-repeat-of-the-folio-does-not-extend-the-header",
             ),
             pytest.param(
                 _page_dict(_line(HEADER_Y, "Running title"), *_body_with("Body"), _line(FOOTER_Y, str(FOLIO))),
@@ -488,16 +527,21 @@ class TestPrintedPageMapFromDocument:
 
     BODY_LINES = 3
 
-    @pytest.fixture
-    def book_with_running_headers(self):
-        """Numbered pages with the folio in a running header above several body lines."""
+    def _book_with_running_headers(self, folio_texts: list[str]) -> pymupdf.Document:
+        """Pages with the given folio texts in a running header above several body lines."""
         doc = pymupdf.open()
-        for folio in range(1, self.NUMBERED_PAGES + 1):
+        for folio_text in folio_texts:
             page = doc.new_page()
-            page.insert_text((LEFT_X, HEADER_Y), str(folio))
+            page.insert_text((LEFT_X, HEADER_Y), folio_text)
             page.insert_text((RIGHT_X - LEFT_X, HEADER_Y), "Running Title")
             for line in range(self.BODY_LINES):
                 page.insert_text((LEFT_X, BODY_Y + line * LINE_SPACING), "Body text of the page")
+        return doc
+
+    @pytest.fixture
+    def book_with_running_headers(self):
+        """Numbered pages with the folio in a running header above several body lines."""
+        doc = self._book_with_running_headers([str(folio) for folio in range(1, self.NUMBERED_PAGES + 1)])
         yield doc
         doc.close()
 
@@ -511,3 +555,17 @@ class TestPrintedPageMapFromDocument:
             header_bottom = page_map.running_header_bottom(pdf_page)
             assert header_bottom is not None
             assert HEADER_Y / page_height <= header_bottom < first_body_line_top
+
+    def test_knows_the_running_header_of_a_page_whose_folio_is_letter_spaced(self):
+        """An OCR text layer writing one page's folio letter-spaced must not leave that page without its header."""
+        letter_spaced_page = self.NUMBERED_PAGES // 2
+        folios = [FOLIO + index for index in range(self.NUMBERED_PAGES)]
+        folio_texts = [
+            " ".join(str(folio)) if pdf_page == letter_spaced_page else str(folio)
+            for pdf_page, folio in enumerate(folios, start=1)
+        ]
+        with self._book_with_running_headers(folio_texts) as doc:
+            page_map = PrintedPageMap.from_document(doc)
+
+        assert page_map.running_header_bottom(letter_spaced_page) is not None
+        assert page_map.running_header_bottom(letter_spaced_page) == page_map.running_header_bottom(1)

@@ -42,6 +42,11 @@ _EDGE_ROWS = 2
 # An Arabic page number; printed numbering starts at 1.
 _FOLIO_NUMBER = r"[1-9]\d{0,3}"
 
+# A span holding only digits separated by single spaces: one letter-spaced number, as
+# some OCR text layers write a folio ("4 4 5" for 445). Digits in separate spans stay
+# separate numbers.
+_LETTER_SPACED_NUMBER = re.compile(r"\d(?: \d)+")
+
 # An edge line that is a folio and nothing else, possibly decorated: "12", "- 12 -",
 # "— 12 —", "[12]", "Page 12". (Numbers sharing a line with a running title are not
 # read: there they are mostly chapter or section numbers.)
@@ -79,6 +84,12 @@ class _TextLine(NamedTuple):
     text: str
 
 
+def _unspaced_number(span_text: str) -> str:
+    """Return a span's text, with a letter-spaced number's digits joined ("4 4 5" -> "445")."""
+    stripped = span_text.strip()
+    return stripped.replace(" ", "") if _LETTER_SPACED_NUMBER.fullmatch(stripped) else span_text
+
+
 def _horizontal_text_lines(page_dict: dict, rotation: pymupdf.Matrix) -> list[_TextLine]:
     """Return the page's non-empty text lines that read horizontally as displayed.
 
@@ -86,7 +97,8 @@ def _horizontal_text_lines(page_dict: dict, rotation: pymupdf.Matrix) -> list[_T
     page with a ``/Rotate`` entry is judged as it is displayed. Tilted lines (e.g. a
     vertical or diagonal watermark) are skipped: their extent spans much of the page and
     says nothing about where a folio sits. Spans are joined with spaces, as OCR text
-    layers put each word in its own span.
+    layers put each word in its own span; a span that is one letter-spaced number
+    loses its inner spaces.
     """
     linear = pymupdf.Matrix(rotation.a, rotation.b, rotation.c, rotation.d, 0, 0)
     lines = []
@@ -96,7 +108,7 @@ def _horizontal_text_lines(page_dict: dict, rotation: pymupdf.Matrix) -> list[_T
             if direction.x <= 0 or abs(direction.y) > _MAX_HORIZONTAL_TILT * abs(direction):
                 continue
             spans = [span for span in line.get("spans", []) if span.get("bbox")]
-            text = " ".join(span.get("text", "") for span in spans).strip()
+            text = " ".join(_unspaced_number(span.get("text", "")) for span in spans).strip()
             if text:
                 rects = [pymupdf.Rect(span["bbox"]) * rotation for span in spans]
                 lines.append(_TextLine(top=min(r.y0 for r in rects), bottom=max(r.y1 for r in rects), text=text))
@@ -160,11 +172,12 @@ def page_folios(page_dict: dict, rotation: pymupdf.Matrix = pymupdf.Identity) ->
     text rather than at fixed y-positions, because page margins vary widely between PDFs.
 
     A candidate is in the running header when its line is among the page's top rows and
-    not also among its bottom rows (a page of few rows has no header to tell apart); the
-    header ends with the bottom edge of the folio's line, as the running title shares the
-    folio's row and the page's text below it starts lower. Header positions are unrotated
-    page coordinates, as the TOC generator reads them, so a page displayed rotated (any
-    ``rotation`` but the identity) reports none.
+    not also among its bottom rows (a page of few rows has no header to tell apart). The
+    header ends with the bottom edge of the folio's line (the topmost, should the number
+    recur among the top rows), as the running title shares the folio's row and the page's
+    text below it starts lower. Header positions are unrotated page coordinates, as the
+    TOC generator reads them, so a page displayed rotated (any ``rotation`` but the
+    identity) reports none.
 
     Args:
         page_dict: The page's ``get_text("dict")`` structure.
@@ -172,15 +185,15 @@ def page_folios(page_dict: dict, rotation: pymupdf.Matrix = pymupdf.Identity) ->
     """
     folio_lines = _folio_lines(page_dict, rotation)
     page_height = page_dict.get("height", 0)
-    reports_header = tuple(rotation) == _UNROTATED and page_height > 0
-    return PageFolios(
-        candidates={folio_line.folio for folio_line in folio_lines},
-        header_bottoms={
-            folio_line.folio: folio_line.line.bottom / page_height
-            for folio_line in folio_lines
-            if reports_header and folio_line.in_header
-        },
-    )
+    header_bottoms: dict[int, float] = {}
+    if tuple(rotation) == _UNROTATED and page_height > 0:
+        for folio_line in folio_lines:
+            if folio_line.in_header:
+                bottom = folio_line.line.bottom / page_height
+                # The header ends at the topmost line showing the folio; the same number
+                # lower down (a figure's axis label) is page content.
+                header_bottoms[folio_line.folio] = min(bottom, header_bottoms.get(folio_line.folio, bottom))
+    return PageFolios(candidates={folio_line.folio for folio_line in folio_lines}, header_bottoms=header_bottoms)
 
 
 def _confirmed_folios(candidates: list[set[int]]) -> list[tuple[int, int]]:
