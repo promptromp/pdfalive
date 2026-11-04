@@ -172,12 +172,12 @@ def page_folios(page_dict: dict, rotation: pymupdf.Matrix = pymupdf.Identity) ->
     text rather than at fixed y-positions, because page margins vary widely between PDFs.
 
     A candidate is in the running header when its line is among the page's top rows and
-    not also among its bottom rows (a page of few rows has no header to tell apart); the
+    not also among its bottom rows (a page of few rows has no header to tell apart). The
     header ends with the bottom edge of the folio's line (the topmost, should the number
-    recur among those rows), as the running title shares the folio's row and the page's
-    text below it starts lower. Header positions are unrotated
-    page coordinates, as the TOC generator reads them, so a page displayed rotated (any
-    ``rotation`` but the identity) reports none.
+    recur among the top rows), as the running title shares the folio's row and the page's
+    text below it starts lower. Header positions are unrotated page coordinates, as the
+    TOC generator reads them, so a page displayed rotated (any ``rotation`` but the
+    identity) reports none.
 
     Args:
         page_dict: The page's ``get_text("dict")`` structure.

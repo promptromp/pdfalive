@@ -221,6 +221,17 @@ class TestPageHeaderFolios:
                 id="the-folio-repeated-in-the-next-row-does-not-extend-the-header",
             ),
             pytest.param(
+                _page_dict(
+                    _line(HEADER_Y, str(FOLIO)),
+                    _line(HEADER_Y, "8 Running Title", x=RIGHT_X),
+                    _line(HEADER_Y + LINE_SPACING, str(FOLIO)),
+                    *_body_with("Body"),
+                    _line(FOOTER_Y, "Last line"),
+                ),
+                {FOLIO: HEADER_BOTTOM},
+                id="a-plain-repeat-of-the-folio-does-not-extend-the-header",
+            ),
+            pytest.param(
                 _page_dict(_line(HEADER_Y, "Running title"), *_body_with("Body"), _line(FOOTER_Y, str(FOLIO))),
                 {},
                 id="folio-in-the-footer",
