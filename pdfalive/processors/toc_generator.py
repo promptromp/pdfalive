@@ -290,6 +290,53 @@ def _offset_keys_match(left_key: str, right_key: str) -> bool:
     return shorter in longer and len(shorter) / len(longer) >= _FUZZY_MIN_COVERAGE_RATIO
 
 
+# A dotted section number as a text layer may print it at the start of a heading: its
+# digits letter-spaced ("2 4 .2" for 24.2), its digit groups joined by a dot, by spaces
+# or by nothing ("2.3", "2 . 3", "23"). Spans joined with spaces and letter-spaced type
+# print it spaced out, and OCR drops its dots, the smallest glyphs on the line.
+_SECTION_NUMBER_DIGIT_SEPARATOR = r"\s*"
+_SECTION_NUMBER_GROUP_SEPARATOR = r"\s*\.?\s*"
+# The printed number must not run on into a further number ("231" is not 2.3), except
+# into the number the title's own text starts with ("2" in "4.2 2-Forms").
+_NO_FURTHER_NUMBER = rf"(?!{_SECTION_NUMBER_GROUP_SEPARATOR}\d+\b)"
+_TITLE_NUMBER_TEMPLATE = r"(?=\s*{number}(?!\d))"
+
+
+@dataclass(frozen=True)
+class _PrintedSectionNumber:
+    """A title's dotted section number, and how a text layer may print it at the start of a heading.
+
+    ``as_written()`` rewrites a candidate starting with the number printed spaced out
+    or without its separators to start with the number as written, so the heading
+    matches as if it had been printed that way.
+    """
+
+    written: str
+    printed: re.Pattern[str]
+
+    @classmethod
+    def of(cls, title: str) -> "_PrintedSectionNumber | None":
+        """The section number a matching-form title starts with, or None when it starts with none."""
+        match = _SECTION_PREFIX_PATTERN.match(title)
+        if match is None:
+            return None
+        written = match.group(1)
+        digit_groups = _SECTION_NUMBER_GROUP_SEPARATOR.join(
+            _SECTION_NUMBER_DIGIT_SEPARATOR.join(re.escape(digit) for digit in group) for group in written.split(".")
+        )
+        title_number = _extract_leading_number(title[match.end() :])
+        ending = (
+            _NO_FURTHER_NUMBER
+            if title_number is None
+            else f"(?:{_TITLE_NUMBER_TEMPLATE.format(number=title_number)}|{_NO_FURTHER_NUMBER})"
+        )
+        return cls(written=written, printed=re.compile(rf"^\s*{digit_groups}{ending}"))
+
+    def as_written(self, candidate: str) -> str:
+        """The candidate, a leading printing of the number replaced by the number as written."""
+        return self.printed.sub(self.written, candidate, count=1)
+
+
 @dataclass(frozen=True)
 class _HeadingTitle:
     """A TOC title prepared once: every key the corrections compare it by.
@@ -303,6 +350,7 @@ class _HeadingTitle:
     numbers: tuple[str, ...]
     section_prefix: str | None
     title_key: str
+    printed_section_number: _PrintedSectionNumber | None
 
     @classmethod
     def of(cls, title: str) -> "_HeadingTitle":
@@ -316,6 +364,7 @@ class _HeadingTitle:
             numbers=tuple(_NUMBER_PATTERN.findall(compared)),
             section_prefix=_extract_section_prefix(compared),
             title_key=strip_punctuation(compared),
+            printed_section_number=_PrintedSectionNumber.of(compared),
         )
 
     @property
@@ -342,10 +391,17 @@ class _HeadingTitle:
           title's numbering — block "34. Differential forms" must not satisfy a
           title designated chapter 7.
 
+        In both modes a title with a dotted section number ("2.3") needs the
+        candidate to carry it as a whole number, as written. A candidate starting
+        with the number printed spaced out ("2 . 3") or without its separators
+        ("23") is read as if it had been printed as written.
+
         The default (unanchored) mode keeps loose containment for presence checks
         over large text spans (whole pages, page zones).
         """
         candidate = matching_form(candidate_text)
+        if self.printed_section_number is not None:
+            candidate = self.printed_section_number.as_written(candidate)
         candidate_key = _snippet_key(candidate)
         if len(candidate_key) < _HEADING_MIN_LENGTH:
             return False
