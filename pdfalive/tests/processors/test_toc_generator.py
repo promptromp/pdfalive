@@ -5077,8 +5077,8 @@ class TestSectionPrefixWholeNumber:
         assert heading.matches(f"{candidate_number} {self.SECTION_TITLE}", anchored=anchored) is expected
 
 
-class TestSectionNumberAsOcrPrintsIt:
-    """A candidate may start with its section number as OCR prints it: spaced out or without separators."""
+class TestSectionNumberPrintedSpacedOrWithoutSeparators:
+    """A candidate starting with its section number spaced out or without separators reads as if printed as written."""
 
     SECTION_TITLE = "Fixed Point Iteration"
 
@@ -5098,13 +5098,15 @@ class TestSectionNumberAsOcrPrintsIt:
             ("2.3", "231", False),
             ("2.3.1", "23", False),
             ("2.3", "24", False),
+            ("2.3", "2 3 1", False),
+            ("1.1", "1 1 0", False),
             # A number printed with separators is read as written.
             ("1.11", "11.1", False),
             # Without separators the digits cannot tell section 1.1 from a chapter 11: the title decides.
             ("1.1", "11", True),
         ],
     )
-    def test_reads_section_number_printed_by_ocr(
+    def test_reads_section_number_printed_spaced_or_without_separators(
         self, title_number: str, printed_number: str, expected: bool, anchored: bool
     ) -> None:
         heading = _HeadingTitle.of(f"{title_number} {self.SECTION_TITLE}")
@@ -5122,10 +5124,19 @@ class TestSectionNumberAsOcrPrintsIt:
 
     @pytest.mark.parametrize("anchored", [True, False])
     @pytest.mark.parametrize("printed_number", ["3.1", "31", "3 . 1"])
-    def test_title_starting_with_a_digit_is_no_part_of_the_number(self, printed_number: str, anchored: bool) -> None:
-        heading = _HeadingTitle.of("3.1 2D Transforms")
+    @pytest.mark.parametrize("title_text", ["2D Transforms", "2-Forms on Surfaces", "2 x 2 Matrices"])
+    def test_number_the_title_starts_with_is_no_part_of_the_section_number(
+        self, title_text: str, printed_number: str, anchored: bool
+    ) -> None:
+        heading = _HeadingTitle.of(f"3.1 {title_text}")
 
-        assert heading.matches(f"{printed_number} 2D Transforms", anchored=anchored) is True
+        assert heading.matches(f"{printed_number} {title_text}", anchored=anchored) is True
+
+    @pytest.mark.parametrize("anchored", [True, False])
+    def test_title_number_does_not_let_a_further_number_run_on(self, anchored: bool) -> None:
+        heading = _HeadingTitle.of("2.3 1-Forms")
+
+        assert heading.matches("231-Forms", anchored=anchored) is False
 
     def test_number_without_separators_counts_only_at_the_start(self) -> None:
         heading = _HeadingTitle.of(f"2.3 {self.SECTION_TITLE}")
