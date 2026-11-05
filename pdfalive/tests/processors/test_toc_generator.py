@@ -4320,6 +4320,19 @@ class TestPageHasHeadingInBottom:
         generator = TOCGenerator(mock_doc, mock_llm)
         assert generator._page_has_heading_in_bottom(1, _HeadingTitle.of("Precision and Accuracy")) is False
 
+    def test_finds_heading_whose_section_number_ocr_printed_without_separators(self, mock_doc, mock_llm):
+        """A scanned "32 ..." heading in the bottom portion is section 3.2's."""
+        title = "Precision and Accuracy"
+        page = self._make_page(
+            [
+                {"type": 0, "lines": [{"spans": [{"text": f"32 {title}", "bbox": (50, 520, 400, 540)}]}]},
+            ]
+        )
+        mock_doc.__getitem__ = lambda self, idx: page
+
+        generator = TOCGenerator(mock_doc, mock_llm)
+        assert generator._page_has_heading_in_bottom(1, _HeadingTitle.of(f"3.2 {title}")) is True
+
     def test_returns_false_for_out_of_range_page(self, mock_doc, mock_llm):
         """Returns False for page numbers out of document range."""
         generator = TOCGenerator(mock_doc, mock_llm)
@@ -4457,6 +4470,22 @@ class TestFindHeadingPage:
         gen = TOCGenerator(mock_doc, mock_llm)
         result = gen._find_heading_page(_HeadingTitle.of("Numerical Differentiation"), 1, 3)
         assert result == 2
+
+    def test_finds_heading_whose_section_number_ocr_printed_without_separators(self, mock_doc, mock_llm):
+        """A scanned "23 ..." heading is section 2.3's, found ahead of the next page's running header naming it."""
+        title = "Fixed Point Iteration"
+        heading_page = self._make_page([self._text_block(0.30, f"23 {title}")])
+        header_page = self._make_page(
+            [
+                self._text_block(0.04, f"2.3 {title.upper()}"),  # running header
+                self._text_block(0.20, "Other body text here"),
+            ]
+        )
+        mock_doc.__getitem__ = lambda _, idx: heading_page if idx == 0 else header_page
+
+        gen = TOCGenerator(mock_doc, mock_llm)
+        result = gen._find_heading_page(_HeadingTitle.of(f"2.3 {title}"), 1, 3, hint_page=2)
+        assert result == 1
 
     def test_returns_none_for_empty_range(self, mock_doc, mock_llm):
         """Returns None when search range is empty."""
@@ -5046,6 +5075,62 @@ class TestSectionPrefixWholeNumber:
         heading = _HeadingTitle.of(f"{title_number} {self.SECTION_TITLE}")
 
         assert heading.matches(f"{candidate_number} {self.SECTION_TITLE}", anchored=anchored) is expected
+
+
+class TestSectionNumberAsOcrPrintsIt:
+    """A candidate may start with its section number as OCR prints it: spaced out or without separators."""
+
+    SECTION_TITLE = "Fixed Point Iteration"
+
+    @pytest.mark.parametrize("anchored", [True, False])
+    @pytest.mark.parametrize(
+        ("title_number", "printed_number", "expected"),
+        [
+            ("2.3", "23", True),
+            ("2.3", "2 . 3", True),
+            ("2.3", "2 3", True),
+            ("2.3.1", "231", True),
+            ("2.3.1", "2 .3 .1", True),
+            # Letter-spaced digits.
+            ("24.2", "2 4 .2", True),
+            ("1.10.1", "1 . 1 0 . 1", True),
+            # The digits are compared whole: no number lies inside another.
+            ("2.3", "231", False),
+            ("2.3.1", "23", False),
+            ("2.3", "24", False),
+            # A number printed with separators is read as written.
+            ("1.11", "11.1", False),
+            # Without separators the digits cannot tell section 1.1 from a chapter 11: the title decides.
+            ("1.1", "11", True),
+        ],
+    )
+    def test_reads_section_number_printed_by_ocr(
+        self, title_number: str, printed_number: str, expected: bool, anchored: bool
+    ) -> None:
+        heading = _HeadingTitle.of(f"{title_number} {self.SECTION_TITLE}")
+
+        assert heading.matches(f"{printed_number} {self.SECTION_TITLE}", anchored=anchored) is expected
+
+    @pytest.mark.parametrize("anchored", [True, False])
+    @pytest.mark.parametrize("printed_number", ["2.3", "23", "2 . 3", "2 3"])
+    def test_reads_printed_number_before_a_heading_shorter_than_the_title(
+        self, printed_number: str, anchored: bool
+    ) -> None:
+        heading = _HeadingTitle.of(f"2.3 {self.SECTION_TITLE} Methods")
+
+        assert heading.matches(f"{printed_number} {self.SECTION_TITLE}", anchored=anchored) is True
+
+    @pytest.mark.parametrize("anchored", [True, False])
+    @pytest.mark.parametrize("printed_number", ["3.1", "31", "3 . 1"])
+    def test_title_starting_with_a_digit_is_no_part_of_the_number(self, printed_number: str, anchored: bool) -> None:
+        heading = _HeadingTitle.of("3.1 2D Transforms")
+
+        assert heading.matches(f"{printed_number} 2D Transforms", anchored=anchored) is True
+
+    def test_number_without_separators_counts_only_at_the_start(self) -> None:
+        heading = _HeadingTitle.of(f"2.3 {self.SECTION_TITLE}")
+
+        assert heading.matches(f"As in step 23 {self.SECTION_TITLE}") is False
 
 
 class TestFuzzyRestorePrefixAlignment:

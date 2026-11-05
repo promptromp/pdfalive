@@ -250,6 +250,25 @@ def _contains_whole_number(text: str, number: str) -> bool:
     return re.search(_WHOLE_NUMBER_PATTERN_TEMPLATE.format(number=re.escape(number)), text) is not None
 
 
+# A dotted section number as a text layer may print it at the start of a heading: its
+# digits letter-spaced ("2 4 .2" for 24.2), its digit groups joined by a dot, by spaces
+# or by nothing ("2.3", "2 . 3", "23"). Spans joined with spaces and letter-spaced type
+# print it spaced out, and OCR drops its dots, the smallest glyphs on the line. The
+# number must not run on into a further number ("231" is not 2.3); a digit starting a
+# word of the title ("2D") is no number.
+_SECTION_NUMBER_DIGIT_SEPARATOR = r"\s*"
+_SECTION_NUMBER_GROUP_SEPARATOR = r"\s*\.?\s*"
+_PRINTED_SECTION_NUMBER_TEMPLATE = r"^\s*{groups}(?!" + _SECTION_NUMBER_GROUP_SEPARATOR + r"\d+\b)"
+
+
+def _printed_section_number_pattern(number: str) -> re.Pattern[str]:
+    """Pattern for a text starting with the dotted ``number`` printed spaced out or without its separators."""
+    groups = _SECTION_NUMBER_GROUP_SEPARATOR.join(
+        _SECTION_NUMBER_DIGIT_SEPARATOR.join(re.escape(digit) for digit in group) for group in number.split(".")
+    )
+    return re.compile(_PRINTED_SECTION_NUMBER_TEMPLATE.format(groups=groups))
+
+
 # Leading designator tokens in normalized (punctuation-free, lowercased) titles:
 # bare numbers ("34", "1 2") and label words with an optional short identifier
 # ("chapter 7", "appendix b", "part iii", or a bare "chapter" when OCR loses
@@ -303,6 +322,9 @@ class _HeadingTitle:
     numbers: tuple[str, ...]
     section_prefix: str | None
     title_key: str
+    # A candidate starting with the section number printed spaced out or without its
+    # separators (_printed_section_number_pattern()); None for a title without one.
+    printed_section_number: re.Pattern[str] | None
 
     @classmethod
     def of(cls, title: str) -> "_HeadingTitle":
@@ -311,11 +333,13 @@ class _HeadingTitle:
         without_appendix_prefix = _APPENDIX_PREFIX_PATTERN.sub("", compared).strip()
         if without_appendix_prefix != compared:
             search_keys.append(_snippet_key(without_appendix_prefix))
+        section_prefix = _extract_section_prefix(compared)
         return cls(
             search_keys=tuple(search_keys),
             numbers=tuple(_NUMBER_PATTERN.findall(compared)),
-            section_prefix=_extract_section_prefix(compared),
+            section_prefix=section_prefix,
             title_key=strip_punctuation(compared),
+            printed_section_number=None if section_prefix is None else _printed_section_number_pattern(section_prefix),
         )
 
     @property
@@ -342,10 +366,15 @@ class _HeadingTitle:
           title's numbering — block "34. Differential forms" must not satisfy a
           title designated chapter 7.
 
+        In both modes a title with a dotted section number ("2.3") needs the
+        candidate to carry it as a whole number, as written. A candidate starting
+        with the number printed spaced out ("2 . 3") or without its separators
+        ("23") is read as if it had been printed as written.
+
         The default (unanchored) mode keeps loose containment for presence checks
         over large text spans (whole pages, page zones).
         """
-        candidate = matching_form(candidate_text)
+        candidate = self._with_section_number_as_written(matching_form(candidate_text))
         candidate_key = _snippet_key(candidate)
         if len(candidate_key) < _HEADING_MIN_LENGTH:
             return False
@@ -368,6 +397,12 @@ class _HeadingTitle:
         if self.section_prefix is None:
             return True
         return _contains_whole_number(_numbering_key(candidate), self.section_prefix)
+
+    def _with_section_number_as_written(self, candidate: str) -> str:
+        """The candidate, a leading printing of the title's section number replaced by the number as written."""
+        if self.section_prefix is None or self.printed_section_number is None:
+            return candidate
+        return self.printed_section_number.sub(self.section_prefix, candidate, count=1)
 
     @staticmethod
     def _search_key_matches(
