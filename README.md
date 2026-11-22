@@ -95,10 +95,10 @@ The accepted levels vary by model, not just by provider: `gpt-6-sol` and `gpt-6-
 OCR is enabled by default. Scanned documents without extractable text are automatically detected and processed:
 
 ```bash
-# Default: OCR text layer discarded after TOC generation (preserves file size)
+# Default: OCR text used for TOC generation only; the output gets the bookmarks
 pdfalive generate-toc scanned.pdf output.pdf
 
-# Include OCR text layer in output (makes PDF searchable)
+# Also keep the OCR text layer in the output (makes the PDF searchable, as extract-text does)
 pdfalive generate-toc --ocr-output scanned.pdf output.pdf
 
 # Disable automatic OCR entirely
@@ -133,7 +133,7 @@ Page numbers taken from a printed TOC are converted to PDF pages using the page 
 
 ### extract-text
 
-Extract text from scanned PDFs using OCR and save to a new PDF with an embedded text layer:
+Add an OCR text layer to a scanned PDF, making its text searchable, selectable and extractable (by PDF viewers, search tools, and the text extractors LLM pipelines read PDFs with):
 
 ```bash
 pdfalive extract-text input.pdf output.pdf
@@ -142,14 +142,16 @@ pdfalive extract-text input.pdf output.pdf
 pdfalive extract-text --inplace input.pdf
 ```
 
-This creates a searchable/selectable PDF without generating a TOC.
+The recognized text is laid invisibly over each page that has no text, where its words are shown. Nothing else changes: the page images, page sizes, links, bookmarks and metadata stay as they are, so the file looks the same and grows only by the text. No TOC is generated.
+
+A page with any text at all, even a single stamped line such as a download notice, is left alone, since OCR text would repeat its own. Use `--force` to OCR every page anyway; pages with text then carry both their own text and the recognized text.
 
 **Options:**
 
 | Option | Description |
 |--------|-------------|
 | `--inplace` | Modify the input file in place instead of creating a new output file |
-| `--force` | Force OCR even if document already has text |
+| `--force` | OCR every page, even when the document already has text (pages with text then get the recognized text in addition to their own) |
 | `--ocr-language` | Set OCR language (default: `eng`) |
 | `--ocr-dpi` | DPI resolution for OCR processing (default: 300) |
 

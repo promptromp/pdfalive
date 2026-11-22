@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+import pymupdf
 import pytest
 from langchain_core.exceptions import OutputParserException
 from langsmith import utils as langsmith_utils
@@ -16,6 +17,7 @@ from pdfalive.console import TerminalConsole
 from pdfalive.evaluation.metrics import GoldenEntry
 from pdfalive.models.rename import RenameOp
 from pdfalive.models.toc import TOC, TOCEntry
+from pdfalive.tests.scanned_pages import BOOKMARKS, TITLE, scan_page, text_page
 
 
 # Environment variables langsmith reads to decide whether to trace, in lookup order.
@@ -325,3 +327,27 @@ def make_toc(make_toc_entry: Callable[..., TOCEntry]) -> Callable[..., TOC]:
         return TOC(entries=[make_toc_entry(title=t, page_number=p, level=lvl) for t, p, lvl in specs])
 
     return _make
+
+
+@pytest.fixture
+def scanned_pdf(tmp_path: Path) -> Path:
+    """A two-page PDF of page images showing SHOWN_WORDS, with no text, bookmarks and a title."""
+    path = tmp_path / "scanned.pdf"
+    with pymupdf.open() as doc:
+        for _ in BOOKMARKS:
+            scan_page(doc)
+        doc.set_toc(BOOKMARKS)
+        doc.set_metadata({"title": TITLE})
+        doc.save(path)
+    return path
+
+
+@pytest.fixture
+def mixed_pdf(tmp_path: Path) -> Path:
+    """A PDF whose first page has text and whose second is a page image."""
+    path = tmp_path / "mixed.pdf"
+    with pymupdf.open() as doc:
+        text_page(doc)
+        scan_page(doc)
+        doc.save(path)
+    return path

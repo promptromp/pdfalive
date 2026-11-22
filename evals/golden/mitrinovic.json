@@ -3,7 +3,7 @@
   "source_pdf": "data/ocr/mitrinovic.pdf",
   "book_title": "Analytic Inequalities by D.S. Mitrinovic",
   "postprocess": true,
-  "description": "Golden seeded from pre-existing bookmarks and checked against the page text: every entry's heading line is on its page. One bookmark, which pointed at the running header on the page after its heading, was corrected. Scanned book: pipeline runs against a locally pre-OCRed copy (recreate via: pdfalive extract-text data/mitrinovic.pdf data/ocr/mitrinovic.pdf).",
+  "description": "Golden seeded from pre-existing bookmarks and checked against the page text: every entry's heading line is on its page. One bookmark, which pointed at the running header on the page after its heading, was corrected. Scanned book: pipeline runs against a locally pre-OCRed copy (made via: pdfalive extract-text data/mitrinovic.pdf data/ocr/mitrinovic.pdf, before extract-text kept the original pages; a copy made with the current extract-text has its pages in points rather than render units, so its prompts differ and the cassette must be re-recorded against it).",
   "entries": [
     {
       "level": 1,

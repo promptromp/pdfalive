@@ -467,6 +467,21 @@ class _HeadingTitle:
         return is_sub_phrase and (candidate_consistent or not anchored)
 
 
+def check_no_existing_toc(doc: pymupdf.Document, force: bool) -> None:
+    """Refuse to replace a document's existing table of contents unless forced.
+
+    Args:
+        doc: PyMuPDF Document to generate a TOC for.
+        force: Whether replacing an existing TOC was asked for.
+
+    Raises:
+        ValueError: If the document has a TOC and force is False.
+    """
+    if doc.get_toc() and not force:
+        # TODO: can also use any existing toc to guide LLM generation.
+        raise ValueError("The input document already has a Table of Contents. Use `--force` to force TOC generation.")
+
+
 def apply_toc_to_document(doc: pymupdf.Document, toc: list, output_file: str) -> None:
     """Apply a TOC (bookmarks) to a document and save it.
 
@@ -1419,11 +1434,7 @@ class TOCGenerator:
         Raises:
             ValueError: If document has existing TOC and force=False.
         """
-        if self._check_for_existing_toc() and not force:
-            # TODO: can also use any existing toc to guide LLM generation.
-            raise ValueError(
-                "The input document already has a Table of Contents. Use `--force` to force TOC generation."
-            )
+        check_no_existing_toc(self.doc, force)
 
         result = self.generate(request_delay=request_delay, postprocess=postprocess)
         self.doc.set_toc(result.toc.to_list())
@@ -1504,10 +1515,6 @@ class TOCGenerator:
         if schema not in self._structured_models:
             self._structured_models[schema] = self.llm.with_structured_output(schema, include_raw=True)
         return self._structured_models[schema]
-
-    def _check_for_existing_toc(self) -> list:
-        """Check if the document already has a TOC."""
-        return self.doc.get_toc()
 
     def _report_dropped_entries(self, dropped: list[TOCEntry]) -> None:
         """Warn about entries dropped for pointing outside the document, naming a capped number of them."""

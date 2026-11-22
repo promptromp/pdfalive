@@ -29,6 +29,7 @@ from pdfalive.processors.toc_generator import (
     DEFAULT_REQUEST_DELAY_SECONDS,
     TOCGenerator,
     apply_toc_to_document,
+    check_no_existing_toc,
 )
 from pdfalive.retry import LLMCallError
 from pdfalive.tokens import TokenUsage
@@ -394,6 +395,11 @@ def generate_toc(
         console.print(safe_text("  Options: ", (", ".join(options_parts), "cyan")))
 
         doc = pymupdf.open(input_file)
+        # Checked before OCR as well as by TOCGenerator.run(), so OCR is not done in vain
+        try:
+            check_no_existing_toc(doc, force)
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
         original_doc = None  # Keep reference to original if we need to discard OCR
         performed_ocr = False
 
@@ -471,7 +477,8 @@ def generate_toc(
     "--force",
     is_flag=True,
     default=False,
-    help="Force OCR even if document already has text.",
+    help="OCR every page, even when the document already has text "
+    "(pages with text then get the recognized text in addition to their own).",
 )
 @click.option(
     "--inplace",
@@ -488,7 +495,11 @@ def extract_text(
     force: bool,
     inplace: bool,
 ) -> None:
-    """Extract text from a PDF using OCR and save to a new PDF with text layer."""
+    """Add an OCR text layer to a scanned PDF, making its text searchable and extractable.
+
+    The recognized text is laid invisibly over each page without text; the pages, bookmarks
+    and metadata are otherwise kept as they are.
+    """
     _check_output_choice(output_file, inplace)
 
     with _output_destination(input_file, output_file) as actual_output_file:
@@ -506,23 +517,16 @@ def extract_text(
 
         doc = pymupdf.open(input_file)
 
-        ocr_processor = OCRProcessor(
-            detection_strategy=NoTextDetectionStrategy(),
-            language=ocr_language,
-            dpi=ocr_dpi,
-        )
+        ocr_processor = OCRProcessor(language=ocr_language, dpi=ocr_dpi, include_pages_with_text=force)
+        # Every page without text is OCR'd, however much of the document has text
+        page_indices = ocr_processor.pages_to_ocr(doc)
 
-        needs_ocr = ocr_processor.needs_ocr(doc)
-        console.print(f"  OCR detection: document {'needs' if needs_ocr else 'does not need'} OCR")
-
-        if needs_ocr or force:
-            if needs_ocr:
-                console.print("Insufficient text detected in PDF. Performing OCR...", style="yellow")
-            else:
-                console.print("Force OCR enabled. Performing OCR...", style="yellow")
+        if page_indices:
+            if force:
+                console.print("Force OCR enabled. Performing OCR on every page...", style="yellow")
 
             # process_in_memory returns a NEW document with OCR text layer
-            ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True)
+            ocr_doc = ocr_processor.process_in_memory(doc, show_progress=True, page_indices=page_indices)
             doc.close()
             console.print("OCR completed.", style="green")
 
@@ -536,8 +540,8 @@ def extract_text(
             console.print(_done_line(input_file if inplace else actual_output_file, inplace))
         else:
             doc.close()
-            console.print("Document already has sufficient extractable text. No OCR needed.", style="green")
-            console.print("Use --force to process anyway.")
+            console.print("Every page already has text. No OCR needed.", style="green")
+            console.print("Use --force to OCR every page anyway, adding the recognized text to each page's own.")
 
 
 @cli.command("eval")

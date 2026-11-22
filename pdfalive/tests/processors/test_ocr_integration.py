@@ -3,13 +3,14 @@
 from collections.abc import Generator
 from importlib import resources
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pymupdf
 import pytest
 
 from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
-from pdfalive.processors.toc_generator import apply_toc_to_document
+from pdfalive.processors.toc_generator import TOCGenerator, apply_toc_to_document
 from pdfalive.tests import fixtures
 
 
@@ -114,6 +115,17 @@ class TestOCRIntegration:
         assert len(final_text) > len(initial_text), (
             f"Expected text after OCR ({len(final_text)} chars) to be greater than before ({len(initial_text)} chars)"
         )
+
+    def test_toc_features_read_the_ocr_text_as_ocr_lines(self, example_pdf_path: Path):
+        """TOC generation recognizes the text layer the OCR processor adds as OCR text (whole lines)."""
+        with pymupdf.open(str(example_pdf_path)) as doc:
+            ocr_doc = OCRProcessor(language="eng", dpi=150, num_processes=1).process_in_memory(doc, show_progress=False)
+
+        features = TOCGenerator(doc=ocr_doc, llm=MagicMock())._extract_features(ocr_doc, show_progress=False)
+
+        spans = [span for block in features for line in block for span in line]
+        assert spans
+        assert all(span.is_ocr_line for span in spans)
 
 
 class TestNoOcrOutputFlag:

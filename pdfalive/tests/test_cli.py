@@ -30,6 +30,7 @@ from pdfalive.models.rename import FIRST_FILE_ID, RenameOp, RenameResult
 from pdfalive.models.toc import TOCEntry
 from pdfalive.processors.rename_processor import REJECTED_PATH, REJECTED_UNKNOWN_INPUT, RenameProcessor
 from pdfalive.retry import LLMCallError
+from pdfalive.tests.scanned_pages import BOOKMARKS, OCR_DPI, ocr_word_boxes
 from pdfalive.tokens import TokenUsage
 
 
@@ -1621,3 +1622,84 @@ class TestShowTokenUsageFlag:
 
         assert result.exit_code == 0, result.output
         assert (TOKEN_USAGE_HEADING in cli_console.export_text()) is shown
+
+
+class TestOcrOptions:
+    """How generate-toc and extract-text drive OCR (real OCR on small synthetic scans)."""
+
+    OCR_DPI_ARGS = ("--ocr-dpi", str(OCR_DPI))
+
+    @patch("pdfalive.cli.TOCGenerator")
+    @patch("pdfalive.cli.build_chat_model")
+    @patch("pdfalive.cli.OCRProcessor")
+    def test_generate_toc_refuses_existing_bookmarks_before_ocr(
+        self,
+        mock_ocr_cls: MagicMock,
+        mock_build_chat_model: MagicMock,
+        mock_toc_cls: MagicMock,
+        runner: CliRunner,
+        scanned_pdf: Path,
+        tmp_path: Path,
+    ) -> None:
+        """OCR keeps a scan's bookmarks, so the existing-TOC check would otherwise fail only after OCR."""
+        result = runner.invoke(cli, ["generate-toc", str(scanned_pdf), str(tmp_path / "output.pdf")])
+
+        assert result.exit_code == 1
+        assert "already has a Table of Contents" in result.output
+        mock_ocr_cls.return_value.needs_ocr.assert_not_called()
+        mock_ocr_cls.return_value.process_in_memory.assert_not_called()
+        mock_toc_cls.return_value.run.assert_not_called()
+
+    @patch("pdfalive.cli.TOCGenerator")
+    @patch("pdfalive.cli.build_chat_model")
+    def test_generate_toc_with_force_generates_from_the_ocr_text_of_a_bookmarked_scan(
+        self,
+        mock_build_chat_model: MagicMock,
+        mock_toc_cls: MagicMock,
+        runner: CliRunner,
+        scanned_pdf: Path,
+        tmp_path: Path,
+    ) -> None:
+        seen: dict[str, Any] = {}
+
+        def record_document(*, doc: pymupdf.Document, llm: Any) -> MagicMock:
+            """What the TOC generator is given (the command closes the document afterwards)."""
+            seen["toc"], seen["ocr_pages"] = doc.get_toc(), [bool(ocr_word_boxes(page)) for page in doc]
+            return mock_toc_cls.return_value
+
+        mock_toc_cls.side_effect = record_document
+
+        result = runner.invoke(
+            cli, ["generate-toc", "--force", *self.OCR_DPI_ARGS, str(scanned_pdf), str(tmp_path / "output.pdf")]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert seen == {"toc": BOOKMARKS, "ocr_pages": [True] * len(BOOKMARKS)}
+        assert mock_toc_cls.return_value.run.call_args.kwargs["force"] is True
+
+    @pytest.mark.parametrize(("force", "ocr_pages"), [(False, [False, True]), (True, [True, True])])
+    def test_extract_text_ocrs_the_pages_without_text_or_with_force_every_page(
+        self, runner: CliRunner, mixed_pdf: Path, tmp_path: Path, force: bool, ocr_pages: list[bool]
+    ) -> None:
+        """A document in which most pages have text is OCR'd too, on its pages without text."""
+        output = tmp_path / "output.pdf"
+
+        result = runner.invoke(
+            cli, ["extract-text", *self.OCR_DPI_ARGS, *(["--force"] if force else []), str(mixed_pdf), str(output)]
+        )
+
+        assert result.exit_code == 0, result.output
+        with pymupdf.open(output) as doc:
+            assert [bool(ocr_word_boxes(page)) for page in doc] == ocr_pages
+
+    def test_extract_text_leaves_a_document_with_text_on_every_page(
+        self, runner: CliRunner, cli_console: Console, tmp_path: Path
+    ) -> None:
+        input_pdf, output = tmp_path / "input.pdf", tmp_path / "output.pdf"
+        _create_valid_pdf(input_pdf)
+
+        result = runner.invoke(cli, ["extract-text", str(input_pdf), str(output)])
+
+        assert result.exit_code == 0, result.output
+        assert "Every page already has text" in cli_console.export_text()
+        assert not output.exists()
