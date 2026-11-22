@@ -39,6 +39,7 @@ from pdfalive.processors.toc_generator import (
     _snippet_key,
     _strip_subset_prefix,
     _weighted_median,
+    check_no_existing_toc,
     filter_features_for_llm,
     serialize_features_compact,
 )
@@ -244,26 +245,31 @@ def sample_toc_response():
     )
 
 
+class TestCheckNoExistingTOC:
+    """Generating a TOC for a document that has one needs force."""
+
+    EXISTING_TOC = [[1, "Existing Chapter", 1]]
+
+    @pytest.mark.parametrize("force", [False, True])
+    def test_document_without_toc_passes(self, mock_doc, force):
+        mock_doc.get_toc.return_value = []
+
+        check_no_existing_toc(mock_doc, force)
+
+    def test_document_with_toc_needs_force(self, mock_doc):
+        mock_doc.get_toc.return_value = self.EXISTING_TOC
+
+        with pytest.raises(ValueError, match="already has a Table of Contents"):
+            check_no_existing_toc(mock_doc, force=False)
+
+    def test_document_with_toc_passes_with_force(self, mock_doc):
+        mock_doc.get_toc.return_value = self.EXISTING_TOC
+
+        check_no_existing_toc(mock_doc, force=True)
+
+
 class TestTOCGenerator:
     """Tests for TOCGenerator processor."""
-
-    def test_check_for_existing_toc_empty(self, mock_doc, mock_llm):
-        """Test detection when no existing TOC."""
-        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
-
-        result = generator._check_for_existing_toc()
-
-        assert result == []
-
-    def test_check_for_existing_toc_present(self, mock_doc, mock_llm):
-        """Test detection when TOC exists."""
-        existing_toc = [[1, "Existing Chapter", 1]]
-        mock_doc.get_toc.return_value = existing_toc
-        generator = TOCGenerator(doc=mock_doc, llm=mock_llm)
-
-        result = generator._check_for_existing_toc()
-
-        assert result == existing_toc
 
     def test_extract_features(self, mock_doc, mock_llm):
         """Test feature extraction from document."""

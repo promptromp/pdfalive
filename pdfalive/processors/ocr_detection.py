@@ -6,9 +6,37 @@ from multiprocessing import Pool, cpu_count
 import pymupdf
 
 from pdfalive.console import create_console, create_progress
+from pdfalive.processors.printed_pages import TEXT_ONLY_FLAGS
 
 
 console = create_console()
+
+
+def page_has_text(page: pymupdf.Page) -> bool:
+    """Whether a page has any extractable text: a span with non-whitespace text in a text block.
+
+    Any text counts, a single stamped line (a download notice, a Bates number) included,
+    and so does the text of the page's annotations (a FreeText note), which extraction reads.
+
+    Args:
+        page: PyMuPDF Page object.
+
+    Returns:
+        True if the page has text, False otherwise.
+    """
+    page_dict = page.get_text("dict", flags=TEXT_ONLY_FLAGS)
+
+    for block in page_dict.get("blocks", []):
+        # Only check text blocks (type 0), skip image blocks (type 1)
+        if block.get("type") != 0:
+            continue
+
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                if span.get("text", "").strip():
+                    return True
+
+    return False
 
 
 def _check_page_has_text(args: tuple) -> tuple[int, bool]:
@@ -26,27 +54,7 @@ def _check_page_has_text(args: tuple) -> tuple[int, bool]:
     page_idx, input_path = args
 
     doc = pymupdf.open(input_path)
-    page = doc[page_idx]
-
-    page_dict = page.get_text("dict")
-    has_text = False
-
-    for block in page_dict.get("blocks", []):
-        # Only check text blocks (type 0), skip image blocks (type 1)
-        if block.get("type") != 0:
-            continue
-
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
-                text = span.get("text", "").strip()
-                if text:
-                    has_text = True
-                    break
-            if has_text:
-                break
-        if has_text:
-            break
-
+    has_text = page_has_text(doc[page_idx])
     doc.close()
     return page_idx, has_text
 
@@ -154,13 +162,13 @@ class NoTextDetectionStrategy(OCRDetectionStrategy):
 
                 for page_idx in range(pages_to_check):
                     page = doc[page_idx]
-                    if self._page_has_text(page):
+                    if page_has_text(page):
                         pages_with_text += 1
                     progress.advance(task)
         else:
             for page_idx in range(pages_to_check):
                 page = doc[page_idx]
-                if self._page_has_text(page):
+                if page_has_text(page):
                     pages_with_text += 1
 
         # Always need OCR if no pages have text
@@ -215,27 +223,3 @@ class NoTextDetectionStrategy(OCRDetectionStrategy):
 
         text_coverage = pages_with_text / pages_to_check
         return text_coverage < self.min_text_coverage
-
-    def _page_has_text(self, page: pymupdf.Page) -> bool:
-        """Check if a single page has any extractable text.
-
-        Args:
-            page: PyMuPDF Page object.
-
-        Returns:
-            True if the page has text, False otherwise.
-        """
-        page_dict = page.get_text("dict")
-
-        for block in page_dict.get("blocks", []):
-            # Only check text blocks (type 0), skip image blocks (type 1)
-            if block.get("type") != 0:
-                continue
-
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    text = span.get("text", "").strip()
-                    if text:
-                        return True
-
-        return False

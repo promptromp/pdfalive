@@ -19,9 +19,10 @@ import pymupdf
 
 # PyMuPDF's "dict" extraction flags without TEXT_PRESERVE_IMAGES: text lines and spans
 # are identical, but image bytes are not embedded (on scanned books every page carries a
-# full-page image, which makes the default extraction ~35x slower). Folio detection only
-# reads lines, so the block grouping this can change around images does not matter here.
-_TEXT_ONLY_FLAGS = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
+# full-page image, which makes the default extraction ~35x slower). For readers of lines
+# and spans only (folio detection, the per-page text check of OCR), since the block
+# grouping this can change around images does not matter to them.
+TEXT_ONLY_FLAGS = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
 
 # A page's rotation matrix when it is displayed as stored (no /Rotate).
 _UNROTATED = tuple(pymupdf.Identity)
@@ -298,7 +299,7 @@ class PrintedPageMap:
     def from_document(cls, doc: pymupdf.Document) -> "PrintedPageMap":
         """Build the map from the folios printed on every page of ``doc``."""
         folios = [
-            page_folios(doc[page_idx].get_text("dict", flags=_TEXT_ONLY_FLAGS), doc[page_idx].rotation_matrix)
+            page_folios(doc[page_idx].get_text("dict", flags=TEXT_ONLY_FLAGS), doc[page_idx].rotation_matrix)
             for page_idx in range(doc.page_count)
         ]
         return cls.from_folio_candidates([page.candidates for page in folios], [page.header_bottoms for page in folios])

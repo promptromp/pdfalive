@@ -53,10 +53,10 @@ Accepted levels vary by model, not just by provider: `gpt-6-sol` and `gpt-6-luna
 
 OCR is enabled by default. Scanned documents without extractable text will be automatically detected and OCR will be performed to extract text before TOC generation.
 
-	# Default behavior: OCR enabled, text layer discarded (preserves file size)
+	# Default behavior: OCR enabled, OCR text used for TOC generation only
 	pdfalive generate-toc scanned.pdf output.pdf
 
-	# Include OCR text layer in output (makes PDF searchable)
+	# Also keep the OCR text layer in the output (makes the PDF searchable, as extract-text does)
 	pdfalive generate-toc --ocr-output scanned.pdf output.pdf
 
 	# Disable automatic OCR entirely
@@ -105,7 +105,11 @@ Printed TOC page numbers are mapped to PDF pages through the page numbers printe
 
 ### extract-text
 
-Extract text from scanned PDFs using OCR, creating a searchable PDF with an embedded text layer.
+Add an OCR text layer to a scanned PDF, making its text searchable, selectable and extractable.
+
+Each page without text is rendered at `--ocr-dpi` and recognized with Tesseract, and the recognized text is laid invisibly over the page, where its words are shown. Nothing else changes: the page images, page sizes, rotation, links and annotations, and the document's bookmarks and metadata stay as they are, so the file looks the same and grows only by the text. Every page without text is OCR'd, whatever the rest of the document holds (`generate-toc`, by contrast, OCRs only a document in which under 25% of the pages have text). A page with any text at all, even a single stamped line such as a download notice, is left alone, since OCR text would repeat its own. `--force` OCRs every page anyway; pages with text then carry both their own text and the recognized text, so use it for scans whose pages carry such a stamp, not for born-digital pages.
+
+The text layer is written in Tesseract's invisible `GlyphLessFont` and placed as a Form XObject, as OCRmyPDF places its own. PyMuPDF and poppler's `pdftotext` read it with its spaces and line breaks, and pdfplumber joins an occasional pair of words. pdfminer.six lays out text inside a Form XObject only with `LAParams(all_texts=True)` (without it, the page's words run together), and pypdf joins words more often: the layer stores no space characters between words, so extractors infer them from the gaps.
 
 **Basic usage:**
 
@@ -119,7 +123,8 @@ Extract text from scanned PDFs using OCR, creating a searchable PDF with an embe
 	# Modify file in place
 	pdfalive extract-text --inplace input.pdf
 
-	# Force OCR even if document already has text
+	# OCR every page, even when the document already has text
+	# (pages with text then get the recognized text in addition to their own)
 	pdfalive extract-text --force input.pdf output.pdf
 
 	# Use a different language

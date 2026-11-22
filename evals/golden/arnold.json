@@ -3,7 +3,7 @@
   "source_pdf": "data/ocr/arnold.pdf",
   "book_title": "Mathematical Methods of Classical Mechanics (2nd Edition) by V.I. Arnold",
   "postprocess": true,
-  "description": "Golden TOC human-verified (2026-06-09): pipeline output (86 entries) with 3 corrections verified against page text (Appendix 14 -> p473, Chapter 7 -> p180 [same-title-as-subsection-34 confusion], Preface to 2nd ed -> p8) and one level fix (s32 -> L3). An earlier 221-entry bookmark set had systematically late-by-one pages; its lettered subsections remain a future coverage target. Scanned book: pipeline runs against a locally pre-OCRed copy (recreate via: pdfalive extract-text data/arnold.pdf data/ocr/arnold.pdf).",
+  "description": "Golden TOC human-verified (2026-06-09): pipeline output (86 entries) with 3 corrections verified against page text (Appendix 14 -> p473, Chapter 7 -> p180 [same-title-as-subsection-34 confusion], Preface to 2nd ed -> p8) and one level fix (s32 -> L3). An earlier 221-entry bookmark set had systematically late-by-one pages; its lettered subsections remain a future coverage target. Scanned book: pipeline runs against a locally pre-OCRed copy (made via: pdfalive extract-text data/arnold.pdf data/ocr/arnold.pdf, before extract-text kept the original pages; a copy made with the current extract-text has its pages in points rather than render units, so its prompts differ and the cassette must be re-recorded against it).",
   "entries": [
     {
       "level": 1,

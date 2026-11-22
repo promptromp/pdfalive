@@ -9,6 +9,7 @@ from pdfalive.processors.ocr_detection import (
     NoTextDetectionStrategy,
     OCRDetectionStrategy,
     _check_page_has_text,
+    page_has_text,
 )
 
 
@@ -192,9 +193,7 @@ class TestNoTextDetectionStrategy:
         assert doc.__getitem__.call_count == 2
 
     def test_page_has_text_with_mixed_blocks(self):
-        """Test _page_has_text with mix of text and image blocks."""
-        strategy = NoTextDetectionStrategy()
-
+        """Test page_has_text with mix of text and image blocks."""
         page = MagicMock()
         page.get_text.return_value = {
             "blocks": [
@@ -207,14 +206,12 @@ class TestNoTextDetectionStrategy:
             ]
         }
 
-        result = strategy._page_has_text(page)
+        result = page_has_text(page)
 
         assert result is True
 
     def test_page_has_text_missing_keys(self):
-        """Test _page_has_text handles missing dictionary keys gracefully."""
-        strategy = NoTextDetectionStrategy()
-
+        """Test page_has_text handles missing dictionary keys gracefully."""
         page = MagicMock()
         page.get_text.return_value = {
             "blocks": [
@@ -225,7 +222,7 @@ class TestNoTextDetectionStrategy:
             ]
         }
 
-        result = strategy._page_has_text(page)
+        result = page_has_text(page)
 
         assert result is False
 
