@@ -16,16 +16,8 @@ from typing import NamedTuple
 
 import pymupdf
 
+from pdfalive.processors.page_text import TEXT_ONLY_FLAGS, displayed_page_dict
 
-# PyMuPDF's "dict" extraction flags without TEXT_PRESERVE_IMAGES: text lines and spans
-# are identical, but image bytes are not embedded (on scanned books every page carries a
-# full-page image, which makes the default extraction ~35x slower). For readers of lines
-# and spans only (folio detection, the per-page text check of OCR), since the block
-# grouping this can change around images does not matter to them.
-TEXT_ONLY_FLAGS = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
-
-# A page's rotation matrix when it is displayed as stored (no /Rotate).
-_UNROTATED = tuple(pymupdf.Identity)
 
 # Largest |sin| of a text line's tilt still read as horizontal: scans are deskewed to
 # within a few degrees, while watermarks and margin notes are set at steep angles.
@@ -91,27 +83,24 @@ def _unspaced_number(span_text: str) -> str:
     return stripped.replace(" ", "") if _LETTER_SPACED_NUMBER.fullmatch(stripped) else span_text
 
 
-def _horizontal_text_lines(page_dict: dict, rotation: pymupdf.Matrix) -> list[_TextLine]:
-    """Return the page's non-empty text lines that read horizontally as displayed.
+def _horizontal_text_lines(page_dict: dict) -> list[_TextLine]:
+    """Return the page's non-empty text lines that read horizontally (as displayed).
 
-    Coordinates are mapped through ``rotation`` (the page's rotation matrix) so that a
-    page with a ``/Rotate`` entry is judged as it is displayed. Tilted lines (e.g. a
-    vertical or diagonal watermark) are skipped: their extent spans much of the page and
-    says nothing about where a folio sits. Spans are joined with spaces, as OCR text
-    layers put each word in its own span; a span that is one letter-spaced number
-    loses its inner spaces.
+    Tilted lines (e.g. a vertical or diagonal watermark) are skipped: their extent spans
+    much of the page and says nothing about where a folio sits. Spans are joined with
+    spaces, as OCR text layers put each word in its own span; a span that is one
+    letter-spaced number loses its inner spaces.
     """
-    linear = pymupdf.Matrix(rotation.a, rotation.b, rotation.c, rotation.d, 0, 0)
     lines = []
     for block in page_dict.get("blocks", []):
         for line in block.get("lines", []):
-            direction = pymupdf.Point(line.get("dir", (1.0, 0.0))) * linear
+            direction = pymupdf.Point(line.get("dir", (1.0, 0.0)))
             if direction.x <= 0 or abs(direction.y) > _MAX_HORIZONTAL_TILT * abs(direction):
                 continue
             spans = [span for span in line.get("spans", []) if span.get("bbox")]
             text = " ".join(_unspaced_number(span.get("text", "")) for span in spans).strip()
             if text:
-                rects = [pymupdf.Rect(span["bbox"]) * rotation for span in spans]
+                rects = [pymupdf.Rect(span["bbox"]) for span in spans]
                 lines.append(_TextLine(top=min(r.y0 for r in rects), bottom=max(r.y1 for r in rects), text=text))
     return lines
 
@@ -140,9 +129,9 @@ class _FolioLine(NamedTuple):
     in_header: bool
 
 
-def _folio_lines(page_dict: dict, rotation: pymupdf.Matrix) -> list[_FolioLine]:
+def _folio_lines(page_dict: dict) -> list[_FolioLine]:
     """Return the page's edge lines that hold a folio candidate (see page_folios())."""
-    lines = [line for line in _horizontal_text_lines(page_dict, rotation) if _EDGE_LINE_CONTENT.search(line.text)]
+    lines = [line for line in _horizontal_text_lines(page_dict) if _EDGE_LINE_CONTENT.search(line.text)]
     rows = _rows(lines)
     first_bottom_row = max(0, len(rows) - _EDGE_ROWS)
     edge_rows = sorted({*range(min(_EDGE_ROWS, len(rows))), *range(first_bottom_row, len(rows))})
@@ -160,11 +149,11 @@ class PageFolios(NamedTuple):
     # The numbers that may be the folio printed on the page (usually zero or one).
     candidates: set[int]
     # Candidate printed in the page's running header -> the header's bottom edge, as a
-    # fraction of the page height. Empty for a page displayed rotated (see page_folios()).
+    # fraction of the (displayed) page height.
     header_bottoms: dict[int, float]
 
 
-def page_folios(page_dict: dict, rotation: pymupdf.Matrix = pymupdf.Identity) -> PageFolios:
+def page_folios(page_dict: dict) -> PageFolios:
     """Return the numbers that may be the folio printed on a page, and which sit in its running header.
 
     Folios sit in the running header or footer: in one of the _EDGE_ROWS outermost rows
@@ -176,18 +165,17 @@ def page_folios(page_dict: dict, rotation: pymupdf.Matrix = pymupdf.Identity) ->
     not also among its bottom rows (a page of few rows has no header to tell apart). The
     header ends with the bottom edge of the folio's line (the topmost, should the number
     recur among the top rows), as the running title shares the folio's row and the page's
-    text below it starts lower. Header positions are unrotated page coordinates, as the
-    TOC generator reads them, so a page displayed rotated (any ``rotation`` but the
-    identity) reports none.
+    text below it starts lower.
 
     Args:
-        page_dict: The page's ``get_text("dict")`` structure.
-        rotation: The page's rotation matrix (``page.rotation_matrix``).
+        page_dict: The page's text structure as displayed (``displayed_page_dict()``), so
+            a page shown rotated through ``/Rotate`` is read as it is displayed, and header
+            positions are where the TOC generator reads them.
     """
-    folio_lines = _folio_lines(page_dict, rotation)
+    folio_lines = _folio_lines(page_dict)
     page_height = page_dict.get("height", 0)
     header_bottoms: dict[int, float] = {}
-    if tuple(rotation) == _UNROTATED and page_height > 0:
+    if page_height > 0:
         for folio_line in folio_lines:
             if folio_line.in_header:
                 bottom = folio_line.line.bottom / page_height
@@ -299,8 +287,7 @@ class PrintedPageMap:
     def from_document(cls, doc: pymupdf.Document) -> "PrintedPageMap":
         """Build the map from the folios printed on every page of ``doc``."""
         folios = [
-            page_folios(doc[page_idx].get_text("dict", flags=TEXT_ONLY_FLAGS), doc[page_idx].rotation_matrix)
-            for page_idx in range(doc.page_count)
+            page_folios(displayed_page_dict(doc[page_idx], flags=TEXT_ONLY_FLAGS)) for page_idx in range(doc.page_count)
         ]
         return cls.from_folio_candidates([page.candidates for page in folios], [page.header_bottoms for page in folios])
 

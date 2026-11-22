@@ -23,9 +23,12 @@ def insert_words(page: pymupdf.Page) -> None:
         page.insert_text(point * page.derotation_matrix, word, fontsize=fontsize, rotate=page.rotation)
 
 
-def text_page(doc: pymupdf.Document, rotation: int = 0, cropbox: pymupdf.Rect | None = None) -> pymupdf.Page:
-    """Add a page showing SHOWN_WORDS as text."""
-    page = doc.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+def text_page(
+    doc: pymupdf.Document, rotation: int = 0, cropbox: pymupdf.Rect | None = None, sideways: bool = False
+) -> pymupdf.Page:
+    """Add a page showing SHOWN_WORDS as text; stored with width and height swapped if ``sideways``."""
+    width, height = (PAGE_HEIGHT, PAGE_WIDTH) if sideways else (PAGE_WIDTH, PAGE_HEIGHT)
+    page = doc.new_page(width=width, height=height)
     if cropbox is not None:
         page.set_cropbox(cropbox)
     page.set_rotation(rotation)

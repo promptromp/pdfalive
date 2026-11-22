@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from pdfalive.console import create_console, create_progress, safe_text
 from pdfalive.models.toc import TOC, PostprocessedTOC, TOCEntry, TOCFeature
+from pdfalive.processors.page_text import displayed_page_dict
 from pdfalive.processors.printed_pages import PrintedPageMap
 from pdfalive.prompts import (
     TOC_GENERATOR_CONTINUATION_SYSTEM_PROMPT,
@@ -985,7 +986,7 @@ def _append_page_features(
     spans of its first max_lines_per_block lines), and buffers the first line of each later
     text block for Phase 2 (_insert_heading_candidates).
     """
-    page_dict = page.get_text("dict")
+    page_dict = displayed_page_dict(page)
     page_height = page_dict.get("height", page.rect.height)
 
     for block_ix, block in enumerate(page_dict["blocks"]):
@@ -2172,7 +2173,7 @@ number exactly as printed.
 
         for page_idx in page_order:
             page = self.doc[page_idx]
-            page_dict = page.get_text("dict")
+            page_dict = displayed_page_dict(page)
             page_height = page_dict.get("height", _DEFAULT_PAGE_HEIGHT)
             header_limit = self._running_header_limit(page_idx + 1, _HEADING_SEARCH_HEADER_Y_THRESHOLD)
 
@@ -2221,7 +2222,7 @@ number exactly as printed.
             return False
 
         page = self.doc[page_idx]
-        page_dict = page.get_text("dict")
+        page_dict = displayed_page_dict(page)
         page_height = page_dict.get("height", _DEFAULT_PAGE_HEIGHT)
 
         for block in page_dict.get("blocks", []):

@@ -6,7 +6,7 @@ from multiprocessing import Pool, cpu_count
 import pymupdf
 
 from pdfalive.console import create_console, create_progress
-from pdfalive.processors.printed_pages import TEXT_ONLY_FLAGS
+from pdfalive.processors.page_text import TEXT_ONLY_FLAGS
 
 
 console = create_console()

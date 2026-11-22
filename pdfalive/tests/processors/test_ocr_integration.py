@@ -12,6 +12,12 @@ from pdfalive.processors.ocr_detection import NoTextDetectionStrategy
 from pdfalive.processors.ocr_processor import OCRProcessor
 from pdfalive.processors.toc_generator import TOCGenerator, apply_toc_to_document
 from pdfalive.tests import fixtures
+from pdfalive.tests.scanned_pages import OCR_DPI, text_page
+
+
+# How far apart, as a fraction of the page height, the OCR words of one page shown at two
+# rotations may be: the renders OCR reads are the same page, rasterized from other storage.
+SHOWN_Y_TOLERANCE = 0.01
 
 
 @pytest.fixture
@@ -126,6 +132,26 @@ class TestOCRIntegration:
         spans = [span for block in features for line in block for span in line]
         assert spans
         assert all(span.is_ocr_line for span in spans)
+
+    @staticmethod
+    def _ocr_line_positions(rotation: int) -> dict[str, float | None]:
+        """TOC feature positions of the OCR text of a page shown landscape with ``rotation`` (stored portrait for
+        a quarter turn, so every rotation shows the same page)."""
+        with pymupdf.open() as doc:
+            text_page(doc, rotation, sideways=rotation in (90, 270))
+            processor = OCRProcessor(language="eng", dpi=OCR_DPI, num_processes=1, include_pages_with_text=True)
+            ocr_doc = processor.process_in_memory(doc, show_progress=False)
+        features = TOCGenerator(doc=ocr_doc, llm=MagicMock())._extract_features(ocr_doc, show_progress=False)
+        return {span.text: span.y_position for block in features for line in block for span in line if span.is_ocr_line}
+
+    @pytest.mark.parametrize("rotation", [90, 180, 270])
+    def test_toc_features_of_the_ocr_text_are_positioned_as_displayed(self, rotation: int):
+        """OCR keeps a page's /Rotate; TOC generation reads its text where it is shown, as on the page shown as
+        stored."""
+        displayed = self._ocr_line_positions(0)
+
+        assert displayed
+        assert self._ocr_line_positions(rotation) == pytest.approx(displayed, abs=SHOWN_Y_TOLERANCE)
 
 
 class TestNoOcrOutputFlag:

@@ -31,6 +31,7 @@ from pdfalive.processors.toc_generator import (
     _extract_features_from_page_range,
     _extract_toc_like_lines,
     _HeadingTitle,
+    _insert_heading_candidates,
     _is_bold_font,
     _is_heading_candidate,
     _line_spans,
@@ -119,7 +120,15 @@ def _mock_doc(*pages: list[dict]) -> MagicMock:
     doc.page_count = len(pdf_pages)
     doc.name = None
     doc.__iter__ = lambda self: iter(pdf_pages)
+    doc.__getitem__ = lambda self, index: pdf_pages[index]
     return doc
+
+
+def _blank_page() -> MagicMock:
+    """A mock page that shows no text."""
+    page = MagicMock()
+    page.get_text.return_value = {"height": _MOCK_PAGE_HEIGHT, "blocks": []}
+    return page
 
 
 def make_refined_toc(entries_data: list[tuple[str, int, int]]) -> PostprocessedTOC:
@@ -224,6 +233,8 @@ def mock_doc():
         ],
     }
     doc.__iter__ = lambda self: iter([page1, page2])
+    # Pages read by index (the folio scan, heading searches) show no text
+    doc.__getitem__.return_value.get_text.return_value = {"height": page_height, "blocks": []}
 
     return doc
 
@@ -3951,10 +3962,11 @@ class TestCorrectRunningHeaderPages:
 
     @pytest.fixture
     def mock_doc(self):
-        """Create a mock document for running header tests."""
+        """Create a mock document for running header tests: its pages show no text."""
         doc = MagicMock()
         doc.page_count = 10
         doc.name = None
+        doc.__getitem__.return_value.get_text.return_value = {"height": 800.0, "blocks": []}
         return doc
 
     @pytest.fixture
@@ -4092,7 +4104,7 @@ class TestCorrectRunningHeaderPages:
                 },
             ],
         }
-        mock_doc.__getitem__ = lambda self_doc, idx: page7 if idx == 6 else MagicMock()
+        mock_doc.__getitem__ = lambda self_doc, idx: page7 if idx == 6 else _blank_page()
 
         result, _sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
         assert result.entries[0].page_number == 7
@@ -4124,7 +4136,7 @@ class TestCorrectRunningHeaderPages:
                 },
             ],
         }
-        mock_doc.__getitem__ = lambda self_doc, idx: page4 if idx == 3 else MagicMock()
+        mock_doc.__getitem__ = lambda self_doc, idx: page4 if idx == 3 else _blank_page()
 
         result, _sightings = generator._correct_running_header_pages(toc, generator._page_zone_text(features))
         assert result.entries[0].page_number == 5
@@ -4901,6 +4913,7 @@ class TestFilterFeaturesForLlm:
             ],
         }
         doc.__iter__ = lambda self: iter([page])
+        doc.__getitem__ = lambda self, index: [page][index]
 
         captured_messages = []
         mock_structured = MagicMock()
@@ -5750,3 +5763,121 @@ class TestOcrTextLayerLines:
         payload = _payload_texts(_extract_sequentially(page))
 
         assert payload == [_OCR_BODY_LINE, body_span["text"]]
+
+
+class TestRotatedPages:
+    """Positions are read where text is displayed, on pages shown rotated through /Rotate too.
+
+    PyMuPDF reports text in unrotated coordinates, where a page stored sideways has its
+    displayed top at a side edge.
+    """
+
+    PAGE_WIDTH, PAGE_HEIGHT = 400, 600
+    # A crop of the displayed page, in display coordinates.
+    DISPLAY_CROPBOX = pymupdf.Rect(30, 40, 370, 560)
+    HEADER = "RUNNING HEADER TITLE"
+    HEADING = "Chapter Seven Results"
+    BODY = "Body text of the chapter continues here."
+    BODY_LINES = ("First body paragraph line.", "Second body paragraph line.", "Third body paragraph line.")
+    # A heading candidate past Phase 1's blocks, at 1.17x the body size: kept by Phase 2 only
+    # under its relaxed bottom-of-page ratio (_HEADING_FONT_SIZE_RATIO), i.e. if read near the bottom.
+    BOTTOM_CANDIDATE = "Closing Section Notes"
+    # Where each line's baseline starts on the page as displayed: (x, y fraction of the height, font size).
+    HEADER_LINE = (40, 0.04, 10)
+    BODY_LINE = (40, 0.45, 10)
+    MIDDLE_HEADING_LINE = (40, 0.3, 18)
+    BOTTOM_HEADING_LINE = (40, 0.85, 18)
+    BOTTOM_CANDIDATE_LINE = (40, 0.85, 11.7)
+    ROTATIONS = [0, 90, 180, 270]
+
+    def _page(
+        self,
+        doc: pymupdf.Document,
+        rotation: int,
+        lines: list[tuple[str, tuple[int, float, float]]],
+        cropped: bool = False,
+    ) -> None:
+        """Add a page displayed portrait with ``rotation`` (stored sideways for a quarter turn), cropped to
+        DISPLAY_CROPBOX if ``cropped``, holding ``lines`` upright as displayed."""
+        sideways = rotation in (90, 270)
+        width, height = (self.PAGE_HEIGHT, self.PAGE_WIDTH) if sideways else (self.PAGE_WIDTH, self.PAGE_HEIGHT)
+        page = doc.new_page(width=width, height=height)
+        page.set_rotation(rotation)
+        if cropped:
+            page.set_cropbox(self.DISPLAY_CROPBOX * page.derotation_matrix)
+        for text, (x, y_fraction, size) in lines:
+            point = pymupdf.Point(x, y_fraction * page.rect.height)
+            page.insert_text(point * page.derotation_matrix, text, fontsize=size, rotate=rotation)
+
+    def _feature_doc(self, rotation: int, cropped: bool = False) -> pymupdf.Document:
+        """A page with more blocks than Phase 1 reads, the last a heading candidate near the bottom."""
+        body = [(text, (40, 0.45 + 0.1 * row, 10)) for row, text in enumerate(self.BODY_LINES)]
+        doc = pymupdf.open()
+        self._page(
+            doc,
+            rotation,
+            [
+                (self.HEADER, self.HEADER_LINE),
+                (self.HEADING, self.MIDDLE_HEADING_LINE),
+                *body,
+                (self.BOTTOM_CANDIDATE, self.BOTTOM_CANDIDATE_LINE),
+            ],
+            cropped,
+        )
+        return doc
+
+    @staticmethod
+    def _y_positions(features: list) -> dict[str, float | None]:
+        return {span.text: span.y_position for line in _lines(features) for span in line}
+
+    def _displayed_y_positions(self, cropped: bool) -> dict[str, float | None]:
+        """The feature positions of the page shown as stored."""
+        with self._feature_doc(0, cropped) as doc:
+            return self._y_positions(TOCGenerator(doc, MagicMock())._extract_features(doc, show_progress=False))
+
+    @pytest.mark.parametrize("cropped", [False, True], ids=["uncropped", "cropped"])
+    def test_the_page_reaches_phase_2(self, cropped):
+        assert self.BOTTOM_CANDIDATE in self._displayed_y_positions(cropped)
+
+    @pytest.mark.parametrize("rotation", ROTATIONS)
+    @pytest.mark.parametrize("cropped", [False, True], ids=["uncropped", "cropped"])
+    def test_features_are_positioned_as_displayed(self, rotation, cropped):
+        with self._feature_doc(rotation, cropped) as doc:
+            features = TOCGenerator(doc, MagicMock())._extract_features(doc, show_progress=False)
+
+        assert self._y_positions(features) == self._displayed_y_positions(cropped)
+
+    @pytest.mark.parametrize("rotation", ROTATIONS)
+    @pytest.mark.parametrize("cropped", [False, True], ids=["uncropped", "cropped"])
+    def test_worker_features_are_positioned_as_displayed(self, rotation, cropped, tmp_path):
+        path = tmp_path / "rotated.pdf"
+        with self._feature_doc(rotation, cropped) as doc:
+            doc.save(path)
+
+        _, _, features, buffered = _extract_features_from_page_range(
+            (0, 1, str(path), DEFAULT_MAX_BLOCKS_PER_PAGE, DEFAULT_MAX_LINES_PER_BLOCK, 1)
+        )
+        _insert_heading_candidates(features, buffered)
+
+        assert self._y_positions(features) == self._displayed_y_positions(cropped)
+
+    @pytest.mark.parametrize("rotation", ROTATIONS)
+    def test_heading_search_skips_the_running_header(self, rotation):
+        """The heading's title in the first page's running header is not its heading; the second page's is."""
+        with pymupdf.open() as doc:
+            self._page(doc, rotation, [(self.HEADING, self.HEADER_LINE), (self.BODY, self.BODY_LINE)])
+            self._page(doc, rotation, [(self.HEADING, self.MIDDLE_HEADING_LINE), (self.BODY, self.BODY_LINE)])
+
+            found = TOCGenerator(doc, MagicMock())._find_heading_page(_HeadingTitle.of(self.HEADING), 1, 3, hint_page=1)
+
+        assert found == 2
+
+    @pytest.mark.parametrize("rotation", ROTATIONS)
+    @pytest.mark.parametrize(("heading_line", "expected"), [(BOTTOM_HEADING_LINE, True), (MIDDLE_HEADING_LINE, False)])
+    def test_bottom_of_page_search_reads_the_page_as_displayed(self, rotation, heading_line, expected):
+        with pymupdf.open() as doc:
+            self._page(doc, rotation, [(self.BODY, self.BODY_LINE), (self.HEADING, heading_line)])
+
+            found = TOCGenerator(doc, MagicMock())._page_has_heading_in_bottom(1, _HeadingTitle.of(self.HEADING))
+
+        assert found is expected

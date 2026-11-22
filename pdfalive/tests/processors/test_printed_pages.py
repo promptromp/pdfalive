@@ -5,11 +5,13 @@ import random
 import pymupdf
 import pytest
 
+from pdfalive.processors.page_text import displayed_page_dict
 from pdfalive.processors.printed_pages import (
     FOLIO_CONFIRMATION_WINDOW,
     MAX_FOLIO_EXTRAPOLATION,
     MIN_ALTERNATE_SEQUENCE_FOLIOS,
     MIN_FOLIO_PAGE_COVERAGE,
+    PageFolios,
     PrintedPageMap,
     page_folios,
 )
@@ -172,7 +174,7 @@ class TestPageFolioCandidates:
             for y, text in ((HEADER_Y, str(FOLIO)), (BODY_Y, "Body text of the page")):
                 page.insert_text(pymupdf.Point(LEFT_X, y) * page.derotation_matrix, text, rotate=rotation)
 
-            assert page_folios(page.get_text("dict"), page.rotation_matrix).candidates == {FOLIO}
+            assert page_folios(displayed_page_dict(page)).candidates == {FOLIO}
 
     def test_ignores_spans_without_bbox(self):
         page_dict = {"blocks": [{"lines": [{"spans": [{"text": "7"}]}]}]}
@@ -247,21 +249,28 @@ class TestPageHeaderFolios:
     def test_reports_folios_printed_in_the_running_header(self, page_dict, expected):
         assert page_folios(page_dict).header_bottoms == pytest.approx(expected)
 
-    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
-    def test_reports_header_positions_only_for_pages_displayed_as_stored(self, rotation):
-        """A /Rotate page's header, found as displayed, has no position in the unrotated coordinates the TOC
-        generator reads; its folio is still a candidate."""
+    @staticmethod
+    def _header_page_folios(rotation: int) -> PageFolios:
+        """The folios of a page displayed portrait with ``rotation`` (stored sideways for a quarter turn), its folio
+        in the header, read as displayed."""
+        width, height = pymupdf.paper_size("a4")  # new_page()'s default size, as the other tests use
+        if rotation in (90, 270):
+            width, height = height, width
         with pymupdf.open() as doc:
-            page = doc.new_page()
+            page = doc.new_page(width=width, height=height)
             page.set_rotation(rotation)
             lines = [(HEADER_Y, str(FOLIO)), *((BODY_Y + row * LINE_SPACING, "Body text") for row in range(BODY_ROWS))]
             for y, text in lines:
                 page.insert_text(pymupdf.Point(LEFT_X, y) * page.derotation_matrix, text, rotate=rotation)
+            return page_folios(displayed_page_dict(page))
 
-            folios = page_folios(page.get_text("dict"), page.rotation_matrix)
+    @pytest.mark.parametrize("rotation", [90, 180, 270])
+    def test_reports_header_positions_of_rotated_pages_as_displayed(self, rotation):
+        """A /Rotate page's header ends where it is displayed, which is where the TOC generator reads positions."""
+        folios = self._header_page_folios(rotation)
 
         assert folios.candidates == {FOLIO}
-        assert bool(folios.header_bottoms) == (rotation == 0)
+        assert folios.header_bottoms == pytest.approx(self._header_page_folios(0).header_bottoms)
 
 
 def _consecutive_folios(first_folio: int, count: int) -> list[set[int]]:
